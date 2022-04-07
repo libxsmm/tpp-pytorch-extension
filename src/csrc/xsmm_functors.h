@@ -1120,6 +1120,7 @@ class MulReduceTPP : public BaseTPP {
     auto dt3 = XsmmDtype<T3>();
     libxsmm_blasint ld = 1;
     libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
+#if 0
     meqn_push_unary_op(
         my_eqn0,
         LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_ADD,
@@ -1131,6 +1132,13 @@ class MulReduceTPP : public BaseTPP {
         LIBXSMM_MELTW_TYPE_BINARY_MUL,
         LIBXSMM_MELTW_FLAG_BINARY_NONE,
         LIBXSMM_DATATYPE_F32);
+#else
+    meqn_push_binary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_BINARY_MUL_AND_REDUCE_TO_SCALAR_OP_ADD,
+        LIBXSMM_MELTW_FLAG_BINARY_NONE,
+        LIBXSMM_DATATYPE_F32); 
+#endif
     meqn_push_arg(my_eqn0, M, N, M, 0, 0, dt1);
     meqn_push_arg(my_eqn0, M, N, M, 1, 0, dt2);
     debug_print_eqn_tree(my_eqn0);
