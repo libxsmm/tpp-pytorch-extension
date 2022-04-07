@@ -475,6 +475,7 @@ class UnaryTPP : public BaseTPP {
 
  protected:
   std::string hash_str() override {
+#if 0
     char hash[200];
     snprintf(
         hash,
@@ -489,6 +490,16 @@ class UnaryTPP : public BaseTPP {
         dt_compute,
         flags,
         type);
+#else
+  libxsmm_descriptor_blob blob;
+  libxsmm_descriptor_blob *blob_ptr = (libxsmm_descriptor_blob*) &blob;
+  const libxsmm_meltw_descriptor *const desc = libxsmm_meltw_descriptor_init2(&blob,
+    dt_in, LIBXSMM_DATATYPE_UNSUPPORTED, LIBXSMM_DATATYPE_UNSUPPORTED, dt_compute, dt_out, rows, cols,
+    ldi, ldo, 0, 0,
+    (unsigned short)flags, (unsigned short)type, LIBXSMM_MELTW_OPERATION_UNARY);
+  std::string hash((char*)blob_ptr, (char*)blob_ptr+32);
+  return hash;
+#endif
     return std::string(hash);
   }
   void* build_kernel() override {
@@ -574,6 +585,7 @@ class BinaryTPP : public BaseTPP {
 
  protected:
   std::string hash_str() override {
+#if 0
     char hash[200];
     snprintf(
         hash,
@@ -591,6 +603,16 @@ class BinaryTPP : public BaseTPP {
         flags,
         type);
     return std::string(hash);
+#else
+  libxsmm_descriptor_blob blob;
+  libxsmm_descriptor_blob *blob_ptr = (libxsmm_descriptor_blob*) &blob;
+  const libxsmm_meltw_descriptor *const desc = libxsmm_meltw_descriptor_init2(&blob,
+    dt_in0, dt_in1, LIBXSMM_DATATYPE_UNSUPPORTED, dt_compute, dt_out, rows, cols,
+    ldi0, ldo, ldi1, 0,
+    (unsigned short)flags, (unsigned short)type, LIBXSMM_MELTW_OPERATION_BINARY);
+  std::string hash((char*)blob_ptr, (char*)blob_ptr+32);
+  return hash;
+#endif
   }
   void* build_kernel() override {
     libxsmm_meltw_binary_shape shape = libxsmm_create_meltw_binary_shape(
@@ -2359,6 +2381,7 @@ class GemmTPP {
 
    protected:
     std::string hash_str() override {
+#if 0
       char hash[200];
       snprintf(
           hash,
@@ -2378,6 +2401,18 @@ class GemmTPP {
           p->b_vnni,
           XsmmDtype<Tin>(),
           XsmmDtype<Tout>());
+#else
+  libxsmm_descriptor_blob blob;
+  libxsmm_descriptor_blob *blob_ptr = (libxsmm_descriptor_blob*) &blob;
+  libxsmm_gemm_descriptor *desc = NULL;
+  desc = libxsmm_gemm_descriptor_init(&blob, XsmmDtype<Tin>(),
+    XsmmDtype<Tin>(), LIBXSMM_DATATYPE_F32, XsmmDtype<Tout>(),
+    p->M, p->N, p->K,
+    p->lda, p->ldb, p->ldc,
+    LIBXSMM_GEMM_FLAGS('N', 'N') | LIBXSMM_GEMM_FLAG_DECOMPRESS_A_VIA_BITMASK, config);
+  std::string hash((char*)blob_ptr, (char*)blob_ptr+128);
+  return hash;
+#endif
       return std::string(hash);
     }
     void* build_kernel() override {
