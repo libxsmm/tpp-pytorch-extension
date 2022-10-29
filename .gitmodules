@@ -1,0 +1,3 @@
+[submodule "libxsmm"]
+	path = libxsmm
+	url = https://github.com/libxsmm/libxsmm.git
