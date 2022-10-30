@@ -21,6 +21,7 @@ import argparse
 import glob
 import logging
 import os
+import sys
 import random
 import timeit
 
@@ -405,6 +406,8 @@ def train(args, train_dataset, model, tokenizer):
                 if args.max_steps > 0 and global_step > args.max_steps:
                     epoch_iterator.close()
                     break
+                if args.benchmark_steps > 0 and global_step > args.benchmark_steps:
+                    sys.exit(0)
             if prof:
                 file_prefix = "squad_time%s" % (
                     "_r%d" % args.local_rank if args.local_rank >= 0 else ""
@@ -856,6 +859,12 @@ def main():
     )
     parser.add_argument(
         "--max_steps",
+        default=-1,
+        type=int,
+        help="If > 0: set total number of training steps to perform. Override num_train_epochs.",
+    )
+    parser.add_argument(
+        "--benchmark_steps",
         default=-1,
         type=int,
         help="If > 0: set total number of training steps to perform. Override num_train_epochs.",
