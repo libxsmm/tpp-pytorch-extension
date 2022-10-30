@@ -608,7 +608,7 @@ void fused_lamb_v2_impl(
     int block_size,
     int step,
     bool fused_param_norm) {
-  const int BS = block_size;
+  const long BS = block_size;
   auto num_blocks = t_data.numel() / block_size;
   auto d = GetVLAPtr<T>(t_data, {BS});
   auto g = GetVLAPtr<T>(t_grad, {BS});
