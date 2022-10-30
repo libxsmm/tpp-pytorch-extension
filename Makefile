@@ -6,5 +6,11 @@ format:
 install:
 	python setup.py install
 
+reinstall:
+	pip uninstall -y tpp-pytorch-extension
+	python setup.py clean
+	rm -rf build dist
+	python setup.py install
+
 clean:
 	python setup.py clean

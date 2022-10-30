@@ -109,8 +109,15 @@ sources = [
     "src/csrc/xsmm.cpp",
     "src/csrc/bfloat8.cpp",
 ]
+
+# BERT sources
 sources += glob.glob("src/csrc/bert/pad/*.cpp")
 sources += glob.glob("src/csrc/bert/unpad/*.cpp")
+
+# GNN sources
+sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
+sources += glob.glob("src/csrc/gnn/common/*.cpp")
+sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 
 extra_compile_args = ["-fopenmp", "-g"]
 if platform.processor() != "aarch64":
