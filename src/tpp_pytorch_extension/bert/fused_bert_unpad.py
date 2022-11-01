@@ -57,7 +57,7 @@ def generate_mask(attention_mask):
     nnz1 = nnz.unsqueeze(dim=1).expand([-1, S])
     a = torch.arange(S).expand([B, -1])
     msk = a < nnz1
-    attention_mask = attention_mask[msk].clone()
+    # attention_mask = attention_mask[msk].clone()
     seq_offsets = torch.cat([torch.zeros([1]), nnz // S2]).to(torch.long)
     seq_sqr_offsets = seq_offsets * seq_offsets
     seq_offsets = seq_offsets.cumsum(dim=0)
@@ -366,6 +366,8 @@ class BertSelfAttention(BlockedModule):
     ):
         assert past_key_value == None, "past_key_value not supported"
         self.maybe_block_params()
+        S = attention_mask.shape[-1]
+        S1, S2 = BlockedModule.default_blocking_factors(S)
         if encoder_hidden_states is not None:
             assert (
                 encoder_hidden_states.shape == hidden_states.shape
@@ -376,13 +378,13 @@ class BertSelfAttention(BlockedModule):
             encoder_hidden_states = self.get_blocked_tensor(
                 encoder_hidden_states,
                 self.blocked_input_signature,
-                [None, self.attention_head_size],
+                [S2, self.attention_head_size],
             )
         orig_hidden_states = hidden_states
         hidden_states = self.get_blocked_tensor(
             hidden_states,
             self.blocked_input_signature,
-            [None, self.attention_head_size],
+            [S2, self.attention_head_size],
         )
         hidden_states = hidden_states.cvt_to(self.layer_dtype)
         # print(f"hidden_states: {hidden_states.shape}")
