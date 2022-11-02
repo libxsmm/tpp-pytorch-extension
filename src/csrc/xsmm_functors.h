@@ -1124,7 +1124,6 @@ class BCastMulTPP {
   int ldi;
   int ldo;
   BinaryTPP kernel;
-  ConvertTPP<Tin, Tout> cvt;
 };
 
 // ############################# Broadcast & Multiplication Addition TPP
@@ -1171,7 +1170,6 @@ class BCastMulAddTPP {
   int ldi;
   int ldo;
   BinaryTPP kernel;
-  ConvertTPP<Tin, Tout> cvt;
 };
 
 template <typename Tin, typename Tout>

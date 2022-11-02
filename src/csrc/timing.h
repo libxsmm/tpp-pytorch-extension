@@ -53,7 +53,8 @@ constexpr int NUM_TIMERS = ((LAST_TIMER + 7) / 8) * 8;
 extern double pass_timers[MAX_THREADS][3][NUM_TIMERS];
 extern double master_pass_timers[3];
 struct Scope {
-  Scope(std::string const& name) : name(name) {}
+  Scope(std::string const& name)
+      : name(name), master_timer(0.0), detailed_timers{0.0}, flops{0.0} {}
   const std::string name;
   double master_timer;
   double detailed_timers[MAX_THREADS][NUM_TIMERS];
