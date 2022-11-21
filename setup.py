@@ -119,6 +119,10 @@ sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
 sources += glob.glob("src/csrc/gnn/common/*.cpp")
 sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 
+# DLRM sources
+sources += glob.glob("src/csrc/dlrm/*.cpp")
+
+
 extra_compile_args = ["-fopenmp", "-g"]
 if platform.processor() != "aarch64":
     extra_compile_args.append("-march=native")
