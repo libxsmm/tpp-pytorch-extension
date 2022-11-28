@@ -207,7 +207,7 @@ inline int xsmm_get_vnni_block_size(libxsmm_datatype dtype) {
     return 2;
 #endif
   } else if (dtype == LIBXSMM_DATATYPE_BF8) {
-    return 1;
+    return 4;
   } else {
     throw std::invalid_argument("Unsupported datatype");
   }
