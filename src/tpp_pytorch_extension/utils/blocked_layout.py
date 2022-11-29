@@ -15,10 +15,6 @@ import platform
 # from enum import Enum
 # from collections import OrderedDict
 
-_bf16_block_size = 2
-if platform.processor() == "aarch64":
-    _bf16_block_size = 4
-
 
 def _prod(myList):
     ret = 1
@@ -27,17 +23,6 @@ def _prod(myList):
             return None
         ret = ret * x
     return ret
-
-
-def get_vnni_blocking(dtype):
-    if dtype == torch.float32:
-        return 1
-    elif dtype == torch.bfloat16:
-        return _bf16_block_size
-    elif dtype == torch.bfloat8:
-        return 4
-    else:
-        raise ValueError(f"Unsupported dtype '{dtype}'")
 
 
 class BlockingManager(object):

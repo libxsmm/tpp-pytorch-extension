@@ -197,20 +197,44 @@ inline void _mm512_mask_storeu_ps_auto(
 }
 #endif
 
+inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
+  static const std::map<at::ScalarType, libxsmm_datatype> pt2xsmmDtypes = {
+      {at::kDouble, LIBXSMM_DATATYPE_F64},
+      {at::kFloat, LIBXSMM_DATATYPE_F32},
+      {at::kHalf, LIBXSMM_DATATYPE_F16},
+      {at::kBFloat16, LIBXSMM_DATATYPE_BF16},
+      {at::kByte, LIBXSMM_DATATYPE_I8},
+      {at::kChar, LIBXSMM_DATATYPE_I8},
+      {at::kShort, LIBXSMM_DATATYPE_I16},
+      {at::kInt, LIBXSMM_DATATYPE_I32},
+      {at::kLong, LIBXSMM_DATATYPE_I64}};
+
+  return pt2xsmmDtypes.at(dtype);
+}
+
 inline int xsmm_get_vnni_block_size(libxsmm_datatype dtype) {
-  if (dtype == LIBXSMM_DATATYPE_F32) {
-    return 1;
-  } else if (dtype == LIBXSMM_DATATYPE_BF16) {
-#ifdef __aarch64__
-    return 4;
-#else
-    return 2;
-#endif
-  } else if (dtype == LIBXSMM_DATATYPE_BF8) {
-    return 4;
-  } else {
+  int bs = libxsmm_cpuid_dot_pack_factor(dtype);
+  if (bs <= 0) {
     throw std::invalid_argument("Unsupported datatype");
   }
+  return bs;
+}
+
+inline int get_vnni_block_size(at::ScalarType dtype) {
+  auto xsmm_dtype = convert_dtype_pt2xsmm(dtype);
+  return xsmm_get_vnni_block_size(xsmm_dtype);
+}
+
+inline int get_vnni_block_size(caffe2::TypeMeta dtype_) {
+  at::ScalarType dtype = dtype_.toScalarType();
+  auto xsmm_dtype = convert_dtype_pt2xsmm(dtype);
+  return xsmm_get_vnni_block_size(xsmm_dtype);
+}
+
+template <typename T>
+inline int get_vnni_block_size() {
+  auto xsmm_dtype = XsmmDtype<T>();
+  return xsmm_get_vnni_block_size(xsmm_dtype);
 }
 
 inline void debug_print_eqn_tree(libxsmm_blasint eqn_no) {
@@ -1602,20 +1626,15 @@ class XformExtTPP {
     if (xtype == XformTPP::XFORM_N2V_TPP) {
       in_rows_p = out_rows;
       in_cols_p = out_cols;
-      if (dtype == LIBXSMM_DATATYPE_F32) {
+      TPP_ASSERT(in_rows_p % BS == 0, "N2VTPP: unaligned number of rows\n");
+      if (BS == 1) {
         unary_type = LIBXSMM_MELTW_TYPE_UNARY_IDENTITY;
-      } else if (dtype == LIBXSMM_DATATYPE_BF16) {
-#ifdef __aarch64__
-        unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI4;
-#else
+      } else if (BS == 2) {
         unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI2;
-#endif
-        TPP_ASSERT(in_rows_p % BS == 0, "N2VTPP: uneven number of rows\n");
-      } else if (dtype == LIBXSMM_DATATYPE_BF8) {
+      } else if (BS == 4) {
         unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI4;
-        TPP_ASSERT(in_rows_p % BS == 0, "N2VTPP: uneven number of rows\n");
       } else {
-        TPP_ASSERT(false, "N2VTPP: unknown dtype\n");
+        TPP_ASSERT(false, "N2VTPP: unsupported packing size (%d)\n", BS);
       }
     } else {
       in_rows_p = out_cols;
@@ -1629,14 +1648,12 @@ class XformExtTPP {
           TPP_ASSERT(
               in_cols_p % BS == 0, "XposeN2VTPP: uneven number of cols\n");
         } else {
-          if (dtype == LIBXSMM_DATATYPE_BF16) {
-#ifdef __aarch64__
-            unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_VNNI4_TO_VNNI4T;
-#else
+          if (BS == 2) {
             unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_VNNI2_TO_VNNI2T;
-#endif
-          } else {
+          } else if (BS == 4) {
             unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_VNNI4_TO_VNNI4T;
+          } else {
+            TPP_ASSERT(false, "V2VTPP: unsupported packing size (%d)\n", BS);
           }
           TPP_ASSERT(in_rows % BS == 0, "XposeV2VTPP: uneven number of rows\n");
           TPP_ASSERT(
@@ -1664,13 +1681,10 @@ class XformExtTPP {
           in_cols_p / BS,
           ldi / BS,
           ldo,
-#ifdef __aarch64__
-          // This is required due to VNNI blocking of 4 for BF16 on aarch64
-          dtype == LIBXSMM_DATATYPE_BF16 ? LIBXSMM_DATATYPE_F64
-                                         : LIBXSMM_DATATYPE_F32,
-#else
-          LIBXSMM_DATATYPE_F32,
-#endif
+          ((dtype == LIBXSMM_DATATYPE_BF16 && BS == 4) ||
+           (dtype == LIBXSMM_DATATYPE_BF8 && BS == 8))
+              ? LIBXSMM_DATATYPE_F64
+              : LIBXSMM_DATATYPE_F32,
           unary_type);
     }
 

@@ -38,7 +38,7 @@ long H = sizes[3];
 float one_by_sqrt_H = 1.0 / sqrt(H);
 bool dt_low_prec = (t_dCL.dtype() != at::kFloat);
 const bool S2_eq_H = (S2 == H);
-constexpr long BS = 8;
+const long BS = 8;
 
 auto t_dQL = t_QL_T.new_empty({S1, N, S2, H});
 auto t_dQL_V = t_dQL;
@@ -62,7 +62,7 @@ auto t_dAPD = at::empty_like(t_AP);
 auto t_dAPD_V = t_AP.new_empty({N, SS1, S2, S2});
 
 auto null_EHS = false;
-constexpr int VBS = get_vnni_block_size<T>();
+const int VBS = get_vnni_block_size<T>();
 
 if (t_EHS_T.numel() == 0) {
   null_EHS = true;

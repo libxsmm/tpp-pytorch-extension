@@ -23,6 +23,10 @@ def get_rng_state():
     raise NotImplementedError
 
 
+def get_vnni_blocking(dtype):
+    return xsmm_cpp.get_vnni_blocking(dtype)
+
+
 # initialize libxsmm library and random number generator
 xsmm_cpp.init_libxsmm()
 manual_seed(12345)

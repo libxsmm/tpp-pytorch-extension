@@ -19,8 +19,8 @@ from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedModule,
     BlockedTensor,
     get_blocking_signature,
-    get_vnni_blocking,
 )
+from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
 from tpp_pytorch_extension._C import _fused_bert_unpad as fused_bert_cpp
 import time
 from contextlib import contextmanager

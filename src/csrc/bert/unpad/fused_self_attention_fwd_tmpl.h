@@ -41,7 +41,7 @@ bool dt_low_prec = (t_HS.dtype() != at::kFloat);
 bool low_prec_training = (training && dt_low_prec);
 auto t_EHS_orig = t_EHS;
 
-constexpr int VBS = get_vnni_block_size<T>();
+const int VBS = get_vnni_block_size<T>();
 // std::cout << "B: " << B << " S1: " << S1 << " S2: " << S2 << " N: " << N << "
 // H: " << H << std::endl;
 if (t_EHS.numel() == 0) {

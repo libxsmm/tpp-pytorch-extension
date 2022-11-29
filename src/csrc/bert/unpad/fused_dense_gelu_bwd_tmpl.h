@@ -19,7 +19,7 @@ auto Hc = in_sizes[3];
 auto Nk = wt_sizes[0];
 auto Hk = wt_sizes[3];
 
-constexpr int VBS = get_vnni_block_size<T>();
+const int VBS = get_vnni_block_size<T>();
 const auto grad_wt_flag =
     (t_wt.dim() == 5 ? XformTPP::XFORM_N2V_TPP : XformTPP::XFORM_NONE_TPP);
 const auto input_trans_flag =
@@ -53,7 +53,7 @@ auto grad_gelu = GetVLAPtr<T>(t_grad_gelu, {Nk, S2* Hk});
 auto grad_out = GetVLAPtr<T>(t_grad_out, {Nk, S2* Hk});
 auto grad_gelu_V = GetVLAPtr<T>(t_grad_gelu_V, {S2 * Hk});
 
-constexpr long BS = 8;
+const long BS = 8;
 auto Nkb = Nk;
 if (Nk > Nc && Nk % Nc == 0) {
   Nkb = Nc;

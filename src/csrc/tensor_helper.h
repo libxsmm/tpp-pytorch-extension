@@ -14,37 +14,13 @@
 #include "utils.h"
 
 template <typename T>
-inline constexpr int get_vnni_block_size() {
-#ifdef __aarch64__
-  if (std::is_same<T, bfloat16>::value) {
-    return 4;
-  }
-#endif
-  return 4 / sizeof(T);
-}
-
-inline int get_vnni_block_size(caffe2::TypeMeta dtype) {
-  if (dtype == at::kBFloat16) {
-#ifdef __aarch64__
-    return 4;
-#else
-    return 2;
-#endif
-  } else if (dtype == at::kBFloat8) {
-    return 4;
-  } else {
-    return 1;
-  }
-}
-
-template <typename T>
 inline at::Tensor wt_tensor_n2v(
     long Nk,
     long Hk,
     long Nc,
     long Hc,
     at::Tensor& input) {
-  constexpr int BS = get_vnni_block_size<T>();
+  const int BS = get_vnni_block_size<T>();
 #if 0
   TPP_ASSERT(Hc % BS == 0, "Uneven number for Hc\n");
   return input.view({Nk, Nc, Hc/BS, BS, Hk}).permute({0, 1, 2, 4, 3}).contiguous();
@@ -71,7 +47,7 @@ inline at::Tensor wt_tensor_trans_n2v(
     long Nc,
     long Hc,
     at::Tensor& input) {
-  constexpr int BS = get_vnni_block_size<T>();
+  const int BS = get_vnni_block_size<T>();
 #if 0
   TPP_ASSERT(Hk % BS == 0, "Uneven number for Hk\n");
   return input.view({Nk, Nc, Hc, Hk/BS, BS}).permute({0, 1, 3, 2, 4}).contiguous();
@@ -100,7 +76,7 @@ inline at::Tensor wt_tensor_trans_n2v_compact(
     long Nc,
     long Hc,
     at::Tensor& input) {
-  constexpr int BS = get_vnni_block_size<T>();
+  const int BS = get_vnni_block_size<T>();
 #if 0
   TPP_ASSERT(Hk % BS == 0, "Uneven number for Hk\n");
   return input.view({Nk, Nc, Hc, Hk/BS, BS}).permute({1, 0, 3, 2, 4}).contiguous();
@@ -131,7 +107,7 @@ inline at::Tensor wt_tensor_trans_v2v(
     long Nc,
     long Hc,
     at::Tensor& input) {
-  constexpr int BS = get_vnni_block_size<T>();
+  const int BS = get_vnni_block_size<T>();
 #if 0
   TPP_ASSERT(Hc % BS == 0, "Uneven number for Hc\n");
   TPP_ASSERT(Hk % BS == 0, "Uneven number for Hk\n");
@@ -162,7 +138,7 @@ inline at::Tensor wt_tensor_trans_v2v_compact(
     long Nc,
     long Hc,
     at::Tensor& input) {
-  constexpr int BS = get_vnni_block_size<T>();
+  const int BS = get_vnni_block_size<T>();
 #if 0
   TPP_ASSERT(Hc % BS == 0, "Uneven number for Hc\n");
   TPP_ASSERT(Hk % BS == 0, "Uneven number for Hk\n");

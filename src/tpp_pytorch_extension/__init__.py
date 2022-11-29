@@ -18,6 +18,7 @@ except:
     extend_profiler = None
 
 from .utils.xsmm import manual_seed
+from .utils.xsmm import get_vnni_blocking
 from .utils import blocked_layout
 from .utils import bfloat8
 from . import optim
