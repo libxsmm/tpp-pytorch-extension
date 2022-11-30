@@ -12,7 +12,10 @@
 #include <torch/extension.h>
 #include <cstdlib>
 
+#ifdef __x86_64__
 #include <immintrin.h>
+#endif
+
 #include <omp.h>
 #include <sched.h>
 #include <iostream>
