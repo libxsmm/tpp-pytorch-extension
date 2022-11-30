@@ -57,12 +57,12 @@ def generate_mask(attention_mask):
     nnz1 = nnz.unsqueeze(dim=1).expand([-1, S])
     a = torch.arange(S).expand([B, -1])
     msk = a < nnz1
-    # attention_mask = attention_mask[msk].clone()
+    attention_mask = attention_mask[msk].clone()
     seq_offsets = torch.cat([torch.zeros([1]), nnz // S2]).to(torch.long)
     seq_sqr_offsets = seq_offsets * seq_offsets
     seq_offsets = seq_offsets.cumsum(dim=0)
     seq_sqr_offsets = seq_sqr_offsets.cumsum(dim=0)
-    return msk, attention_mask, seq_offsets, seq_sqr_offsets
+    return msk, attention_mask, seq_offsets, seq_sqr_offsets, S2
 
 
 class PadInput(torch.autograd.Function):
@@ -363,11 +363,10 @@ class BertSelfAttention(BlockedModule):
         output_attentions=False,
         seq_offsets=None,
         seq_sqr_offsets=None,
+        S2=None,
     ):
         assert past_key_value == None, "past_key_value not supported"
         self.maybe_block_params()
-        S = attention_mask.shape[-1]
-        S1, S2 = BlockedModule.default_blocking_factors(S)
         if encoder_hidden_states is not None:
             assert (
                 encoder_hidden_states.shape == hidden_states.shape
@@ -914,6 +913,7 @@ class BertAttention(nn.Module):
         output_attentions=False,
         seq_offsets=None,
         seq_sqr_offsets=None,
+        S2=None,
     ):
         self_outputs = self.self(
             hidden_states,
@@ -925,6 +925,7 @@ class BertAttention(nn.Module):
             output_attentions,
             seq_offsets=seq_offsets,
             seq_sqr_offsets=seq_sqr_offsets,
+            S2=S2,
         )
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[
@@ -960,6 +961,7 @@ class BertLayer(nn.Module):
         output_attentions=False,
         seq_offsets=None,
         seq_sqr_offsets=None,
+        S2=None,
     ):
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = (
@@ -973,6 +975,7 @@ class BertLayer(nn.Module):
             past_key_value=self_attn_past_key_value,
             seq_offsets=seq_offsets,
             seq_sqr_offsets=seq_sqr_offsets,
+            S2=S2,
         )
         attention_output = self_attention_outputs[0]
 
@@ -1005,6 +1008,7 @@ class BertLayer(nn.Module):
                 output_attentions,
                 seq_offsets=seq_offsets,
                 seq_sqr_offsets=seq_sqr_offsets,
+                S2=S2,
             )
             attention_output = cross_attention_outputs[0]
             outputs = (
@@ -1070,7 +1074,7 @@ class BertEncoder(nn.Module):
             hidden_states = hidden_states.unblocked_tensor()
         padded_shape = hidden_states.shape
         # print_grad_hook(hidden_states, 'BertEncoder:hidden_states')
-        msk, attention_mask, seq_offsets, seq_sqr_offsets = generate_mask(
+        msk, attention_mask, seq_offsets, seq_sqr_offsets, S2 = generate_mask(
             attention_mask
         )
         hidden_states = UnpadInput.apply(hidden_states, msk)
@@ -1106,6 +1110,7 @@ class BertEncoder(nn.Module):
                     encoder_attention_mask,
                     seq_offsets=seq_offsets,
                     seq_sqr_offsets=seq_sqr_offsets,
+                    S2=S2,
                 )
             else:
                 layer_outputs = layer_module(
@@ -1118,6 +1123,7 @@ class BertEncoder(nn.Module):
                     output_attentions,
                     seq_offsets=seq_offsets,
                     seq_sqr_offsets=seq_sqr_offsets,
+                    S2=S2,
                 )
 
             hidden_states = layer_outputs[0]
