@@ -160,7 +160,7 @@ auto cvt_attn_tpp = SCOPEIT((ConvertTPP<float, T>(1, H)), EW_COPY);
         int chunk_end = ((tid + 1) * chunk < work) ? ((tid + 1) * chunk) : work;
 
         for (int r = chunk_start; r < chunk_end; r++)
-          cvt_tpp(out_attn_f32[r], out_attn[r]);
+          cvt_attn_tpp(out_attn_f32[r], out_attn[r]);
       }
     }
   }
