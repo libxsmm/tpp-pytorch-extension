@@ -9,9 +9,6 @@ from tpp_pytorch_extension.dlrm import mlp as pclMLP
 
 from torchrec.modules.utils import extract_module_or_tensor_callable
 
-#def compare(ref, opt, name=""):
-#    print(f"{name}: ref: {ref.abs().mean():8g} allclose: {ref.allclose(opt, atol=1e-3, rtol=1e-4)}")
-
 def compare(ref, opt, name=""):
     ref = ref.detach()
     opt = opt.detach()
@@ -35,7 +32,7 @@ if __name__ == '__main__':
     activation = torch.sigmoid
     device = None
 
-    LOOP = 10
+    LOOP = 100
     bs = 4096
     layer_sizes = [4096, 4096, 4096]#[16, 8, 4]
     in_features = 4096
@@ -43,8 +40,13 @@ if __name__ == '__main__':
     tMLP = trecMLP.MLP(in_features, layer_sizes, bias, activation, device)
     pMLP = pclMLP.MLP(in_features, layer_sizes, bias, activation, device)
 
-#    for i, o in zip(tMLP.parameters(), pMLP.parameters()):
-#        o.data = i.clone().detach()
+    for ii, (i, o) in enumerate(zip(tMLP.parameters(), pMLP.parameters())):
+        o.data = i.data.clone().detach()
+
+    for m in pMLP.modules():
+        if hasattr(m, "set_blocking"):
+            m.set_blocking(64, 64, torch.float32)
+            m.maybe_block_params() 
 
     inp = torch.empty([bs, in_features]).uniform_(-1.0, 1.0)
     inp1 = inp.clone().detach().requires_grad_()
@@ -104,6 +106,9 @@ if __name__ == '__main__':
     except:
         pass
 
+    if hasattr(pout, "unblocked_tensor"):
+        pout = pout.unblocked_tensor()
+
     compare(out, pout, "Output")
     print(out.allclose(pout, atol=1e-4, rtol=1e-4))
     compare(inp1.grad, inp2.grad, "InpGrad")
@@ -112,4 +117,5 @@ if __name__ == '__main__':
     print(f"INP: ref = {inp1.grad.view([-1])[:8]}, xsmm = {inp2.grad.view([-1])[:8]}")
 
     for ii, (i, o) in enumerate(zip(tMLP.parameters(), pMLP.parameters())):
+        o.unblock()
         compare(i.grad, o.grad, ii)
