@@ -8,6 +8,7 @@ from tpp_pytorch_extension.dlrm import mlp as pclMLP
 ##from torchrec.modules.mlp import MLP as trecMLP
 
 from torchrec.modules.utils import extract_module_or_tensor_callable
+import numpy as np
 
 def compare(ref, opt, name=""):
     ref = ref.detach()
@@ -33,9 +34,10 @@ if __name__ == '__main__':
     device = None
 
     LOOP = 100
-    bs = 4096
-    layer_sizes = [4096, 4096, 4096]#[16, 8, 4]
-    in_features = 4096
+    bs = 2048
+    in_features = 2048
+    layer_sizes = [2048, 2048, 2048, 2048, 2048]
+    BlockS = 32
 
     tMLP = trecMLP.MLP(in_features, layer_sizes, bias, activation, device)
     pMLP = pclMLP.MLP(in_features, layer_sizes, bias, activation, device)
@@ -45,10 +47,11 @@ if __name__ == '__main__':
 
     for m in pMLP.modules():
         if hasattr(m, "set_blocking"):
-            m.set_blocking(64, 64, torch.float32)
+            m.set_blocking(BlockS, BlockS, torch.float32)
             m.maybe_block_params() 
 
     inp = torch.empty([bs, in_features]).uniform_(-1.0, 1.0)
+##    inp = inp.to(torch.bfloat16).to(torch.float32) 
     inp1 = inp.clone().detach().requires_grad_()
     inp2 = inp.clone().detach().requires_grad_()
 
@@ -79,6 +82,7 @@ if __name__ == '__main__':
     elapsed_pcl = time.time() - start_t
     print('pMLP, elapsed time: ', elapsed_pcl/LOOP)
     print('speedup: ', elapsed_tr/elapsed_pcl)    
+
 
     with torch.autograd.profiler.profile(True, record_shapes=True) as prof:
         with torch.autograd.profiler.record_function("trec_mlp"):

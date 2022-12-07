@@ -20,8 +20,9 @@ using namespace torch::autograd;
 REGISTER_LOCAL_SCOPE(fused_gemm_act, "fused_gemm_act");
 REGISTER_LOCAL_SCOPE(d_bias, "d_bias");
 REGISTER_LOCAL_SCOPE(d_act, "d_act");
-REGISTER_LOCAL_SCOPE(di_gemm, "di_gemm");
+REGISTER_LOCAL_SCOPE(di_fused_gemm, "di_gemm");
 REGISTER_LOCAL_SCOPE(dw_gemm, "dw_gemm");
+REGISTER_LOCAL_SCOPE(di_0_gemm, "dii_gemm");
 
 template <typename Tout>
 inline void omp_reduce_buf(
@@ -47,7 +48,51 @@ inline void omp_reduce_buf(
 
 //inputs: x1, w1, b1, w2, b2
 //return: save_bwd - x1, w1, y1, x2, w2, y2
-static std::vector<at::Tensor> cpp_forward(bool bias, int nLayers, 
+static std::vector<at::Tensor> tpp_forward(bool bias, int nLayers, 
+                                    std::vector<at::Tensor> inputs) {
+    GlobalPass _gp(FWD);
+    std::vector<at::Tensor> save_bwd;
+    at::Tensor t_in = inputs[0];
+
+    if (t_in.dtype() == at::kFloat) {
+        typedef float Tin;
+        typedef float Tout;
+        #include "mlp_fwd_tmpl.h"
+    } else if (t_in.dtype() == at::kBFloat16) {
+        typedef bfloat16 Tin;
+        typedef bfloat16 Tout;
+        #include "mlp_fwd_tmpl.h"
+    } else {
+        TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
+    }
+    return save_bwd;
+}
+
+// saved_tensors: x1, w1, y1, x2, w2, y2 from forward pass
+// grad_act: from Autograd
+// return: ret_list - grad_in0, grad_wt0, grad_bias0, grad_wt1, grad_bias1
+static std::vector<at::Tensor> tpp_backward(int nLayers, std::vector<at::Tensor>
+                                    saved_tensors, at::Tensor t_grad_act) {
+    std::vector<at::Tensor> ret_list; //grad_in0, grad_wt1, grad_bias1, grad_wt0, grad_bias0
+
+    if (t_grad_act.dtype() == at::kFloat) {
+        typedef float Tin;
+        typedef float Tout;
+        #include "mlp_bwd_tmpl.h"
+    } else if (t_grad_act.dtype() == at::kBFloat16) {
+        typedef bfloat16 Tin;
+        typedef bfloat16 Tout;
+        #include "mlp_bwd_tmpl.h"
+    } else {
+        TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
+    } 
+
+    return ret_list;
+}
+
+//inputs: x1, w1, b1, w2, b2
+//return: save_bwd - x1, w1, y1, x2, w2, y2
+static std::vector<at::Tensor> cpp_forward(bool bias, int nLayers,
                                     std::vector<at::Tensor> inputs) {
     std::vector<at::Tensor> save_bwd;
     at::Tensor t_in = inputs[0];
@@ -57,6 +102,7 @@ static std::vector<at::Tensor> cpp_forward(bool bias, int nLayers,
         auto t_bias = inputs[wb_i++]; //b_i
         auto mm = torch::addmm(t_bias, t_in, t_wt.t());
         auto act = torch::sigmoid(mm);
+
         save_bwd.push_back(t_in); //in, wt, act
         save_bwd.push_back(t_wt);
         save_bwd.push_back(act);
@@ -65,118 +111,30 @@ static std::vector<at::Tensor> cpp_forward(bool bias, int nLayers,
     return save_bwd;
 }
 
-//inputs: x1, w1, b1, w2, b2
-//return: save_bwd - x1, w1, y1, x2, w2, y2
-static std::vector<at::Tensor> tpp_forward(bool bias, int nLayers, 
-                                    std::vector<at::Tensor> inputs) {
-    GlobalPass _gp(FWD);
-    std::vector<at::Tensor> save_bwd;
-    at::Tensor t_in = inputs[0];
-    int wb_i = 1; // weight bias index
-
-    if (t_in.dtype() != at::kFloat && t_in.dtype() != at::kBFloat16)
-        TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
-
-if (t_in.dtype() == at::kFloat) {
-    typedef float Tin;
-    typedef float Tout;
-    for(int i=0; i < nLayers; i++) {
-        auto t_wt = inputs[wb_i++]; //w_i
-        auto t_bias = inputs[wb_i++]; //b_i
-
-#include "mlp_fwd_tmpl.h"
-
-        save_bwd.push_back(t_in); //in, wt, act
-        save_bwd.push_back(t_wt);
-        save_bwd.push_back(t_out);
-
-        t_in = t_out;
-    }
-} else if (t_in.dtype() == at::kBFloat16) {
-    typedef bfloat16 Tin;
-    typedef bfloat16 Tout;
-    for(int i=0; i < nLayers; i++) {
-        auto t_wt = inputs[wb_i++]; //w_i
-        auto t_bias = inputs[wb_i++]; //b_i
-
-#include "mlp_fwd_tmpl.h"
-
-        save_bwd.push_back(t_in); //in, wt, act
-        save_bwd.push_back(t_wt);
-        save_bwd.push_back(t_out);
-
-        t_in = t_out;       
-    }
-}
-
-    return save_bwd;
-}
-
-// saved_tensors: x1, w1, y1, x2, w2, y2 from forward pass
-// grad_act: from Autograd
-// return: ret_list - grad_in0, grad_wt1, grad_bias1, grad_wt0, grad_bias0
-static std::vector<at::Tensor> tpp_backward(int nLayers, std::vector<at::Tensor>
-                                    saved_tensors, at::Tensor t_grad_act) {
-    std::vector<at::Tensor> ret_list; //grad_in0, grad_wt1, grad_bias1, grad_wt0, grad_bias0
-    ret_list.push_back(t_grad_act); //dummy push
-
-    int wb_i = 3*nLayers-3; // wb_i initialized to index of in2; -- in1, wt1, act1, in2, wt2, act2
-
-if (t_grad_act.dtype() == at::kFloat) {
-    typedef float Tin;
-    typedef float Tout;
-
-    for(int i=nLayers-1; i >=0; i--) {
-        auto t_wt = saved_tensors[wb_i+1];
-        auto t_in = saved_tensors[wb_i];
-        auto t_act = saved_tensors[wb_i+2];
-#include "mlp_bwd_tmpl.h"
-
-        ret_list.push_back(t_grad_wt);
-        ret_list.push_back(t_grad_bias);
-
-        t_grad_act = t_grad_in;
-        wb_i -= 3;
-    }
-} else if (t_grad_act.dtype() == at::kBFloat16) {
-    typedef bfloat16 Tin;
-    typedef bfloat16 Tout;
-    for(int i=nLayers-1; i >=0; i--) {
-        auto t_wt = saved_tensors[wb_i+1];
-        auto t_in = saved_tensors[wb_i];
-        auto t_act = saved_tensors[wb_i+2];
-#include "mlp_bwd_tmpl.h"
-
-        ret_list.push_back(t_grad_wt);
-        ret_list.push_back(t_grad_bias);
-
-        t_grad_act = t_grad_in;
-        wb_i -= 3;
-    }
-} 
-    ret_list[0] = t_grad_act;
-    return ret_list;
-}
-
 // saved_tensors: x1, w1, y1, x2, w2, y2 from forward pass
 // grad_act: from Autograd
 // return: ret_list - grad_in0, grad_wt1, grad_bias1, grad_wt0, grad_bias0
 static std::vector<at::Tensor> cpp_backward(int nLayers, std::vector<at::Tensor> 
                                     saved_tensors, at::Tensor grad_act) {
     std::vector<at::Tensor> ret_list; //grad_in0, grad_wt1, grad_bias1, grad_wt0, grad_bias0
-    ret_list.push_back(grad_act); //dummy push
+    //dummy push
+    for (int i=0; i < 2*nLayers + 1; i++) {
+        ret_list.push_back(grad_act);
+    }
 
     int wb_i = 3*nLayers-3; // wb_i initialized to index of in2; -- in1, wt1, act1, in2, wt2, act2
+    int r_i = 2*nLayers;
     for(int i=nLayers-1; i >=0; i--) {
         auto dy = at::sigmoid_backward(grad_act, saved_tensors[wb_i+2]); //act[i]
         auto grad_in = torch::mm(dy, saved_tensors[wb_i+1]); //wt[i]
         auto grad_wt = torch::mm(dy.t(), saved_tensors[wb_i]);//in[i]);
         auto grad_bias = dy.sum(0, true);
+
         if (i==0) {
             ret_list[0] = grad_in;
         }
-        ret_list.push_back(grad_wt);
-        ret_list.push_back(grad_bias);
+        ret_list[r_i--] = grad_bias;
+        ret_list[r_i--] = grad_wt;   
 
         grad_act = grad_in;  
         wb_i -= 3; 
