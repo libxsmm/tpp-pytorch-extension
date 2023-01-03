@@ -510,7 +510,9 @@ def evaluate(args, model, tokenizer, prefix=""):
                             ).to(args.device)
                         }
                     )
+            tpp_bert.reset_debug_timers()
             outputs = model(**inputs)
+            tpp_bert.print_debug_timers()
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
@@ -936,6 +938,11 @@ def main():
         help="Whether to use TPP Fused impl when available",
     )
     parser.add_argument(
+        "--opt_infer",
+        action="store_true",
+        help="Whether to use TPP Fused impl when available",
+    )
+    parser.add_argument(
         "--unpad",
         action="store_true",
         help="Whether to use TPP Fused impl when available",
@@ -1197,7 +1204,7 @@ def main():
             # Reload the model
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             low_prec = args.tpp_bf16 or args.tpp_bf8
-            with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8):
+            with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer):
                 model = AutoModelForQuestionAnswering.from_pretrained(
                     checkpoint
                 )  # , force_download=True)

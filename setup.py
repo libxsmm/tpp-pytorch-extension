@@ -113,6 +113,7 @@ sources = [
 # BERT sources
 sources += glob.glob("src/csrc/bert/pad/*.cpp")
 sources += glob.glob("src/csrc/bert/unpad/*.cpp")
+sources += glob.glob("src/csrc/bert/infer/*.cpp")
 
 # GNN sources
 sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")

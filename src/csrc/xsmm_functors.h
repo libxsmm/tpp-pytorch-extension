@@ -456,13 +456,13 @@ class UnaryTPP : public BaseTPP {
 
   libxsmm_blasint rows = 0;
   libxsmm_blasint cols = 0;
-  libxsmm_blasint ldi;
-  libxsmm_blasint ldo;
-  libxsmm_datatype dt_in;
-  libxsmm_datatype dt_out;
-  libxsmm_datatype dt_compute;
-  libxsmm_bitfield flags;
-  libxsmm_meltw_unary_type type;
+  libxsmm_blasint ldi = 0;
+  libxsmm_blasint ldo = 0;
+  libxsmm_datatype dt_in = LIBXSMM_DATATYPE_F32;
+  libxsmm_datatype dt_out = LIBXSMM_DATATYPE_F32;
+  libxsmm_datatype dt_compute = LIBXSMM_DATATYPE_F32;
+  libxsmm_bitfield flags = LIBXSMM_MELTW_FLAG_UNARY_NONE;
+  libxsmm_meltw_unary_type type = LIBXSMM_MELTW_TYPE_UNARY_IDENTITY;
   libxsmm_meltwfunction_unary kernel = NULL;
 };
 
@@ -3610,8 +3610,8 @@ class LayerNormFwdTPP {
       v = v * c;
       v = LIBXSMM_MAX(v - m * m, 0.0f);
       v = 1.0f / ((float)sqrt(v + eps));
-      mean[s2] = m;
-      var[s2] = v;
+      if (mean) mean[s2] = m;
+      if (var) var[s2] = v;
       s = v;
       b = -1.0 * v * m;
       arg_array[0].primary = (void*)&inp[s2 * S3];
