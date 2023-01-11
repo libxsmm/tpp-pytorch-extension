@@ -161,6 +161,7 @@ class BertEncoderLayer {
       auto& t_offs = t_masks[1];
       auto& t_bmap = t_masks[2];
       auto sizes = t_QL.sizes();
+      long B = t_offs.sizes()[0] - 1;
       long S1 = sizes[0];
       long S2 = sizes[2];
       long F2 = sizes[3];
@@ -180,11 +181,12 @@ class BertEncoderLayer {
       auto add_mask_tpp = SCOPEIT(AddBiasTPP<T>(S2, S2), EW_ADD);
       auto softmax_fwd_tpp = SCOPEIT((VarSoftMaxFwdTPP<float, T>(S2, S2)), SOFTMAX);
       auto c_gemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
-              S2, H2, S2, S2 * S2, N * S2 * H, 0.0, XformTPP::XFORM_NONE_TPP, 0, S1)));
+              S2, H2, S2, S2 * S2, N * S2 * H, 0.0, XformTPP::XFORM_NONE_TPP, 0, 1)));
 
       {
         RECORD_SCOPE(ac_gemm, {t_QL, t_KL_TV});
         {
+#if 1
 #pragma omp parallel for collapse(2) schedule(static, 1)
           for (int s11 = 0; s11 < S1; s11++) {
             for (int n = 0; n < N; n++) {
@@ -207,6 +209,31 @@ class BertEncoderLayer {
               }
             }
           }
+#else
+#pragma omp parallel for collapse(2) schedule(static, 1)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          long start = offs[b];
+          long end = offs[b + 1];
+          long len = end - start;
+          for (int s11 = start; s11 < end; s11++) {
+            float AS[len][S2][S2];
+            T AST[len][S2][S2];
+            for (int s21 = start; s21 < end; s21++) {
+              long ls21 = s21 - start;
+              a_gemm_tpp(QL[s11][n][0], KL_TV[s21][n][0], AS[ls21][0], H1);
+              scale_tpp(AS[ls21][0], AS[ls21][0], one_by_sqrt_H);
+              if (t_AM.numel() != 0)
+                add_mask_tpp(AM[s21], AS[ls21][0]);
+            }
+            softmax_fwd_tpp(len, AS[0][0], AST[0][0]);
+            for (int h1 = 0; h1 < H1; h1++) {
+              c_gemm_tpp(AST[0][0], VL_V[start][n][h1], CL[s11][n][h1], len);
+            }
+          }
+        }
+      }
+#endif
         }
       }
     }
@@ -449,7 +476,6 @@ class BertEncoder {
       auto t_scratch = get_scratch(t_HS); 
       auto dt = layers[0]->t_Wq.dtype();
       auto ldt = layers[0]->t_Go.dtype();
-      int i = 0;
 
       for (auto l : layers) {
         //printf("Layer %d\n", i++);

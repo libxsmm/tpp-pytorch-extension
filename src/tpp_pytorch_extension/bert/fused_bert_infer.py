@@ -58,7 +58,7 @@ def generate_mask(attention_mask):
     a = torch.arange(S).expand([B, -1])
     a1 = torch.arange(B).unsqueeze(dim=1).expand([B, S])
     msk = a < nnz1
-    bmap = a1[msk].view([-1, S2])[:,0].squeeze()
+    bmap = a1[msk].view([-1, S2])[:,0].squeeze().contiguous()
     attention_mask = attention_mask[msk].clone()
     seq_offsets = torch.cat([torch.zeros([1]), nnz // S2]).to(torch.long)
     # seq_sqr_offsets = seq_offsets * seq_offsets
@@ -1105,6 +1105,7 @@ class BertEncoder(BlockedModule):
         msk, attention_mask, seq_offsets, bmap, S2 = generate_mask(
             attention_mask
         )
+        attention_mask = attention_mask.to(self.layer_dtype)
         masks = [attention_mask, seq_offsets, bmap]
         hidden_states = UnpadInput.apply(hidden_states, msk)
         orig_dtype = hidden_states.dtype
