@@ -58,7 +58,7 @@ def generate_mask(attention_mask):
     a = torch.arange(S).expand([B, -1])
     a1 = torch.arange(B).unsqueeze(dim=1).expand([B, S])
     msk = a < nnz1
-    bmap = a1[msk].view([-1, S2])[:,0].squeeze().contiguous()
+    bmap = a1[msk].view([-1, S2])[:, 0].squeeze().contiguous()
     attention_mask = attention_mask[msk].clone()
     seq_offsets = torch.cat([torch.zeros([1]), nnz // S2]).to(torch.long)
     # seq_sqr_offsets = seq_offsets * seq_offsets
@@ -436,9 +436,7 @@ class BertSelfAttention(BlockedModule):
             else torch.Tensor()
         )
         inputs.append(seq_offsets if seq_offsets is not None else torch.Tensor())
-        inputs.append(
-            bmap if bmap is not None else torch.Tensor()
-        )
+        inputs.append(bmap if bmap is not None else torch.Tensor())
 
         # context_layer, attention_probs = fused_bert_cpp.forward(self.handle.handle, inputs)
         p = self.attention_probs_dropout_prob if self.training else 0.0
@@ -1048,41 +1046,48 @@ class BertEncoder(BlockedModule):
     def __init__(self, config):
         super().__init__()
         if not hasattr(config, "features_block_size"):
-            config.features_block_size = config.hidden_size // config.num_attention_heads
+            config.features_block_size = (
+                config.hidden_size // config.num_attention_heads
+            )
         else:
-            if (config.hidden_size // config.num_attention_heads) % config.features_block_size != 0:
-                raise ValueError(f"config.features_block_size ({config.features_block_size}) is invald") 
+            if (
+                config.hidden_size // config.num_attention_heads
+            ) % config.features_block_size != 0:
+                raise ValueError(
+                    f"config.features_block_size ({config.features_block_size}) is invald"
+                )
         self.config = config
         self.layer = nn.ModuleList(
             [BertLayer(config) for _ in range(config.num_hidden_layers)]
         )
 
-        self.encoder = None # Create lazily
+        self.encoder = None  # Create lazily
         self.layer_dtype = global_layer_dtype
-        self.blocked_input_signature = get_blocking_signature(
-           "SF", "SFSF"
-        )
+        self.blocked_input_signature = get_blocking_signature("SF", "SFSF")
 
     def create_encoder(self):
 
-        params = [ [l.attention.self.query.weight,
-                    l.attention.self.key.weight,
-                    l.attention.self.value.weight,
-                    l.attention.self.query.bias,
-                    l.attention.self.key.bias,
-                    l.attention.self.value.bias,
-                    l.attention.output.dense.weight,
-                    l.attention.output.dense.bias,
-                    l.attention.output.LayerNorm.weight,
-                    l.attention.output.LayerNorm.bias,
-
-                    l.intermediate.dense.weight,
-                    l.intermediate.dense.bias,
-
-                    l.output.dense.weight,
-                    l.output.dense.bias,
-                    l.output.LayerNorm.weight,
-                    l.output.LayerNorm.bias,] for l in self.layer]
+        params = [
+            [
+                l.attention.self.query.weight,
+                l.attention.self.key.weight,
+                l.attention.self.value.weight,
+                l.attention.self.query.bias,
+                l.attention.self.key.bias,
+                l.attention.self.value.bias,
+                l.attention.output.dense.weight,
+                l.attention.output.dense.bias,
+                l.attention.output.LayerNorm.weight,
+                l.attention.output.LayerNorm.bias,
+                l.intermediate.dense.weight,
+                l.intermediate.dense.bias,
+                l.output.dense.weight,
+                l.output.dense.bias,
+                l.output.LayerNorm.weight,
+                l.output.LayerNorm.bias,
+            ]
+            for l in self.layer
+        ]
         N = self.config.num_attention_heads
         HS = self.config.hidden_size
         IS = self.config.intermediate_size
@@ -1109,9 +1114,7 @@ class BertEncoder(BlockedModule):
             self.create_encoder()
 
         # print_grad_hook(hidden_states, 'BertEncoder:hidden_states')
-        msk, attention_mask, seq_offsets, bmap, S2 = generate_mask(
-            attention_mask
-        )
+        msk, attention_mask, seq_offsets, bmap, S2 = generate_mask(attention_mask)
         attention_mask = attention_mask.to(self.layer_dtype)
         masks = [attention_mask, seq_offsets, bmap]
         hidden_states = UnpadInput.apply(hidden_states, msk)
@@ -1244,7 +1247,7 @@ def tpp_impl(enable=True, use_low_prec=False, use_bf8=False):
         try:
             if enable:
                 transformers.models.bert.modeling_bert.BertEncoder = BertEncoder
-                #transformers.models.bert.modeling_bert.BertEmbeddings = BertEmbeddings
+                # transformers.models.bert.modeling_bert.BertEmbeddings = BertEmbeddings
                 if use_low_prec:
                     global_layer_dtype = (
                         torch.bfloat8 if use_bf8 == True else torch.bfloat16

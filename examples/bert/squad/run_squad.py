@@ -1206,7 +1206,9 @@ def main():
             # Reload the model
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             low_prec = args.tpp_bf16 or args.tpp_bf8
-            with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer):
+            with tpp_bert.tpp_impl(
+                args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer
+            ):
                 model = AutoModelForQuestionAnswering.from_pretrained(
                     checkpoint
                 )  # , force_download=True)

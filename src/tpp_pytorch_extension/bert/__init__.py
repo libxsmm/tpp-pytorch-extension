@@ -24,7 +24,9 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def tpp_impl(enable=True, use_low_prec=False, use_unpad=True, use_bf8=False, infer=False):
+def tpp_impl(
+    enable=True, use_low_prec=False, use_unpad=True, use_bf8=False, infer=False
+):
     if infer == True:
         with fused_bert_infer.tpp_impl(enable, use_low_prec, use_bf8):
             yield
