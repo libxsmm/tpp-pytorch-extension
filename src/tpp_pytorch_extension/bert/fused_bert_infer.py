@@ -262,6 +262,7 @@ class BertSelfAttention(BlockedModule):
         self.attention_head_size = int(
             config.hidden_size / config.num_attention_heads
         )  # H
+        self.features_block_size = config.features_block_size
         self.all_head_size = self.num_attention_heads * self.attention_head_size  # NH
         self.hidden_size = config.hidden_size  # HS
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
@@ -279,19 +280,19 @@ class BertSelfAttention(BlockedModule):
 
         self.query.weight.set_blocking_param(
             (
-                [self.attention_head_size, self.attention_head_size],
+                [self.features_block_size, self.features_block_size],
                 [0, 2, 3, 1],
             )
         )
         self.key.weight.set_blocking_param(
             (
-                [self.attention_head_size, self.attention_head_size],
+                [self.features_block_size, self.features_block_size],
                 [0, 2, 3, 1],
             )
         )
         self.value.weight.set_blocking_param(
             (
-                [self.attention_head_size, self.attention_head_size],
+                [self.features_block_size, self.features_block_size],
                 [0, 2, 3, 1],
             )
         )
@@ -303,9 +304,9 @@ class BertSelfAttention(BlockedModule):
             self.query.weight.set_blocking_param(
                 (
                     [
-                        self.attention_head_size,
+                        self.features_block_size,
                         [
-                            self.attention_head_size // low_prec_vnni_blocking,
+                            self.features_block_size // low_prec_vnni_blocking,
                             low_prec_vnni_blocking,
                         ],
                     ],
@@ -316,9 +317,9 @@ class BertSelfAttention(BlockedModule):
             self.key.weight.set_blocking_param(
                 (
                     [
-                        self.attention_head_size,
+                        self.features_block_size,
                         [
-                            self.attention_head_size // low_prec_vnni_blocking,
+                            self.features_block_size // low_prec_vnni_blocking,
                             low_prec_vnni_blocking,
                         ],
                     ],
@@ -329,9 +330,9 @@ class BertSelfAttention(BlockedModule):
             self.value.weight.set_blocking_param(
                 (
                     [
-                        self.attention_head_size,
+                        self.features_block_size,
                         [
-                            self.attention_head_size // low_prec_vnni_blocking,
+                            self.features_block_size // low_prec_vnni_blocking,
                             low_prec_vnni_blocking,
                         ],
                     ],
@@ -379,13 +380,13 @@ class BertSelfAttention(BlockedModule):
             encoder_hidden_states = self.get_blocked_tensor(
                 encoder_hidden_states,
                 self.blocked_input_signature,
-                [S2, self.attention_head_size],
+                [S2, self.features_block_size],
             )
         orig_hidden_states = hidden_states
         hidden_states = self.get_blocked_tensor(
             hidden_states,
             self.blocked_input_signature,
-            [S2, self.attention_head_size],
+            [S2, self.features_block_size],
         )
         hidden_states = hidden_states.cvt_to(self.layer_dtype)
         # print(f"hidden_states: {hidden_states.shape}")
@@ -519,10 +520,11 @@ class BertOutputBase(BlockedModule):
         self.hidden_dropout_prob = config.hidden_dropout_prob
         self.layer_norm_eps = config.layer_norm_eps
         self.attention_head_size = config.hidden_size // config.num_attention_heads
+        self.features_block_size = config.features_block_size
         # self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.dense.weight.set_blocking_param(
             (
-                [self.attention_head_size, self.attention_head_size],
+                [self.features_block_size, self.features_block_size],
                 [0, 2, 3, 1],
             )
         )
@@ -534,9 +536,9 @@ class BertOutputBase(BlockedModule):
             self.dense.weight.set_blocking_param(
                 (
                     [
-                        self.attention_head_size,
+                        self.features_block_size,
                         [
-                            self.attention_head_size // low_prec_vnni_blocking,
+                            self.features_block_size // low_prec_vnni_blocking,
                             low_prec_vnni_blocking,
                         ],
                     ],
@@ -563,13 +565,13 @@ class BertOutputBase(BlockedModule):
         hidden_states = self.get_blocked_tensor(
             hidden_states,
             self.blocked_input_signature,
-            [None, self.attention_head_size],
+            [None, self.features_block_size],
         )
         hidden_states = hidden_states.cvt_to(self.layer_dtype)
         input_tensor = self.get_blocked_tensor(
             input_tensor,
             self.blocked_input_signature,
-            [None, self.attention_head_size],
+            [None, self.features_block_size],
         )
         input_tensor = input_tensor.cvt_to(self.layer_dtype)
 
@@ -635,9 +637,10 @@ class BertIntermediate(BlockedModule):
         super().__init__()
         self.dense = DummyLinear(config.hidden_size, config.intermediate_size)
         self.attention_head_size = config.hidden_size // config.num_attention_heads
+        self.features_block_size = config.features_block_size
         self.dense.weight.set_blocking_param(
             (
-                [self.attention_head_size, self.attention_head_size],
+                [self.features_block_size, self.features_block_size],
                 [0, 2, 3, 1],
             )
         )
@@ -654,9 +657,9 @@ class BertIntermediate(BlockedModule):
             self.dense.weight.set_blocking_param(
                 (
                     [
-                        self.attention_head_size,
+                        self.features_block_size,
                         [
-                            self.attention_head_size // low_prec_vnni_blocking,
+                            self.features_block_size // low_prec_vnni_blocking,
                             low_prec_vnni_blocking,
                         ],
                     ],
@@ -682,7 +685,7 @@ class BertIntermediate(BlockedModule):
         hidden_states = self.get_blocked_tensor(
             hidden_states,
             self.blocked_input_signature,
-            [None, self.attention_head_size],
+            [None, self.features_block_size],
         )
         hidden_states = hidden_states.cvt_to(self.layer_dtype)
         inputs = [hidden_states, self.dense.weight, self.dense.bias]
@@ -1044,6 +1047,11 @@ class BertLayer(nn.Module):
 class BertEncoder(BlockedModule):
     def __init__(self, config):
         super().__init__()
+        if not hasattr(config, "features_block_size"):
+            config.features_block_size = config.hidden_size // config.num_attention_heads
+        else:
+            if (config.hidden_size // config.num_attention_heads) % config.features_block_size != 0:
+                raise ValueError(f"config.features_block_size ({config.features_block_size}) is invald") 
         self.config = config
         self.layer = nn.ModuleList(
             [BertLayer(config) for _ in range(config.num_hidden_layers)]
@@ -1079,7 +1087,6 @@ class BertEncoder(BlockedModule):
         HS = self.config.hidden_size
         IS = self.config.intermediate_size
         eps = self.config.layer_norm_eps
-        self.F2 = HS // N # can be set to any factor of HS
         self.encoder = fused_bert_cpp.BertEncoder(params, eps, N, HS, IS)
 
     def forward(
@@ -1112,7 +1119,7 @@ class BertEncoder(BlockedModule):
         hidden_states = self.get_blocked_tensor(
             hidden_states,
             self.blocked_input_signature,
-            [S2, self.F2],
+            [S2, self.config.features_block_size],
         )
         hidden_states = hidden_states.cvt_to(self.layer_dtype)
 
