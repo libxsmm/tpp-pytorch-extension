@@ -510,9 +510,11 @@ def evaluate(args, model, tokenizer, prefix=""):
                             ).to(args.device)
                         }
                     )
-            tpp_bert.reset_debug_timers()
+            if args.profile and args.use_tpp:
+                tpp_bert.reset_debug_timers()
             outputs = model(**inputs)
-            tpp_bert.print_debug_timers()
+            if args.profile and args.use_tpp:
+                tpp_bert.print_debug_timers()
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
