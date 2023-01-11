@@ -29,32 +29,10 @@ static int my_rank = guess_mpi_rank();
 static int large_cache_opt = true;
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
-REGISTER_LOCAL_SCOPE(q_gemm, "q_gemm");
-REGISTER_LOCAL_SCOPE(k_gemm, "k_gemm");
-REGISTER_LOCAL_SCOPE(v_gemm, "v_gemm");
+REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(ac_gemm, "ac_gemm");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
-
-REGISTER_LOCAL_SCOPE(db_emb, "db_emb");
-REGISTER_LOCAL_SCOPE(diq_gemm, "diq_gemm");
-REGISTER_LOCAL_SCOPE(dik_gemm, "dik_gemm");
-REGISTER_LOCAL_SCOPE(div_gemm, "div_gemm");
-REGISTER_LOCAL_SCOPE(dica_gemm, "dica_gemm");
-REGISTER_LOCAL_SCOPE(dii_gemm, "dii_gemm");
-REGISTER_LOCAL_SCOPE(dio_gemm, "dio_gemm");
-REGISTER_LOCAL_SCOPE(dwqkv_gemm, "dwqkv_gemm");
-REGISTER_LOCAL_SCOPE(dwq_gemm, "dwq_gemm");
-REGISTER_LOCAL_SCOPE(dwk_gemm, "dwk_gemm");
-REGISTER_LOCAL_SCOPE(dwv_gemm, "dwv_gemm");
-REGISTER_LOCAL_SCOPE(dwa_gemm, "dwa_gemm");
-REGISTER_LOCAL_SCOPE(dwc_gemm, "dwc_gemm");
-REGISTER_LOCAL_SCOPE(dac_gemm, "dac_gemm");
-REGISTER_LOCAL_SCOPE(dwi_gemm, "dwi_gemm");
-REGISTER_LOCAL_SCOPE(dwo_gemm, "dwo_gemm");
-REGISTER_LOCAL_SCOPE(dqkv_bias, "dqkv_bias");
-REGISTER_LOCAL_SCOPE(di_bias, "di_bias");
-REGISTER_LOCAL_SCOPE(do_bias, "do_bias");
 
 class BertEncoderLayer {
   public:
@@ -125,19 +103,22 @@ class BertEncoderLayer {
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
       auto qkv_loop =
           ThreadedLoop<2>({{S1}, {F1}}, loop_scheme);
-      qkv_loop(
+      {
+        RECORD_SCOPE(qkv_gemm, {t_HS, t_W});
+        qkv_loop(
             [&](int* ind) {
-              int s1 = ind[0], nk = ind[1];
-              T tmp[S2 * F2];
-              T *tmpp = (transpose || (vnni && dt_low_prec)) ? tmp : Out[s1][nk];
-              copy_bias_tpp(B[nk], tmpp);
-              qkv_gemm_tpp(HS[s1][0], W[nk][0], tmpp, F1, true);
-              if (transpose || (vnni && dt_low_prec)) {
-                xform_tpp(tmpp, Out[s1][nk]);
-              }
+            int s1 = ind[0], nk = ind[1];
+            T tmp[S2 * F2];
+            T *tmpp = (transpose || (vnni && dt_low_prec)) ? tmp : Out[s1][nk];
+            copy_bias_tpp(B[nk], tmpp);
+            qkv_gemm_tpp(HS[s1][0], W[nk][0], tmpp, F1, true);
+            if (transpose || (vnni && dt_low_prec)) {
+            xform_tpp(tmpp, Out[s1][nk]);
+            }
             },
             [&]() { qkv_gemm_tpp.config(); },
             [&]() { qkv_gemm_tpp.release(); });
+      }
     }
 
     template<typename T>
@@ -473,6 +454,7 @@ class BertEncoder {
     }
     
     at::Tensor forward(at::Tensor& t_HS, std::vector<at::Tensor>& t_masks) {
+      GlobalPass _gp(FWD);
       auto t_scratch = get_scratch(t_HS); 
       auto dt = layers[0]->t_Wq.dtype();
       auto ldt = layers[0]->t_Go.dtype();
