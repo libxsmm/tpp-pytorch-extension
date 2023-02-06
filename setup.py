@@ -110,6 +110,9 @@ sources = [
     "src/csrc/bfloat8.cpp",
 ]
 
+# AlphaFold sources
+sources += glob.glob("src/csrc/alphafold/*.cpp")
+
 # BERT sources
 sources += glob.glob("src/csrc/bert/pad/*.cpp")
 sources += glob.glob("src/csrc/bert/unpad/*.cpp")
