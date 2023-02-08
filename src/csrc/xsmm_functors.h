@@ -1987,8 +1987,13 @@ class BrgemmTPP {
               sum = C[i * ldc + j];
             for (int k = 0; k < K / BS; k++) {
               for (int b = 0; b < BS; b++) {
-                sum += (float)A_[i * lda + k * BS + b] *
-                    (float)B_[k * ldb * BS + j * BS + b];
+                if (a_trans == 1) {
+                  sum += (float)A_[k * lda * BS + i * BS + b] *
+                      (float)B_[k * ldb * BS + j * BS + b];
+                } else {
+                  sum += (float)A_[i * lda + k * BS + b] *
+                      (float)B_[k * ldb * BS + j * BS + b];
+                }
               }
             }
             C[i * ldc + j] = (Tout)sum;
@@ -2017,9 +2022,9 @@ class BrgemmTPP {
       } else {
         type = 2;
       }
-      if (type != 0)
-        TPP_ASSERT(
-            p->a_trans == 0, "A Transpose supported only for FP32 BRGEMM\n");
+      // if (type != 0)
+      //   TPP_ASSERT(
+      //       p->a_trans == 0, "A Transpose supported only for FP32 BRGEMM\n");
       brgemm_type = type;
       kernel.gemm = (libxsmm_gemmfunction)get_kernel();
       initialized = true;
@@ -2062,8 +2067,12 @@ class BrgemmTPP {
 
       if (p->a_trans == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
-      if (brgemm_type != 0)
+      if (brgemm_type != 0) {
         l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->a_trans == 1) {
+          l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
+        }
+      }
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
 
