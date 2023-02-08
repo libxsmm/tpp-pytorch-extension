@@ -27,6 +27,7 @@ using namespace tpp;
 
 static int my_rank = guess_mpi_rank();
 static int large_cache_opt = true;
+static int use_at_vnni = env2int("USE_AT_VNNI");
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(q_gemm, "q_gemm");

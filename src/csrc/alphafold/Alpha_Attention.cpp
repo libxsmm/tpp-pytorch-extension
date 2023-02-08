@@ -8,7 +8,7 @@
 /* Author: Narendra Chaudhary (Intel Corp.)
  ******************************************************************************/
 
-#include <immintrin.h>
+//#include <immintrin.h>
 #include <libxsmm.h>
 #include <libxsmm_intrinsics_x86.h>
 #include <omp.h>

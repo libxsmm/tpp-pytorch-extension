@@ -28,6 +28,10 @@ auto Hk = wt_sizes[3];
 
 auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
 
+if (use_at_vnni) {
+  t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
+}
+
 auto t_dout = t_in.new_empty({S1, Nk, S2, Hk});
 auto t_out = t_dout;
 if (training) {
@@ -68,7 +72,7 @@ auto brgemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
     Hk* Hc,
     1.0,
     XformTPP::XFORM_NONE_TPP,
-    0,
+    use_at_vnni ? 1 : 0,
     Ncb)));
 auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(S2 * Hk, p), DROPOUT);
 auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);

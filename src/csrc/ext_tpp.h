@@ -16,8 +16,6 @@
 
 namespace tpp {
 
-static int use_at_vnni = env2int("USE_AT_VNNI");
-
 template <typename Tin, typename Tout>
 class BrgemmExtTPP {
  public:
@@ -39,19 +37,13 @@ class BrgemmExtTPP {
         c_trans(c_trans),
         brgemm(),
         xform(),
-        at_vnni_tpp(),
         add() {
     // auto dt_in = XsmmDtype<Tin>();
     auto dt_out = XsmmDtype<Tout>();
-    auto a_trans_local = a_trans;
     if (dt_out == LIBXSMM_DATATYPE_F32 && c_trans == XformTPP::XFORM_N2V_TPP) {
       printf(
           "Warning: reseting c_trans flag from N2V to None for FP32 output\n");
       c_trans = XformTPP::XFORM_NONE_TPP;
-    }
-    if (use_at_vnni && XsmmDtype<Tin>() != LIBXSMM_DATATYPE_F32 && a_trans == 0) {
-      a_trans_local = 1;
-      at_vnni_tpp = XformExtTPP<Tout>(M, K, XformTPP::XFORM_XPOSE_N2V_TPP);
     }
     auto beta_ = beta;
 
@@ -60,7 +52,7 @@ class BrgemmExtTPP {
       xform = XformExtTPP<Tout>(M, N, c_trans);
     }
     brgemm = BrgemmTPP<Tin, Tout>(
-        M, N, K, str_a, str_b, beta_, a_trans_local, unroll_hint);
+        M, N, K, str_a, str_b, beta_, a_trans, unroll_hint);
     if (beta_ != beta) {
       add = AddTPP<Tout, Tout>(M, N);
     }
@@ -68,19 +60,11 @@ class BrgemmExtTPP {
   }
 
   void operator()(
-      Tin* _A,
+      Tin* A,
       Tin* B,
       Tout* C,
       long count,
       bool no_tile_cfg = false) {
-    Tin tmp_A[M * K];
-    Tin* A = _A;
-    if (use_at_vnni && XsmmDtype<Tin>() != LIBXSMM_DATATYPE_F32 && a_trans ==
-0) {
-      ScopedTimer _t(VNNI);
-      A = tmp_A;
-      at_vnni_tpp(_A, tmp_A);
-    } 
     if (c_trans == XformTPP::XFORM_NONE_TPP) {
       ScopedTimer _t(BRGEMM, 2 * M * N * K * count);
       brgemm(A, B, C, count, no_tile_cfg);
@@ -107,15 +91,7 @@ class BrgemmExtTPP {
     }
   }
 
-  void ref(Tin* _A, Tin* B, Tout* C, long count, bool no_tile_cfg = false) {
-    Tin tmp_A[M * K];
-    Tin* A = _A;
-    if (use_at_vnni && XsmmDtype<Tin>() != LIBXSMM_DATATYPE_F32 && a_trans ==
-0) {
-      ScopedTimer _t(VNNI);
-      A = tmp_A;
-      at_vnni_tpp.ref(_A, tmp_A);
-    } 
+  void ref(Tin* A, Tin* B, Tout* C, long count, bool no_tile_cfg = false) {
     if (c_trans == XformTPP::XFORM_NONE_TPP) {
       ScopedTimer _t(BRGEMM, 2 * M * N * K * count);
       brgemm.ref(A, B, C, count, no_tile_cfg);
@@ -156,7 +132,6 @@ class BrgemmExtTPP {
   XformTPP::XFORM_TYPE c_trans;
   BrgemmTPP<Tin, Tout> brgemm;
   XformExtTPP<Tout> xform;
-  XformExtTPP<Tin> at_vnni_tpp;
   AddTPP<Tout, Tout> add;
   DebugTimer xform_type;
 };
