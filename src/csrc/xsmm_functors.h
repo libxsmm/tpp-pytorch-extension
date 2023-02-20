@@ -670,6 +670,56 @@ class CpyTPP {
   UnaryTPP kernel;
 };
 
+template <typename T>
+class PadTPP {
+ public:
+  PadTPP() {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols)
+      : PadTPP(in_rows, in_cols, out_cols, out_cols, in_cols, out_cols) {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols, int ldi, int ldo)
+      : in_rows(in_rows),
+        in_cols(in_cols),
+        out_rows(out_rows),
+        out_cols(out_cols),
+        ldi(ldi),
+        ldo(ldo),
+        cpy(),
+        zero() {
+    if (out_rows > in_rows || out_cols > in_cols) {
+      TPP_ASSERT(
+          out_rows == in_rows || out_cols == in_cols,
+          "PadTPP can pad only 1 dim at a time");
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, ldo);
+      if (out_rows > in_rows) {
+        zero = SetZeroTPP<T>(out_rows - in_rows, out_cols, ldo);
+        zero_offset = in_rows * ldo;
+      } else {
+        zero = SetZeroTPP<T>(out_rows, out_cols - in_cols, ldo);
+        zero_offset = in_cols;
+      }
+    }
+  }
+  void operator()(T* in, T* out) {
+    cpy(in, out);
+    zero(out);
+  }
+  void ref(T* in, T* out) {
+    cpy.ref(in, out);
+    zero.ref(out);
+  }
+
+ private:
+  int in_rows = 0;
+  int in_cols = 0;
+  int out_rows = 0;
+  int out_cols = 0;
+  int ldi;
+  int ldo;
+  int zero_offset = 0;
+  CpyTPP<T> cpy;
+  SetZeroTPP<T> zero;
+};
+
 template <typename Tin, typename Tout = Tin>
 class CpyBiasTPP {
  public:
