@@ -13,16 +13,23 @@ from torch.autograd import Function
 #from torchrec.modules.activation import SwishLayerNorm
 #from torchrec.modules.utils import extract_module_or_tensor_callable
 from torch.autograd import Function
+import torchrec
+import torchrec.models
 
 from tpp_pytorch_extension._C import _mlp_cpp as mlp_cpp
-
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
     BlockedModule,
     BlockedTensor,
     get_blocking_signature,
     get_vnni_blocking,
+#    default_blocking_factors,
 )
+
+from contextlib import contextmanager
+
+orig_torchrec_MLP = torchrec.modules.mlp.MLP
+global_layer_dtype = torch.float32
 
 class MLPFunction(Function):
     @staticmethod
@@ -43,7 +50,7 @@ class MLPFunction(Function):
         output = mlp_cpp.backward(nLayers, saved_bwd, grad_out)
         return None, None, *output
 
-class MLP(BlockedModule, torch.nn.Module):
+class MLP(BlockedModule, orig_torchrec_MLP): #torchrec.modules.mlp.MLP): #, torch.nn.Module):
     """
     Applies a stack of Perceptron modules sequentially (i.e. Multi-Layer Perceptron).
 
@@ -91,11 +98,14 @@ class MLP(BlockedModule, torch.nn.Module):
         ] = torch.relu,
         device: Optional[torch.device] = None,
     ) -> None:
-        super().__init__()
-        torch.manual_seed(42)
+        
+        # init torchrec model to have same weights and params as torchrec
+#        torchrec.models.dlrm.MLP.__init__(self, in_size, layer_sizes, bias, activation, device)
+#        torchrec.modules.mlp.MLP.__init__(self, in_size, layer_sizes, bias, activation, device)
+        orig_torchrec_MLP.__init__(self, in_size, layer_sizes, bias, activation, device)
 
         self.blocking_enabled = True#False
-        self.layer_dtype = torch.float32
+        self.layer_dtype = global_layer_dtype
         self.blocked_input_signature = None
 
         self.layer_sizes = layer_sizes
@@ -103,32 +113,36 @@ class MLP(BlockedModule, torch.nn.Module):
             activation = torch.relu
         elif activation == "sigmoid":
             activation = torch.sigmoid
-        self._linear = [0 for i in range(len(layer_sizes))]
+
         for i in range(len(layer_sizes)):
-            self._linear[i]: nn.Linear = nn.Linear(
+            self._mlp[i]._linear: nn.Linear = nn.Linear(
                 layer_sizes[i-1] if i>0 else in_size, layer_sizes[i], bias=bias, device=device
             )
-            self._linear[i].weight = BlockedParameter(self._linear[i].weight.data)
+            self._mlp[i]._linear.weight = BlockedParameter(self._mlp[i]._linear.weight.data)
             if bias:
-                self._linear[i].bias = BlockedParameter(self._linear[i].bias.data)
+                self._mlp[i]._linear.bias = BlockedParameter(self._mlp[i]._linear.bias.data)
             
 
-    def set_blocking(self, in_block_size, out_block_size, layer_dtype=torch.float32):
-    #    print('from set_blocking')    
+    def set_blocking(self, in_block_size, out_block_size, layer_dtype=global_layer_dtype):
         self.in_block_size = in_block_size
         self.out_block_size = out_block_size
         self.layer_dtype = layer_dtype
         use_low_prec = layer_dtype != torch.float32
         self.blocked_input_signature = get_blocking_signature("NC", "NCNC")
+        _, self.in_block_size_layer0 = BlockedModule.default_blocking_factors(self._mlp[0]._linear.weight.shape[1])
         for i in range(len(self.layer_sizes)):    
-            if use_low_prec:
+            _ , out_block_size = BlockedModule.default_blocking_factors(self._mlp[i]._linear.weight.shape[0])
+            _ , in_block_size = BlockedModule.default_blocking_factors(self._mlp[i]._linear.weight.shape[1])
+            low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
+            if use_low_prec and (in_block_size % low_prec_vnni_blocking==0):
                 low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
-                self._linear[i].weight.set_blocking_param(
+                
+                self._mlp[i]._linear.weight.set_blocking_param(
                     (
                         [
-                            self.out_block_size,
+                            out_block_size,
                             [
-                                self.in_block_size // low_prec_vnni_blocking,
+                                in_block_size // low_prec_vnni_blocking,
                                 low_prec_vnni_blocking,
                             ],
                         ],
@@ -136,21 +150,21 @@ class MLP(BlockedModule, torch.nn.Module):
                         layer_dtype,
                     )
                 )
-                self._linear[i].bias.set_blocking_param((None, None, layer_dtype))
+                self._mlp[i]._linear.bias.set_blocking_param((None, None, layer_dtype))
             else:
-                self._linear[i].weight.set_blocking_param(
+                self._mlp[i]._linear.weight.set_blocking_param(
                     (
-                        [self.out_block_size, self.in_block_size],
+                        [out_block_size, in_block_size],
                         [0, 2, 3, 1],
+                        layer_dtype,
                     )
                 )
         self.blocking_enabled = True
 
     def maybe_block_params(self):
-   #     print('from maybe_block_params')
         for i in range(len(self.layer_sizes)):
-            self._linear[i].weight.block()
-            self._linear[i].bias.block()
+            self._mlp[i]._linear.weight.block()
+            self._mlp[i]._linear.bias.block()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """
@@ -162,24 +176,47 @@ class MLP(BlockedModule, torch.nn.Module):
             torch.Tensor: tensor of shape (B, O) where O is `out_size` of the last Perceptron module.
         """
         bias = True
-        if self._linear[0].bias is None:
+        if self._mlp[0]._linear.bias is None:
             bias = False
 
         if self.blocking_enabled:
             self.maybe_block_params()
             orig_input_dtype = input.dtype
             input = self.get_blocked_tensor(
-                input, self.blocked_input_signature, [None, self.in_block_size]
+                input, self.blocked_input_signature, [None, self.in_block_size_layer0] #self.in_block_size]
             )
 
         inputs = [input]
 
         for i in range(len(self.layer_sizes)):
-            inputs += [self._linear[i].weight]        
+            inputs += [self._mlp[i]._linear.weight]        
             if bias:
-                inputs += [self._linear[i].bias]
+                inputs += [self._mlp[i]._linear.bias]
 
         output = MLPFunction.apply(bias, len(self.layer_sizes), *inputs)
         output = BlockedTensor(output, self.blocked_input_signature, orig_input_dtype)
 
         return output
+
+@contextmanager
+def tpp_impl(use_tpp=True, use_bf16=False):
+    global global_layer_dtype
+    try:
+#        import torchrec
+        orig_torchrecMLP = torchrec.modules.mlp.MLP
+        orig_torchrecdlrmMLP = torchrec.models.dlrm.MLP
+        orig_global_layer_dtype = global_layer_dtype
+        try:
+            if use_tpp:
+                torchrec.modules.mlp.MLP = MLP
+                torchrec.models.dlrm.MLP = MLP
+                if use_bf16:
+                    global_layer_dtype = torch.bfloat16
+            yield
+        finally:
+            torchrec.modules.mlp.MLP = orig_torchrecMLP    
+            torchrec.models.dlrm.MLP = orig_torchrecdlrmMLP
+            global_layer_dtype = orig_global_layer_dtype
+    except ImportError as e:
+        pass
+

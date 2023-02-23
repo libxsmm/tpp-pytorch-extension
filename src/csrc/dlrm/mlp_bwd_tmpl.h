@@ -38,8 +38,13 @@ for(int i=nLayers-1; i >=0; i--) {
     auto C2 = in_sizes[3];
     auto K1 = wt_sizes[0];
     auto K2 = wt_sizes[3];
-    
+    auto padded_K2 = K2; // pad K2 if it is odd dim
     auto t_wt_TV = wt_tensor_for_bwd(K1, K2, C1, C2, t_wt);
+
+    if (t_wt_TV.numel() != t_wt.numel()) {
+        padded_K2 = t_wt_TV.size(1) * t_wt_TV.size(3);
+    }
+    t_grad_out = t_grad_act.new_empty({N1, K1, N2, padded_K2});
     auto t_in_T = t_in;
 
     constexpr int VBS = get_vnni_block_size<Tin>(); //TODO Tin or Tout?
@@ -53,7 +58,8 @@ for(int i=nLayers-1; i >=0; i--) {
         t_in_T = act_tensor_trans(N1, C1, N2, C2, t_in);
     }
     if (t_grad_out.dtype() != at::kFloat) {
-        t_grad_out_V = t_grad_out.new_empty({N1, K1, N2/VBS, K2, VBS});
+        TPP_ASSERT(N2%VBS == 0, "mini batch, N2, need to be VNNI aligned");
+        t_grad_out_V = t_grad_out.new_empty({N1, K1, N2/VBS, K2, VBS}); //N2 is nBatch and VNNI aligned
     }
     
     auto t_grad_in = at::empty_like(t_in);
@@ -61,13 +67,13 @@ for(int i=nLayers-1; i >=0; i--) {
     auto t_grad_bias = t_wt.new_empty({K1*K2});
     
     auto in_T = GetVLAPtr<Tin>(t_in_T, {C1, C2*N2});
-    auto wt_TV = GetVLAPtr<Tin>(t_wt_TV, {C1, C2*K2});
+    auto wt_TV = GetVLAPtr<Tin>(t_wt_TV, {C1, C2*padded_K2});
     auto act = GetVLAPtr<Tin>(t_act, {K1, N2*K2});
     auto grad_in = GetVLAPtr<Tout>(t_grad_in, {C1, N2*C2});
     auto grad_wt = GetVLAPtr<Tout>(t_grad_wt, {C1, C2*K2});
     auto grad_bias = GetVLAPtr<Tout>(t_grad_bias, {K2});
     auto grad_act = GetVLAPtr<Tin>(t_grad_act, {K1, N2*K2});
-    auto grad_out = GetVLAPtr<Tin>(t_grad_out, {K1, N2*K2});
+    auto grad_out = GetVLAPtr<Tin>(t_grad_out, {K1, N2*padded_K2});
     auto grad_out_V = GetVLAPtr<Tin>(t_grad_out_V, {K1, N2*K2});
  
     auto K1b = K1;
@@ -81,6 +87,8 @@ for(int i=nLayers-1; i >=0; i--) {
     auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K1 * K2), EW_ZERO);
     auto n2v_tpp =
         SCOPEIT(XformExtTPP<Tin>(N2, K2, XformTPP::XFORM_N2V_TPP, true), VNNI);
+    auto pad_tpp = SCOPEIT(PadTPP<Tin>(N2, K2, N2, padded_K2), ACT);
+
     auto grad_sigmoid_tpp = SCOPEIT((SigmoidBwdTPP<Tin, Tout>(
         N2,
         K2,
@@ -137,9 +145,11 @@ for(int i=nLayers-1; i >=0; i--) {
           #pragma omp for collapse(2)  
           for (int n1 = 0; n1 < N1; n1++) {
             for (int k1 = 0; k1 < K1; k1++) {
-              grad_sigmoid_tpp(grad_act[n1][k1], act[n1][k1], grad_out[n1][k1]);
-              grad_bias_tpp(grad_out[n1][k1], prv_grad_bias[k1]);
-              n2v_tpp(grad_out[n1][k1], grad_out_V[n1][k1]);
+              Tin tmp[N2*K2];
+              grad_sigmoid_tpp(grad_act[n1][k1], act[n1][k1], tmp/*grad_out[n1][k1]*/);
+              grad_bias_tpp(tmp/*grad_out[n1][k1]*/, prv_grad_bias[k1]);
+              n2v_tpp(tmp/*grad_out[n1][k1]*/, grad_out_V[n1][k1]);
+              pad_tpp(tmp, grad_out[n1][k1]); 
             }
           }
           #pragma omp barrier
@@ -182,7 +192,7 @@ for(int i=nLayers-1; i >=0; i--) {
       if (t_grad_out_n.dtype() != at::kFloat) {
         t_grad_out_V_n = t_grad_out_n.new_empty({N1, C1, N2/VBS, C2, VBS});
       }
-
+        
       auto act_n = GetVLAPtr<Tin>(t_act_n, {C1, N2*C2});
       auto grad_bias_n = GetVLAPtr<Tout>(t_grad_bias_n, {C2});
       auto grad_out_n = GetVLAPtr<Tout>(t_grad_out_n, {C1, N2*C2});

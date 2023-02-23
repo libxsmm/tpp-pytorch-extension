@@ -3,9 +3,8 @@ from torch import nn
 import torch.nn.functional as F
 import time
 
-from tpp_pytorch_extension.dlrm import trec_mlp as trecMLP
 from tpp_pytorch_extension.dlrm import mlp as pclMLP
-##from torchrec.modules.mlp import MLP as trecMLP
+from torchrec.modules import mlp as trecMLP
 
 from torchrec.modules.utils import extract_module_or_tensor_callable
 import numpy as np
@@ -38,9 +37,14 @@ if __name__ == '__main__':
     in_features = 2048
     layer_sizes = [2048, 2048, 2048, 2048, 2048]
     BlockS = 32
-
+    
     tMLP = trecMLP.MLP(in_features, layer_sizes, bias, activation, device)
-    pMLP = pclMLP.MLP(in_features, layer_sizes, bias, activation, device)
+    
+    use_tpp=True
+    use_bf16=False
+    with pclMLP.tpp_impl(use_tpp, use_bf16):
+#    with tpp_impl(use_tpp, use_bf16):
+        pMLP = trecMLP.MLP(in_features, layer_sizes, bias, activation, device)
 
     for ii, (i, o) in enumerate(zip(tMLP.parameters(), pMLP.parameters())):
         o.data = i.data.clone().detach()
@@ -60,16 +64,6 @@ if __name__ == '__main__':
 
     out=tMLP(inp1)
     tmp_t = torch.rand(out.shape)
-    
-    start_t = time.time()
-    for i in range(LOOP):
-        out = tMLP(inp1)
-        out = out*tmp_t
-        outLoss = out.mean()*100000
-        outLoss.backward()
-
-    elapsed_tr = time.time() - start_t
-    print('tMLP, elapsed time: ', elapsed_tr/LOOP)
 
     pout = None
     start_t = time.time()
@@ -81,8 +75,18 @@ if __name__ == '__main__':
 
     elapsed_pcl = time.time() - start_t
     print('pMLP, elapsed time: ', elapsed_pcl/LOOP)
-    print('speedup: ', elapsed_tr/elapsed_pcl)    
+    
+    start_t = time.time()
+    for i in range(LOOP):
+        out = tMLP(inp1)
+        out = out*tmp_t
+        outLoss = out.mean()*100000
+        outLoss.backward()
 
+    elapsed_tr = time.time() - start_t
+    print('tMLP, elapsed time: ', elapsed_tr/LOOP)
+
+    print('speedup: ', elapsed_tr/elapsed_pcl)    
 
     with torch.autograd.profiler.profile(True, record_shapes=True) as prof:
         with torch.autograd.profiler.record_function("trec_mlp"):

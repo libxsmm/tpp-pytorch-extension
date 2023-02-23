@@ -215,20 +215,48 @@ class BlockedTensor(object):
             return getattr(self.unblocked_tensor(), attr)
         elif attr == "view":
             return getattr(self.unblocked_tensor(), attr)
+        elif attr == "unsqueeze":
+            return getattr(self.unblocked_tensor(), attr)
+        elif attr == "reshape":
+            return getattr(self.unblocked_tensor(), attr)
         # elif hasattr(self._t, attr): return getattr(self._t, attr)
         else:
             raise AttributeError("BlockedTensor doesn't support attr %s" % attr)
 
     def __torch_function__(self, func, types, args=(), kwargs=None):
+        def unblock(t):
+            if isinstance(t, BlockedTensor):
+                return t.unblocked_tensor()
+            if isinstance(t, list):
+                return list([unblock(t1) for t1 in t])
+            if isinstance(t, tuple):
+                return tuple(unblock(t1) for t1 in t)
+            if isinstance(t, dict):
+                return {k : unblock(v) for k, v in t.items()}
+            return t
+
         if kwargs is None:
             kwargs = {}
         # args = [a._t if hasattr(a, '_t') else a for a in args]
-        args = [
-            a.unblocked_tensor() if isinstance(a, BlockedTensor) else a for a in args
-        ]
+        # args = [
+        #     a.unblocked_tensor() if isinstance(a, BlockedTensor) else a for a in args
+        # ]
+        args = unblock(args)
+        kwargs = unblock(kwargs)
         ret = func(*args, **kwargs)
         # return MetadataTensor(ret, metadata=self._metadata)
         return ret
+
+#    def __torch_function__(self, func, types, args=(), kwargs=None):
+#        if kwargs is None:
+#            kwargs = {}
+#        # args = [a._t if hasattr(a, '_t') else a for a in args]
+#        args = [
+#            a.unblocked_tensor() if isinstance(a, BlockedTensor) else a for a in args
+#        ]
+#        ret = func(*args, **kwargs)
+#        # return MetadataTensor(ret, metadata=self._metadata)
+#        return ret
 
 
 class BlockedParameter(torch.nn.Parameter):

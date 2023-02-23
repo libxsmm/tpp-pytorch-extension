@@ -18,6 +18,8 @@ using namespace torch::autograd;
 #define PRINT_T_SIZE(x) std::cout << #x << ": " << x.sizes() << std::endl
 #define PRINT_T(x) std::cout << #x << ": " << x << std::endl
 
+bool isActSigmoid = false;
+
 REGISTER_LOCAL_SCOPE(fused_gemm_act, "fused_gemm_act");
 REGISTER_LOCAL_SCOPE(d_bias, "d_bias");
 REGISTER_LOCAL_SCOPE(d_act, "d_act");
@@ -59,7 +61,7 @@ at::Tensor forward(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
     return act;
 }
 */
-static at::Tensor tpp_forward(
+static std::vector<at::Tensor> tpp_forward(
     at::Tensor t_in,
     at::Tensor t_wt,
     at::Tensor t_bias) {
@@ -91,7 +93,8 @@ static std::vector<at::Tensor> tpp_backward(
     at::Tensor _t_grad_act, 
     at::Tensor t_in, 
     at::Tensor t_wt, 
-    at::Tensor t_act) {
+    at::Tensor t_act,
+    at::Tensor t_relu_mask) {
 
     auto t_grad_act = _t_grad_act.contiguous();
 
@@ -114,8 +117,10 @@ class PerceptronFunction : public Function<PerceptronFunction> {
     static at::Tensor forward(AutogradContext *ctx, at::Tensor input, 
                                 at::Tensor weight, at::Tensor bias) {
         auto output = tpp_forward(input, weight, bias);
-        ctx->save_for_backward({input, weight, bias, output});
-        return output;
+        auto t_out = output[0];
+        auto t_relu_mask = output[1];
+        ctx->save_for_backward({input, weight, bias, t_out, t_relu_mask});
+        return t_out;//output;
     }
 
     static tensor_list backward(AutogradContext *ctx, tensor_list grad_output) {
@@ -124,13 +129,15 @@ class PerceptronFunction : public Function<PerceptronFunction> {
         auto weight = saved[1];
         auto bias = saved[2];
         auto act = saved[3];
+        auto relu_mask = saved[4];
 
-        auto outTensorList = tpp_backward(grad_output[0], input, weight, act);
+        auto outTensorList = tpp_backward(grad_output[0], input, weight, act, relu_mask);
         return outTensorList;
     }
 };
 
-static at::Tensor perceptron_global(at::Tensor input, at::Tensor weight, at::Tensor bias) {
+static at::Tensor perceptron_global(at::Tensor input, at::Tensor weight, at::Tensor bias, bool _isActSigmoid) {
+    isActSigmoid = _isActSigmoid;
     auto out = PerceptronFunction::apply(input, weight, bias);
     return out;
 }

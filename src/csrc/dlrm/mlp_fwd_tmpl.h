@@ -17,11 +17,17 @@ for(int i=0; i < nLayers; i++) {
     auto C2 = in_sizes[3];
     auto K1 = wt_sizes[0];
     auto K2 = wt_sizes[3];
-    
-    auto t_wt_V = wt_tensor_for_fwd(K1, K2, C1, C2, t_wt);
+    auto padded_C2 = C2;
+    auto relu_rd = (N2*K2+15)/16;
+
+    auto t_wt_V = wt_tensor_for_fwd(K1, K2, C1, C2, t_wt); 
+    if (t_wt_V.numel() != t_wt.numel()) { // if padded
+        padded_C2 = t_wt_V.size(2)*t_wt_V.size(4);   
+        t_in = get_padded_activation_for_vnni(t_in);
+    }
     auto t_out = t_in.new_empty({N1, K1, N2, K2});
     
-    auto in = GetVLAPtr<Tin>(t_in, {C1, N2*C2});
+    auto in = GetVLAPtr<Tin>(t_in, {C1, N2*padded_C2}); 
     auto wt_V = GetVLAPtr<Tin>(t_wt_V, {C1, C2*K2});
     auto bias = GetVLAPtr<Tin>(t_bias, {K2});
     auto out = GetVLAPtr<Tout>(t_out, {K1, N2*K2});
@@ -60,6 +66,10 @@ for(int i=0; i < nLayers; i++) {
             if (c1 == 0) {
               copy_bias_tpp(bias[k1], out[n1][k1]);
             }
+            // if k1==0
+            // Tin tmp[N2*C2padded]; 
+            // pad_tpp(in[n1][c1], tmp);
+            // brgemm_tpp(tmp, wt_V.....);
             brgemm_tpp(in[n1][c1], wt_V[k1][c1], out[n1][k1], C1b);
             if (c1+C1b >= C1)
                 sigmoid_tpp(out[n1][k1], out[n1][k1]);
