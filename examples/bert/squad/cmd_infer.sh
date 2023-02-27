@@ -51,9 +51,9 @@ fi
 if test -z $model_path || ! test -d $model_path ; then
   if test -d ./squad_finetuned_checkpoint ; then
     model_path=./squad_finetuned_checkpoint
-  else
-    echo "Unable to find model path"
-    exit 1
+  # else
+  #   echo "Unable to find model path"
+  #   exit 1
   fi
 fi
 
