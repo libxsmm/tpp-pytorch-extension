@@ -26,7 +26,7 @@ using namespace tpp;
 #include "tensor_helper.h"
 
 static int my_rank = guess_mpi_rank();
-static int large_cache_opt = true;
+static int large_cache_opt = false;
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
