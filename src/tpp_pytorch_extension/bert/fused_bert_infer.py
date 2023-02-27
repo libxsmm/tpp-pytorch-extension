@@ -31,6 +31,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttenti
 USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
 global_layer_dtype = torch.float32
+unpad = True
 print_cou = 0
 
 
@@ -47,12 +48,13 @@ def print_grad_hook(var, name):
     var.grad_fn.register_hook(register_grad)
 
 
-def generate_mask(attention_mask):
+def generate_mask(attention_mask, use_unpad):
     assert not attention_mask is None, "attention_mask is None"
     B, _, _, S = attention_mask.shape
     S1, S2 = BlockedModule.default_blocking_factors(S)
     attention_mask = attention_mask.view([B, S]).clone()
-    nnz = (((attention_mask + 10000).count_nonzero(dim=-1) + (S2 - 1)) // S2) * S2
+    S2a = S2 if use_unpad else S
+    nnz = (((attention_mask + 10000).count_nonzero(dim=-1) + (S2a - 1)) // S2a) * S2a
     # nnz = (((attention_mask+10000).count_nonzero(dim=-1) + (S - 1))//S)*S
     nnz1 = nnz.unsqueeze(dim=1).expand([-1, S])
     a = torch.arange(S).expand([B, -1])
@@ -1045,6 +1047,7 @@ class BertLayer(nn.Module):
 class BertEncoder(BlockedModule):
     def __init__(self, config):
         super().__init__()
+        global unpad
         if not hasattr(config, "features_block_size"):
             config.features_block_size = (
                 config.hidden_size // config.num_attention_heads
@@ -1056,6 +1059,10 @@ class BertEncoder(BlockedModule):
                 raise ValueError(
                     f"config.features_block_size ({config.features_block_size}) is invald"
                 )
+        if not hasattr(config, "unpad"):
+            print("Warning: Overriding config.unpad with context manager unpad option")
+        config.unpad = unpad
+
         self.config = config
         self.layer = nn.ModuleList(
             [BertLayer(config) for _ in range(config.num_hidden_layers)]
@@ -1114,7 +1121,9 @@ class BertEncoder(BlockedModule):
             self.create_encoder()
 
         # print_grad_hook(hidden_states, 'BertEncoder:hidden_states')
-        msk, attention_mask, seq_offsets, bmap, S2 = generate_mask(attention_mask)
+        msk, attention_mask, seq_offsets, bmap, S2 = generate_mask(
+            attention_mask, self.config.unpad
+        )
         attention_mask = attention_mask.to(self.layer_dtype)
         masks = [attention_mask, seq_offsets, bmap]
         hidden_states = UnpadInput.apply(hidden_states, msk)
@@ -1236,8 +1245,9 @@ except:
 
 
 @contextmanager
-def tpp_impl(enable=True, use_low_prec=False, use_bf8=False):
+def tpp_impl(enable=True, use_unpad=True, use_low_prec=False, use_bf8=False):
     global global_layer_dtype
+    global unpad
     try:
         import transformers
 
