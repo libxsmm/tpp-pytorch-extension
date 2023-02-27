@@ -1254,6 +1254,7 @@ def tpp_impl(enable=True, use_unpad=True, use_low_prec=False, use_bf8=False):
         orig_BertEncoder = transformers.models.bert.modeling_bert.BertEncoder
         orig_BertEmbeddings = transformers.models.bert.modeling_bert.BertEmbeddings
         orig_global_layer_dtype = global_layer_dtype
+        orig_unpad = unpad
         try:
             if enable:
                 transformers.models.bert.modeling_bert.BertEncoder = BertEncoder
@@ -1262,11 +1263,13 @@ def tpp_impl(enable=True, use_unpad=True, use_low_prec=False, use_bf8=False):
                     global_layer_dtype = (
                         torch.bfloat8 if use_bf8 == True else torch.bfloat16
                     )
+                unpad = use_unpad
             yield
         finally:
             transformers.models.bert.modeling_bert.BertEncoder = orig_BertEncoder
             transformers.models.bert.modeling_bert.BertEmbeddings = orig_BertEmbeddings
             global_layer_dtype = orig_global_layer_dtype
+            unpad = orig_unpad
     except ImportError as e:
         pass
 
