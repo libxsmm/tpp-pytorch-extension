@@ -968,6 +968,9 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42, help="random seed for initialization"
     )
+    parser.add_argument(
+        "--features_block_size", type=int, default=0, help="Feature block size"
+    )
 
     parser.add_argument(
         "--local_rank",
@@ -1206,11 +1209,15 @@ def main():
             # Reload the model
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             low_prec = args.tpp_bf16 or args.tpp_bf8
+            config = AutoConfig.from_pretrained(checkpoint)
+            if args.features_block_size != 0:
+                config.features_block_size = args.features_block_size
             with tpp_bert.tpp_impl(
                 args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer
             ):
                 model = AutoModelForQuestionAnswering.from_pretrained(
-                    checkpoint
+                    checkpoint,
+                    config = config
                 )  # , force_download=True)
             model.to(args.device)
             if args.use_tpp:
