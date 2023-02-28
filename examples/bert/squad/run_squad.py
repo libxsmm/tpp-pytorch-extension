@@ -474,7 +474,7 @@ def evaluate(args, model, tokenizer, prefix=""):
     all_results = []
     start_time = timeit.default_timer()
 
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    for it, batch in tqdm(enumerate(eval_dataloader), desc="Evaluating", disable=args.no_tqdm):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
 
@@ -948,6 +948,11 @@ def main():
         "--unpad",
         action="store_true",
         help="Whether to use TPP Fused impl when available",
+    )
+    parser.add_argument(
+        "--no_tqdm",
+        action="store_true",
+        help="Whether to disable tqdm progress bar",
     )
     parser.add_argument(
         "--dist_backend",
