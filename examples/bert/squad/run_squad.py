@@ -686,6 +686,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
                     args.data_dir, filename=args.train_file
                 )
 
+        examples = examples[:200]
         features, dataset = squad_convert_examples_to_features(
             examples=examples,
             tokenizer=tokenizer,
