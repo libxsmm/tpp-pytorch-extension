@@ -1235,7 +1235,9 @@ def main():
             #     print(f"{n}: {p.dtype}")
 
             # Evaluate
+            tpp_bert.reset_debug_timers()
             result = evaluate(args, model, tokenizer, prefix=global_step)
+            tpp_bert.print_debug_timers()
 
             result = dict(
                 (k + ("_{}".format(global_step) if global_step else ""), v)
