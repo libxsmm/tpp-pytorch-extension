@@ -512,7 +512,11 @@ def evaluate(args, model, tokenizer, prefix=""):
                     )
             if args.profile and args.use_tpp:
                 tpp_bert.reset_debug_timers()
+            _t0 = timeit.default_timer()
             outputs = model(**inputs)
+            _t1 = timeit.default_timer()
+            bs = batch[0].size(0)
+            print("Iter %4d: time = %10.3f ms   %10.3f seq/sec" % (it, (_t1-_t0)*1000.0, bs / (_t1-_t0)))
             if args.profile and args.use_tpp:
                 tpp_bert.print_debug_timers()
 
