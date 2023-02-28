@@ -686,7 +686,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
                     args.data_dir, filename=args.train_file
                 )
 
-        examples = examples[:200]
+        if args.num_examples > 0:
+            examples = examples[:args.num_examples]
         features, dataset = squad_convert_examples_to_features(
             examples=examples,
             tokenizer=tokenizer,
@@ -980,6 +981,9 @@ def main():
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="random seed for initialization"
+    )
+    parser.add_argument(
+        "--num_examples", type=int, default=0, help="Number of examples to pick from dataset"
     )
     parser.add_argument(
         "--features_block_size", type=int, default=0, help="Feature block size"
