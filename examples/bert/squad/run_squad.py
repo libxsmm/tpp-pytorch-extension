@@ -473,6 +473,7 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     all_results = []
     start_time = timeit.default_timer()
+    all_times = []
 
     for it, batch in tqdm(enumerate(eval_dataloader), desc="Evaluating", disable=args.no_tqdm):
         model.eval()
@@ -516,7 +517,7 @@ def evaluate(args, model, tokenizer, prefix=""):
             outputs = model(**inputs)
             _t1 = timeit.default_timer()
             bs = batch[0].size(0)
-            print("Iter %4d: time = %10.3f ms   %10.3f seq/sec" % (it, (_t1-_t0)*1000.0, bs / (_t1-_t0)))
+            all_times.append((_t1-_t0, bs,))
             if args.profile and args.use_tpp:
                 tpp_bert.print_debug_timers()
 
@@ -551,6 +552,8 @@ def evaluate(args, model, tokenizer, prefix=""):
             all_results.append(result)
 
     evalTime = timeit.default_timer() - start_time
+    for it, (t, b) in enumerate(all_times):
+        print("Step %4d: time = %10.3f ms   bs: %3d  %10.3f seq/sec" % (it, t*1000.0, b, b / t))
     logger.info(
         "  Evaluation done in total %f secs (%f sec per example)",
         evalTime,
