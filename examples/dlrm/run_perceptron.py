@@ -52,12 +52,12 @@ if __name__ == '__main__':
 
     for m in pclPercep.modules():
         if hasattr(m, "set_blocking"):
-            m.set_blocking(16, 16, torch.float32)
-#            m.set_blocking(16, 16, torch.bfloat16)
+#            m.set_blocking(16, 16, torch.float32)
+            m.set_blocking(16, 16, torch.bfloat16)
             m.maybe_block_params()
 
     inp = torch.empty([bs, in_size]).uniform_(-1.0, 1.0)
-#    inp.to(torch.bfloat16).to(torch.float32)
+    inp.to(torch.bfloat16).to(torch.float32)
 
     inp1 = inp.clone().detach().requires_grad_()
     inp2 = inp.clone().detach().requires_grad_()
@@ -73,8 +73,6 @@ if __name__ == '__main__':
         outLoss.backward()         
     elapsed_tr = time.time() - start_t
     print('torchrecPercep, elapsed time: ', elapsed_tr/LOOP)
-
-    inp2.to(torch.bfloat16).to(torch.float32)
 
     start_t = time.time()
     for i in range(LOOP):

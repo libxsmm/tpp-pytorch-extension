@@ -136,8 +136,9 @@ class PerceptronFunction : public Function<PerceptronFunction> {
     }
 };
 
-static at::Tensor perceptron_global(at::Tensor input, at::Tensor weight, at::Tensor bias, bool _isActSigmoid) {
+static at::Tensor perceptron_global(bool _isActSigmoid, at::Tensor input, at::Tensor weight, at::Tensor bias) {
     isActSigmoid = _isActSigmoid;
+
     auto out = PerceptronFunction::apply(input, weight, bias);
     return out;
 }

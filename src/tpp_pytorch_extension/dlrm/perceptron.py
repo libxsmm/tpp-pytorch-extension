@@ -51,13 +51,11 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
         self.weight = BlockedParameter(self.weight.data)
 
     def set_blocking(self, in_block_size, out_block_size, layer_dtype=torch.float32):
-        self.in_block_size = in_block_size
-        self.out_block_size = out_block_size
         self.layer_dtype = layer_dtype
         use_low_prec = layer_dtype != torch.float32
         self.blocked_input_signature = get_blocking_signature("NC", "NCNC")
-        _ , out_block_size = BlockedModule.default_blocking_factors(self.weight.shape[0]) # TODO make it self.out_block_size
-        _ , in_block_size = BlockedModule.default_blocking_factors(self.weight.shape[1])
+        _ , out_block_size = BlockedModule.default_blocking_factors(self.weight.shape[0], out_block_size) # TODO make it self.out_block_size
+        _ , in_block_size = BlockedModule.default_blocking_factors(self.weight.shape[1], in_block_size)
         self.in_block_size_input = in_block_size
         low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
         if use_low_prec and (in_block_size%low_prec_vnni_blocking==0):
@@ -92,26 +90,26 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
     def forward(self, input):
         if self.blocking_enabled:
             self.maybe_block_params()
-            if (self.layer_dtype == torch.bfloat16):
-              input = input.to(torch.bfloat16)
             orig_input_dtype = input.dtype
 
             input = self.get_blocked_tensor(
                 input, self.blocked_input_signature, [None, self.in_block_size_input] #self.in_block_size]
             )
+
             if self.bias is None:
-                self.bias = torch.Tensor()
+                self.bias = torch.Tensor().cvt_to(self.layer_dtype)
 
             inputs = [
                 input,
                 self.weight,
                 self.bias if self.bias is not None else torch.Tensor(),
             ]
-##            inputs = [
-##                i.cvt_to(self.layer_dtype) if i.is_floating_point() else i
-##                for i in inputs
-##            ]
-            output = perceptron_cpp.perceptron_global(input, self.weight, self.bias, self.act_sigmoid)#, self.activation_s) 
+            inputs = [
+                i.cvt_to(self.layer_dtype) if i.is_floating_point() else i
+                for i in inputs
+            ]
+
+            output = perceptron_cpp.perceptron_global(self.act_sigmoid, *inputs)
 ##            output = PerceptronFunction.apply(*inputs)
             output = BlockedTensor(output, self.blocked_input_signature, orig_input_dtype)
         else:

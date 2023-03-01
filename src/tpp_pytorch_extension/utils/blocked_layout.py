@@ -356,10 +356,15 @@ class BlockedModule(torch.nn.Module):
             print("_load_from_state_dict Called - %s" % prefix)
 
     @staticmethod
-    def default_blocking_factors(S):
+    def default_blocking_factors(S, prefered_factor=None):
         blocking_prio_list = (
             [64, 48, 32, 24, 16] + list(range(62, 11, -2)) + list(range(63, 10, -2))
         )
+
+        if prefered_factor is not None:
+            if S % prefered_factor == 0:
+                return [S // prefered_factor, prefered_factor]
+
         for bs in blocking_prio_list:
             if S % bs == 0:
                 return [S // bs, bs]

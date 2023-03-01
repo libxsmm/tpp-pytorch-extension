@@ -675,7 +675,7 @@ class PadTPP {
  public:
   PadTPP() {}
   PadTPP(int in_rows, int in_cols, int out_rows, int out_cols)
-      : PadTPP(in_rows, in_cols, out_cols, out_cols, in_cols, out_cols) {}
+      : PadTPP(in_rows, in_cols, out_rows, out_cols, in_cols, out_cols) {}
   PadTPP(int in_rows, int in_cols, int out_rows, int out_cols, int ldi, int ldo)
       : in_rows(in_rows),
         in_cols(in_cols),
@@ -697,7 +697,7 @@ class PadTPP {
         zero = SetZeroTPP<T>(out_rows, out_cols - in_cols, ldo);
         zero_offset = in_cols;
       }
-    }
+    } 
   }
   void operator()(T* in, T* out) {
     cpy(in, out);
@@ -2352,7 +2352,7 @@ class SigmoidBwdTPP {
             ldi,
             ldo,
             XsmmDtype<Tin>(),
-            LIBXSMM_DATATYPE_F32,
+            XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
             LIBXSMM_MELTW_TYPE_BINARY_SUB),

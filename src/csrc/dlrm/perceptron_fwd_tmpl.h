@@ -93,5 +93,5 @@ if(isActSigmoid)
     }
   }
 }
+
 return std::vector<at::Tensor>({t_out, t_relu_mask});
-//return t_out;
