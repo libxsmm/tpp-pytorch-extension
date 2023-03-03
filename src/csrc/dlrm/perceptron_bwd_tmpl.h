@@ -9,7 +9,7 @@ auto C2 = in_sizes[3];
 auto K1 = wt_sizes[0];
 auto K2 = wt_sizes[3];
 auto padded_K2 = K2;
-constexpr int VBS = get_vnni_block_size<Tin>(); 
+const int VBS = get_vnni_block_size<Tin>(); 
 const auto grad_wt_flag = 
     (t_wt.dim() == 5 ? XformTPP::XFORM_N2V_TPP : XformTPP::XFORM_NONE_TPP);
 const auto input_trans_flag = 

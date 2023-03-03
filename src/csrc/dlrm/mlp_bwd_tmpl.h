@@ -47,7 +47,7 @@ for(int i=nLayers-1; i >=0; i--) {
     t_grad_out = t_grad_act.new_empty({N1, K1, N2, padded_K2});
     auto t_in_T = t_in;
 
-    constexpr int VBS = get_vnni_block_size<Tin>(); //TODO Tin or Tout?
+    const int VBS = get_vnni_block_size<Tin>(); //TODO Tin or Tout?
     const auto grad_wt_flag =
         (t_wt.dim() == 5 ? XformTPP::XFORM_N2V_TPP : XformTPP::XFORM_NONE_TPP);
     const auto input_trans_flag =
