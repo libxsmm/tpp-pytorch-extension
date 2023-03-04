@@ -8,8 +8,8 @@ from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedModule,
     BlockedTensor,
     get_blocking_signature,
-    get_vnni_blocking,
 )
+from tpp_pytorch_extension import get_vnni_blocking
 
 from tpp_pytorch_extension._C import _perceptron_cpp as perceptron_cpp
 
