@@ -25,10 +25,10 @@ using namespace torch::autograd;
 
 using namespace torch::autograd::profiler;
 
-REGISTER_LOCAL_SCOPE(bdot, "bdot");
-REGISTER_LOCAL_SCOPE(d_bdot, "d_bdot");
 REGISTER_LOCAL_SCOPE(ebag, "embbag");
 REGISTER_LOCAL_SCOPE(d_ebag, "d_embbag");
+REGISTER_LOCAL_SCOPE(bdot, "bdot");
+REGISTER_LOCAL_SCOPE(d_bdot, "d_bdot");
 
 #ifdef FP32_OUTPUT
 #define out_scalar_t float

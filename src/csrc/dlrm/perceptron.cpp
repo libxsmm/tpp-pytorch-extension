@@ -20,7 +20,7 @@ using namespace torch::autograd;
 
 bool isActSigmoid = false;
 
-REGISTER_LOCAL_SCOPE(fused_gemm_act, "fused_gemm_act");
+REGISTER_LOCAL_SCOPE(gemm, "gemm");
 REGISTER_LOCAL_SCOPE(d_bias, "d_bias");
 REGISTER_LOCAL_SCOPE(d_act, "d_act");
 REGISTER_LOCAL_SCOPE(di_gemm, "di_gemm");

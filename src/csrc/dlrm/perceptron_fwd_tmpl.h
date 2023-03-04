@@ -60,7 +60,7 @@ auto relu_fwd_tpp = SCOPEIT((ReLUFwdTPP<Tin, Tout>(
 
 if(isActSigmoid)
 {
-  RECORD_SCOPE(fused_gemm_act, {t_in, t_wt_V});
+  RECORD_SCOPE(gemm, {t_in, t_wt_V});
   for (int c1 = 0; c1 < C1; c1 += C1b) {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
     #pragma omp parallel for collapse(2)
@@ -77,7 +77,7 @@ if(isActSigmoid)
   }
 } else 
 {
-  RECORD_SCOPE(fused_gemm_act, {t_in, t_wt_V});
+  RECORD_SCOPE(gemm, {t_in, t_wt_V});
   for (int c1 = 0; c1 < C1; c1 += C1b) {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
     #pragma omp parallel for collapse(2)
