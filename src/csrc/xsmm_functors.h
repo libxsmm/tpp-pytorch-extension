@@ -694,6 +694,56 @@ class CpyTPP {
   UnaryTPP kernel;
 };
 
+template <typename T>
+class PadTPP {
+ public:
+  PadTPP() {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols)
+      : PadTPP(in_rows, in_cols, out_rows, out_cols, in_cols, out_cols) {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols, int ldi, int ldo)
+      : in_rows(in_rows),
+        in_cols(in_cols),
+        out_rows(out_rows),
+        out_cols(out_cols),
+        ldi(ldi),
+        ldo(ldo),
+        cpy(),
+        zero() {
+    if (out_rows > in_rows || out_cols > in_cols) {
+      TPP_ASSERT(
+          out_rows == in_rows || out_cols == in_cols,
+          "PadTPP can pad only 1 dim at a time");
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, ldo);
+      if (out_rows > in_rows) {
+        zero = SetZeroTPP<T>(out_rows - in_rows, out_cols, ldo);
+        zero_offset = in_rows * ldo;
+      } else {
+        zero = SetZeroTPP<T>(out_rows, out_cols - in_cols, ldo);
+        zero_offset = in_cols;
+      }
+    } 
+  }
+  void operator()(T* in, T* out) {
+    cpy(in, out);
+    zero(out);
+  }
+  void ref(T* in, T* out) {
+    cpy.ref(in, out);
+    zero.ref(out);
+  }
+
+ private:
+  int in_rows = 0;
+  int in_cols = 0;
+  int out_rows = 0;
+  int out_cols = 0;
+  int ldi;
+  int ldo;
+  int zero_offset = 0;
+  CpyTPP<T> cpy;
+  SetZeroTPP<T> zero;
+};
+
 template <typename Tin, typename Tout = Tin>
 class CpyBiasTPP {
  public:
@@ -2259,6 +2309,99 @@ class GeluBwdTPP : public BaseTPP {
  private:
   int N = 0;
   libxsmm_matrix_eqn_function kernel = NULL;
+};
+
+template <typename Tin, typename Tout = Tin>
+class SigmoidFwdTPP {
+ public:
+  SigmoidFwdTPP() {}
+  SigmoidFwdTPP(int rows, int cols) : SigmoidFwdTPP(rows, cols, cols, cols) {}
+  SigmoidFwdTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_SIGMOID) {}
+  void operator()(Tin* in, Tout* out) {
+    kernel((void*)in, (void*)out);
+  }
+  void ref(Tin* in, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i * ldo + j] = 1. / (1. + exp(-in[i * ldi + j]));
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  UnaryTPP kernel;
+};
+
+template <typename Tin, typename Tout = Tin>
+class SigmoidBwdTPP {
+ public:
+  SigmoidBwdTPP() {}
+  SigmoidBwdTPP(int rows, int cols) : SigmoidBwdTPP(rows, cols, cols, cols) {}
+  SigmoidBwdTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        ksub(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
+            LIBXSMM_MELTW_TYPE_BINARY_SUB),
+        kmul(rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
+  void operator()(Tin* in_grad_act, Tin* in_act, Tout* out) {
+    Tin val = 1.0;
+    ksub(&val, (void*)in_act, (void*)out);
+    kmul((void*)out, (void*)in_act, (void*)out);
+    kmul((void*)out, (void*)in_grad_act, (void*)out);
+  }
+  void ref(Tin* in_grad_act, Tin* in_act, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        int outIndex = i*ldo + j;
+        int inIndex = i*ldi+j;
+        out[outIndex] = in_grad_act[inIndex] * (1.0 - in_act[inIndex]) * in_act[inIndex];
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  BinaryTPP ksub;
+  BinaryTPP kmul;
 };
 
 template <typename Tin, typename Tout = Tin>
