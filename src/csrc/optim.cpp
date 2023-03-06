@@ -190,7 +190,6 @@ void bf16_split_add_(
     float lr) {
   GlobalPass _gp(UPD);
   MYASSERT(hi_bits.is_contiguous() && lo_bits.is_contiguous());
-  grad = grad.contiguous();
   if (grad.is_sparse()) {
     RECORD_SCOPE(split_sgd_sparse, {hi_bits});
     auto sparse = grad;
@@ -247,6 +246,7 @@ void bf16_split_add_(
     }
   } else {
     RECORD_SCOPE(split_sgd_dense, {hi_bits});
+    grad = grad.contiguous();
     auto hi_ptr = (unsigned short*)hi_bits.data_ptr();
     auto lo_ptr = (unsigned short*)lo_bits.data_ptr();
     auto grad_ptr = grad.data_ptr<at::BFloat16>();
