@@ -6,7 +6,6 @@
 #include <vector>
 #include <iostream>
 #include <time.h>
-#include <immintrin.h>
 #include <omp.h>
 #include "ext_tpp.h"
 #include "init.h"
