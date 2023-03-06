@@ -100,7 +100,7 @@ class SGD(Optimizer):
                     optim_cpp.bf16_split_add_(p.data, buf, d_p, -group["lr"])
                 else:
                     if d_p.is_sparse:
-                        optim_cpp.dense_sparse_add(p.data, d_p, -group["lr"])
+                        optim_cpp.dense_sparse_add_(p.data, d_p, -group["lr"])
                     else:
                         p.data.add_(d_p, alpha=-group["lr"])
 
