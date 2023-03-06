@@ -341,7 +341,7 @@ class BlockedModule(torch.nn.Module):
             print("_load_from_state_dict Called - %s" % prefix)
 
     @staticmethod
-    def default_blocking_factors(S, prefered_factor=None):
+    def default_blocking_factors(S, prefered_factor=None, vnni_factor=None):
         blocking_prio_list = (
             [64, 48, 32, 24, 16] + list(range(62, 11, -2)) + list(range(63, 10, -2))
         )
@@ -350,7 +350,11 @@ class BlockedModule(torch.nn.Module):
             if S % prefered_factor == 0:
                 return [S // prefered_factor, prefered_factor]
 
-        for bs in blocking_prio_list:
+        if vnni_factor:
+            vnni_blocking_prio_list = [b for b in blocking_prio_list if b % vnni_factor == 0 ]
+        else:
+            vnni_blocking_prio_list = []
+        for bs in vnni_blocking_prio_list + blocking_prio_list:
             if S % bs == 0:
                 return [S // bs, bs]
         return [1, S]

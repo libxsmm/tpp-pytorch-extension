@@ -53,11 +53,11 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
     def set_blocking(self, in_block_size, out_block_size, layer_dtype=torch.float32):
         self.layer_dtype = layer_dtype
         use_low_prec = layer_dtype != torch.float32
+        low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
         self.blocked_input_signature = get_blocking_signature("NC", "NCNC")
         _ , out_block_size = BlockedModule.default_blocking_factors(self.weight.shape[0], out_block_size) # TODO make it self.out_block_size
-        _ , in_block_size = BlockedModule.default_blocking_factors(self.weight.shape[1], in_block_size)
+        _ , in_block_size = BlockedModule.default_blocking_factors(self.weight.shape[1], in_block_size, low_prec_vnni_blocking)
         self.in_block_size_input = in_block_size
-        low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
         if use_low_prec and (in_block_size%low_prec_vnni_blocking==0):
             self.weight.set_blocking_param(
                 (

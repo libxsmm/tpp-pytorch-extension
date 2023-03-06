@@ -10,18 +10,16 @@ auto C2 = in_sizes[3];
 auto K1 = wt_sizes[0];
 auto K2 = wt_sizes[3];
 auto relu_rd = (N2*K2+15)/16;
-auto padded_C2 = C2;
 
 auto t_wt_V = wt_tensor_for_fwd(K1, K2, C1, C2, t_wt);
 if (t_wt_V.numel() != t_wt.numel()) {
-    padded_C2 = t_wt_V.size(2)*t_wt_V.size(4);
+    C2 = t_wt_V.size(2)*t_wt_V.size(4);
     t_in = get_padded_activation_for_vnni(t_in);
 }
-
 auto t_out = t_in.new_empty({N1, K1, N2, K2});
 auto t_relu_mask = at::empty({N1, K1, relu_rd}, at::kShort);
 
-auto in = GetVLAPtr<Tin>(t_in, {C1, N2*padded_C2});
+auto in = GetVLAPtr<Tin>(t_in, {C1, N2*C2});
 auto wt_V = GetVLAPtr<Tin>(t_wt_V, {C1, C2*K2});
 auto bias = GetVLAPtr<Tin>(t_bias, {K2});
 auto out = GetVLAPtr<Tout>(t_out, {K1, N2*K2});

@@ -58,7 +58,7 @@ inline at::Tensor wt_tensor_trans_n2v(
   auto in = GetVLAPtr<T>(input, {Hc * Hk});
   auto trans_n2v_tpp = SCOPEIT(
       XformExtTPP<T>(
-          Hc, Hk, Hc, Hkp2 * BS, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+          Hc, Hk, Hkp2 * BS, Hc, XformTPP::XFORM_XPOSE_N2V_TPP, true),
       XPOSE);
   RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
@@ -87,7 +87,7 @@ inline at::Tensor wt_tensor_trans_n2v_compact(
   auto in = GetVLAPtr<T>(input, {Nc, Hc * Hk});
   auto trans_n2v_tpp = SCOPEIT(
       XformExtTPP<T>(
-          Hc, Hk, Hc, Hkp2 * BS, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+          Hc, Hk, Hkp2 * BS, Hc, XformTPP::XFORM_XPOSE_N2V_TPP, true),
       XPOSE);
   RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(2)
