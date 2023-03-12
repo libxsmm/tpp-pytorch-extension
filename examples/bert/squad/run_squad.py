@@ -1148,7 +1148,10 @@ def main():
     )
 
     low_prec = args.tpp_bf16 or args.tpp_bf8
-    with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8):
+    use_infer_only = args.opt_infer and not args.do_train
+    with tpp_bert.tpp_impl(
+        args.use_tpp, low_prec, args.unpad, args.tpp_bf8, use_infer_only
+    ):
         model = AutoModelForQuestionAnswering.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
