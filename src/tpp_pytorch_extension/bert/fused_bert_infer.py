@@ -1048,7 +1048,10 @@ class BertEncoder(BlockedModule):
     def __init__(self, config):
         super().__init__()
         global unpad
-        if not hasattr(config, "features_block_size") or config.features_block_size == 0:
+        if (
+            not hasattr(config, "features_block_size")
+            or config.features_block_size == 0
+        ):
             config.features_block_size = (
                 config.hidden_size // config.num_attention_heads
             )

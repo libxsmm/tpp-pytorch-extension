@@ -475,7 +475,9 @@ def evaluate(args, model, tokenizer, prefix=""):
     start_time = timeit.default_timer()
     all_times = []
 
-    for it, batch in tqdm(enumerate(eval_dataloader), desc="Evaluating", disable=args.no_tqdm):
+    for it, batch in tqdm(
+        enumerate(eval_dataloader), desc="Evaluating", disable=args.no_tqdm
+    ):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
 
@@ -517,7 +519,12 @@ def evaluate(args, model, tokenizer, prefix=""):
             outputs = model(**inputs)
             _t1 = timeit.default_timer()
             bs = batch[0].size(0)
-            all_times.append((_t1-_t0, bs,))
+            all_times.append(
+                (
+                    _t1 - _t0,
+                    bs,
+                )
+            )
             if args.profile and args.use_tpp:
                 tpp_bert.print_debug_timers()
 
@@ -553,7 +560,10 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     evalTime = timeit.default_timer() - start_time
     for it, (t, b) in enumerate(all_times):
-        print("Step %4d: time = %10.3f ms   bs: %3d  %10.3f seq/sec" % (it, t*1000.0, b, b / t))
+        print(
+            "Step %4d: time = %10.3f ms   bs: %3d  %10.3f seq/sec"
+            % (it, t * 1000.0, b, b / t)
+        )
     logger.info(
         "  Evaluation done in total %f secs (%f sec per example)",
         evalTime,
@@ -687,7 +697,7 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
                 )
 
         if args.num_examples > 0:
-            examples = examples[:args.num_examples]
+            examples = examples[: args.num_examples]
         features, dataset = squad_convert_examples_to_features(
             examples=examples,
             tokenizer=tokenizer,
@@ -983,7 +993,10 @@ def main():
         "--seed", type=int, default=42, help="random seed for initialization"
     )
     parser.add_argument(
-        "--num_examples", type=int, default=0, help="Number of examples to pick from dataset"
+        "--num_examples",
+        type=int,
+        default=0,
+        help="Number of examples to pick from dataset",
     )
     parser.add_argument(
         "--features_block_size", type=int, default=0, help="Feature block size"
@@ -1233,8 +1246,7 @@ def main():
                 args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer
             ):
                 model = AutoModelForQuestionAnswering.from_pretrained(
-                    checkpoint,
-                    config = config
+                    checkpoint, config=config
                 )  # , force_download=True)
             model.to(args.device)
             if args.use_tpp:

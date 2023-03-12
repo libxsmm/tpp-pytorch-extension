@@ -100,7 +100,10 @@ class BuildMakeLib(Command):
             # build_dir = pathlib.Path('.'.join([self.build_temp, lib_name]))
             build_dir = pathlib.Path(self.build_temp + "/libxsmm")
             build_dir.mkdir(parents=True, exist_ok=True)
-            check_call(["make", "-f", makefile, "lib/libxsmm.a"] + build_args, cwd=str(build_dir))
+            check_call(
+                ["make", "-f", makefile, "lib/libxsmm.a"] + build_args,
+                cwd=str(build_dir),
+            )
             check_call(["rm", "-f", "lib/libxsmm.so"], cwd=str(build_dir))
 
 
