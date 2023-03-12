@@ -1976,10 +1976,14 @@ class BrgemmTPP {
         beta(beta),
         a_trans(a_trans),
         unroll_hint(unroll_hint),
+        cvt(),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
         k_rls(this, 2),
-        k_gemm_no_tc(this, 3) {}
+        k_gemm_no_tc(this, 3) {
+    if (std::is_same<Tout, bfloat8>::value)
+      cvt = ConvertTPP<float, Tout>(M, N);
+  }
   void config() {
     k_cfg(NULL);
   }
@@ -1992,8 +1996,17 @@ class BrgemmTPP {
       Tout* C,
       unsigned long long count,
       bool no_tile_cfg = false) {
+    float tmpOut[M * N];
+    Tout* tmpC = nullptr;
+    float scf = 1.0;
     libxsmm_gemm_param gemm_param;
     memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+    if (std::is_same<Tout, bfloat8>::value) {
+      tmpC = C;
+      C = (Tout*)tmpOut;
+    }
+    if (std::is_same<Tin, bfloat8>::value)
+      gemm_param.c.tertiary = (void*)&scf;
     gemm_param.op.tertiary = &count;
     gemm_param.c.primary = (void*)C;
     gemm_param.a.primary = (void*)B;
@@ -2002,6 +2015,9 @@ class BrgemmTPP {
       k_gemm_with_tc(&gemm_param);
     } else {
       k_gemm_no_tc(&gemm_param);
+    }
+    if (std::is_same<Tout, bfloat8>::value) {
+      cvt(tmpOut, tmpC);
     }
   }
   void ref(
@@ -2146,10 +2162,20 @@ class BrgemmTPP {
       l_shape.lda = p->ldb;
       l_shape.ldb = p->lda;
       l_shape.ldc = p->ldc;
-      l_shape.a_in_type = XsmmDtype<Tin>();
-      l_shape.b_in_type = XsmmDtype<Tin>();
-      l_shape.out_type = XsmmDtype<Tout>();
-      l_shape.comp_type = LIBXSMM_DATATYPE_F32;
+      if (std::is_same<Tin, bfloat8>::value) {
+        l_shape.a_in_type = LIBXSMM_DATATYPE_I8;
+        l_shape.b_in_type = LIBXSMM_DATATYPE_I8;
+        l_shape.out_type = LIBXSMM_DATATYPE_F32;
+        l_shape.comp_type = LIBXSMM_DATATYPE_I32;
+        l_flags |= LIBXSMM_GEMM_FLAG_B_UNSIGNED;
+        if (std::is_same<Tout, bfloat8>::value)
+          l_flags |= LIBXSMM_GEMM_FLAG_BETA_0; // force BETA to be 0
+      } else {
+        l_shape.a_in_type = XsmmDtype<Tin>();
+        l_shape.b_in_type = XsmmDtype<Tin>();
+        l_shape.out_type = XsmmDtype<Tout>();
+        l_shape.comp_type = LIBXSMM_DATATYPE_F32;
+      }
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
       l_brconfig.br_stride_a_hint = p->str_b * sizeof(Tin);
@@ -2178,6 +2204,7 @@ class BrgemmTPP {
   int a_trans;
   long brgemm_type = -1;
   int unroll_hint;
+  ConvertTPP<float, Tout> cvt;
   BrgemmKernel k_gemm_with_tc;
   BrgemmKernel k_cfg;
   BrgemmKernel k_rls;
