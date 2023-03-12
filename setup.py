@@ -131,7 +131,7 @@ sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 sources += glob.glob("src/csrc/dlrm/*.cpp")
 
 
-extra_compile_args = ["-fopenmp", "-g"] #, "-O0"]
+extra_compile_args = ["-fopenmp", "-g"]  # , "-O0"]
 if platform.processor() != "aarch64":
     extra_compile_args.append("-march=native")
 
@@ -166,7 +166,9 @@ setup(
     python_requires=">=3.6",
     # install_requires=["torch>=1.4.0"],
     scripts=["utils/run_dist.sh", "utils/run_dist_ht.sh"],
-    libraries=[("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j", "STATIC=1"])],
+    libraries=[
+        ("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j", "STATIC=1"])
+    ],
     ext_modules=[
         CppExtension(
             "tpp_pytorch_extension._C",

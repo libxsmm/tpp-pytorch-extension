@@ -721,7 +721,7 @@ class PadTPP {
         zero = SetZeroTPP<T>(out_rows, out_cols - in_cols, ldo);
         zero_offset = in_cols;
       }
-    } 
+    }
   }
   void operator()(T* in, T* out) {
     cpy(in, out);
@@ -2370,7 +2370,8 @@ class SigmoidBwdTPP {
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
             LIBXSMM_MELTW_TYPE_BINARY_SUB),
-        kmul(rows,
+        kmul(
+            rows,
             cols,
             ldi,
             ldo,
@@ -2388,9 +2389,10 @@ class SigmoidBwdTPP {
   void ref(Tin* in_grad_act, Tin* in_act, Tout* out) {
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
-        int outIndex = i*ldo + j;
-        int inIndex = i*ldi+j;
-        out[outIndex] = in_grad_act[inIndex] * (1.0 - in_act[inIndex]) * in_act[inIndex];
+        int outIndex = i * ldo + j;
+        int inIndex = i * ldi + j;
+        out[outIndex] =
+            in_grad_act[inIndex] * (1.0 - in_act[inIndex]) * in_act[inIndex];
       }
     }
   }

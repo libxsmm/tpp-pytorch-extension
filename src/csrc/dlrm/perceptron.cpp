@@ -1,5 +1,5 @@
-#include <torch/torch.h>
 #include <ATen/record_function.h>
+#include <torch/torch.h>
 //#include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/extension.h>
 
@@ -50,8 +50,8 @@ inline void omp_reduce_buf(
 
 // s'(z) = (1 - s(z)) * s(z)
 at::Tensor d_sigmoid(at::Tensor grad_act, at::Tensor act) {
-//    auto s = torch::sigmoid(z);
-    return grad_act*(1 - act)*act;
+  //    auto s = torch::sigmoid(z);
+  return grad_act * (1 - act) * act;
 }
 
 /*
@@ -65,7 +65,6 @@ static std::vector<at::Tensor> tpp_forward(
     at::Tensor t_in,
     at::Tensor t_wt,
     at::Tensor t_bias) {
-    
   GlobalPass _gp(FWD);
   if (t_in.dtype() == at::kFloat) {
     typedef float Tin;
@@ -80,71 +79,79 @@ static std::vector<at::Tensor> tpp_forward(
   }
 }
 /*
-std::vector<at::Tensor> backward(at::Tensor grad_act, at::Tensor in, at::Tensor wt, at::Tensor act) {
+std::vector<at::Tensor> backward(at::Tensor grad_act, at::Tensor in, at::Tensor
+wt, at::Tensor act) {
 //    auto dy = at::sigmoid_backward(grad_act, act);
     auto dy = d_sigmoid(grad_act, act);
-    auto d_in = torch::mm(dy, wt); //dy*wt.t() 
-    auto d_wt = torch::mm(dy.t(), in); //in.t * dy - vnni    
-    auto d_bias = dy.sum(0, true);//torch::mm(dy, input.t()); dy.sum(dim, keep dim)
-    return {d_in, d_wt, d_bias};
+    auto d_in = torch::mm(dy, wt); //dy*wt.t()
+    auto d_wt = torch::mm(dy.t(), in); //in.t * dy - vnni
+    auto d_bias = dy.sum(0, true);//torch::mm(dy, input.t()); dy.sum(dim, keep
+dim) return {d_in, d_wt, d_bias};
 }
 */
 static std::vector<at::Tensor> tpp_backward(
-    at::Tensor _t_grad_act, 
-    at::Tensor t_in, 
-    at::Tensor t_wt, 
+    at::Tensor _t_grad_act,
+    at::Tensor t_in,
+    at::Tensor t_wt,
     at::Tensor t_act,
     at::Tensor t_relu_mask) {
+  auto t_grad_act = _t_grad_act.contiguous();
 
-    auto t_grad_act = _t_grad_act.contiguous();
-
-    GlobalPass _gp(BWD);
-    if (t_grad_act.dtype() == at::kFloat) {
-        typedef float Tin;
-        typedef float Tout;
+  GlobalPass _gp(BWD);
+  if (t_grad_act.dtype() == at::kFloat) {
+    typedef float Tin;
+    typedef float Tout;
 #include "perceptron_bwd_tmpl.h"
-    } else if (t_grad_act.dtype() == at::kBFloat16) {
-        typedef bfloat16 Tin;
-        typedef bfloat16 Tout;
+  } else if (t_grad_act.dtype() == at::kBFloat16) {
+    typedef bfloat16 Tin;
+    typedef bfloat16 Tout;
 #include "perceptron_bwd_tmpl.h"
-    } else {
-        TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
-    }    
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
+  }
 }
 
 class PerceptronFunction : public Function<PerceptronFunction> {
-    public:
-    static at::Tensor forward(AutogradContext *ctx, at::Tensor input, 
-                                at::Tensor weight, at::Tensor bias) {
-        auto output = tpp_forward(input, weight, bias);
-        auto t_out = output[0];
-        auto t_relu_mask = output[1];
-        ctx->save_for_backward({input, weight, bias, t_out, t_relu_mask});
-        return t_out;//output;
-    }
+ public:
+  static at::Tensor forward(
+      AutogradContext* ctx,
+      at::Tensor input,
+      at::Tensor weight,
+      at::Tensor bias) {
+    auto output = tpp_forward(input, weight, bias);
+    auto t_out = output[0];
+    auto t_relu_mask = output[1];
+    ctx->save_for_backward({input, weight, bias, t_out, t_relu_mask});
+    return t_out; // output;
+  }
 
-    static tensor_list backward(AutogradContext *ctx, tensor_list grad_output) {
-        auto saved = ctx->get_saved_variables(); 
-        auto input = saved[0];
-        auto weight = saved[1];
-        auto bias = saved[2];
-        auto act = saved[3];
-        auto relu_mask = saved[4];
+  static tensor_list backward(AutogradContext* ctx, tensor_list grad_output) {
+    auto saved = ctx->get_saved_variables();
+    auto input = saved[0];
+    auto weight = saved[1];
+    auto bias = saved[2];
+    auto act = saved[3];
+    auto relu_mask = saved[4];
 
-        auto outTensorList = tpp_backward(grad_output[0], input, weight, act, relu_mask);
-        return outTensorList;
-    }
+    auto outTensorList =
+        tpp_backward(grad_output[0], input, weight, act, relu_mask);
+    return outTensorList;
+  }
 };
 
-static at::Tensor perceptron_global(bool _isActSigmoid, at::Tensor input, at::Tensor weight, at::Tensor bias) {
-    isActSigmoid = _isActSigmoid;
+static at::Tensor perceptron_global(
+    bool _isActSigmoid,
+    at::Tensor input,
+    at::Tensor weight,
+    at::Tensor bias) {
+  isActSigmoid = _isActSigmoid;
 
-    auto out = PerceptronFunction::apply(input, weight, bias);
-    return out;
+  auto out = PerceptronFunction::apply(input, weight, bias);
+  return out;
 }
 
 REGISTER_SUBMODULE(_perceptron_cpp, m) {
   m.def("perceptron_global", &perceptron_global, "Perceptron interface");
-//  m.def("forward", &forward, "Perceptron Forward");
-//  m.def("backward", &backward, "Perceptron Backward");
+  //  m.def("forward", &forward, "Perceptron Forward");
+  //  m.def("backward", &backward, "Perceptron Backward");
 }

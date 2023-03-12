@@ -26,7 +26,8 @@ from tpp_pytorch_extension._C import _perceptron_cpp as perceptron_cpp
 ##        (grad_input, grad_weight, grad_bias) = perceptron_cpp.backward(grad_output, input, weight, act)
 ##        return grad_input, grad_weight, grad_bias
 
-class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
+
+class Perceptron(BlockedModule, torch.nn.Linear):  # nn.Module):
     def __init__(
         self,
         in_size: int,
@@ -44,7 +45,7 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
         self.blocked_input_signature = None
         self.out_block_size = out_size
         self.in_block_size = in_size
-        self.act_sigmoid = True if activation==torch.sigmoid else False
+        self.act_sigmoid = True if activation == torch.sigmoid else False
         self._activation_fn: Callable[[torch.Tensor], torch.Tensor] = activation
         if bias:
             self.bias = BlockedParameter(self.bias.data)
@@ -55,10 +56,14 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
         use_low_prec = layer_dtype != torch.float32
         low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
         self.blocked_input_signature = get_blocking_signature("NC", "NCNC")
-        _ , out_block_size = BlockedModule.default_blocking_factors(self.weight.shape[0], out_block_size) # TODO make it self.out_block_size
-        _ , in_block_size = BlockedModule.default_blocking_factors(self.weight.shape[1], in_block_size, low_prec_vnni_blocking)
+        _, out_block_size = BlockedModule.default_blocking_factors(
+            self.weight.shape[0], out_block_size
+        )  # TODO make it self.out_block_size
+        _, in_block_size = BlockedModule.default_blocking_factors(
+            self.weight.shape[1], in_block_size, low_prec_vnni_blocking
+        )
         self.in_block_size_input = in_block_size
-        if use_low_prec and (in_block_size%low_prec_vnni_blocking==0):
+        if use_low_prec and (in_block_size % low_prec_vnni_blocking == 0):
             self.weight.set_blocking_param(
                 (
                     [
@@ -93,7 +98,9 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
             orig_input_dtype = input.dtype
 
             input = self.get_blocked_tensor(
-                input, self.blocked_input_signature, [None, self.in_block_size_input] #self.in_block_size]
+                input,
+                self.blocked_input_signature,
+                [None, self.in_block_size_input],  # self.in_block_size]
             )
 
             if self.bias is None:
@@ -110,8 +117,10 @@ class Perceptron(BlockedModule, torch.nn.Linear):#nn.Module):
             ]
 
             output = perceptron_cpp.perceptron_global(self.act_sigmoid, *inputs)
-##            output = PerceptronFunction.apply(*inputs)
-            output = BlockedTensor(output, self.blocked_input_signature, orig_input_dtype)
+            ##            output = PerceptronFunction.apply(*inputs)
+            output = BlockedTensor(
+                output, self.blocked_input_signature, orig_input_dtype
+            )
         else:
             output = torch.sigmoid(torch.nn.Linear.forward(self, input))
 
