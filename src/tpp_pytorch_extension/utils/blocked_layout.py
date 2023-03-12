@@ -217,20 +217,21 @@ class BlockedTensor(object):
             if isinstance(t, tuple):
                 return tuple(unblock(t1) for t1 in t)
             if isinstance(t, dict):
-                return {k : unblock(v) for k, v in t.items()}
+                return {k: unblock(v) for k, v in t.items()}
             return t
 
         if kwargs is None:
             kwargs = {}
         # args = [a._t if hasattr(a, '_t') else a for a in args]
         # args = [
-        #     a.unblocked_tensor() if isinstance(a, BlockedTensor) else a for a in args
+        #     a.unblocked_tensor() if isinstance(a, BlockedTensor) else a for a in args
         # ]
         args = unblock(args)
         kwargs = unblock(kwargs)
         ret = func(*args, **kwargs)
         # return MetadataTensor(ret, metadata=self._metadata)
         return ret
+
 
 #    def __torch_function__(self, func, types, args=(), kwargs=None):
 #        if kwargs is None:
@@ -277,6 +278,8 @@ class BlockedParameter(torch.nn.Parameter):
                 blocking_factors=self.blocking_param[0],
                 permute=self.blocking_param[1],
             )
+        if self.blocked_dtype == torch.uint8:
+            self.requires_grad_(False)
         self.data = self.blocking_manager.block(self.data).cvt_to(self.blocked_dtype)
         if self.grad is not None:
             self.grad.data = self.blocking_manager.block(self.grad.data).cvt_to(
@@ -351,7 +354,9 @@ class BlockedModule(torch.nn.Module):
                 return [S // prefered_factor, prefered_factor]
 
         if vnni_factor:
-            vnni_blocking_prio_list = [b for b in blocking_prio_list if b % vnni_factor == 0 ]
+            vnni_blocking_prio_list = [
+                b for b in blocking_prio_list if b % vnni_factor == 0
+            ]
         else:
             vnni_blocking_prio_list = []
         for bs in vnni_blocking_prio_list + blocking_prio_list:
