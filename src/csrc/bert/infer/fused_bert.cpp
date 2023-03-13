@@ -83,17 +83,24 @@ class BertEncoderLayer {
       at::Tensor& t_W,
       at::Tensor& t_B,
       at::Tensor& t_Out) {
+    const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
     auto sizes = t_HS.sizes();
     long S1 = sizes[0];
     long F1 = sizes[1];
     long S2 = sizes[2];
     long F2 = sizes[3];
+    if (use_at_vnni_local) {
+      TPP_ASSERT(sizes.size() == 5, "Incorrect dims");
+      S2 = sizes[3];
+      F2 = sizes[2] * sizes[4];
+    } else {
+      TPP_ASSERT(sizes.size() == 4, "Incorrect dims");
+    }
     bool dt_low_prec = (t_HS.dtype() != at::kFloat);
     auto W = GetVLAPtr<T>(t_W, {F1, F2 * F2});
     auto B = GetVLAPtr<T>(t_B, {F2});
     auto Out = GetVLAPtr<T>(t_Out, {F1, S2 * F2});
     auto HS = GetVLAPtr<T>(t_HS, {F1, S2 * F2});
-    const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
 
     auto xform = XformTPP::XFORM_XPOSE_TPP;
     if (vnni && dt_low_prec) {
@@ -272,7 +279,7 @@ class BertEncoderLayer {
 
   template <typename T, typename LT = T>
   inline void output(
-      at::Tensor& t_in,
+      at::Tensor t_in,
       at::Tensor& t_in2,
       at::Tensor& t_wt,
       at::Tensor& t_bias,
@@ -364,7 +371,7 @@ class BertEncoderLayer {
 
   template <typename T>
   inline void intermediate(
-      at::Tensor& t_in,
+      at::Tensor t_in,
       at::Tensor& t_wt,
       at::Tensor& t_bias,
       at::Tensor& t_out) {
@@ -441,6 +448,7 @@ class BertEncoderLayer {
     auto& t_SO = t_scratch[4];
     auto& t_I = t_scratch[5];
     const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
+    auto t_HS_qkv = t_HS;
 
     if (use_at_vnni_local) {
       auto sizes = t_HS.sizes();
@@ -448,12 +456,12 @@ class BertEncoderLayer {
       long F1 = sizes[1];
       long S2 = sizes[2];
       long F2 = sizes[3];
-      t_HS = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);
+      t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);
     }
 
-    q_gemm<T>(t_HS, t_Wq, t_Bq, t_QL);
-    k_gemm<T>(t_HS, t_Wk, t_Bk, t_KL_TV);
-    v_gemm<T>(t_HS, t_Wv, t_Bv, t_VL_V);
+    q_gemm<T>(t_HS_qkv, t_Wq, t_Bq, t_QL);
+    k_gemm<T>(t_HS_qkv, t_Wk, t_Bk, t_KL_TV);
+    v_gemm<T>(t_HS_qkv, t_Wv, t_Bv, t_VL_V);
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
     output<T, LT>(t_CL, t_HS, t_Wso, t_Bso, t_Gso, t_Beta_so, t_SO);
