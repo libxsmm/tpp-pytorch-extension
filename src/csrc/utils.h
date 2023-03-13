@@ -112,6 +112,15 @@ inline double getTime() {
   return rdtsc() * ifreq;
 }
 
+inline int env2int(const char* env_name, int def_val = 0) {
+  int val = def_val;
+  auto env = getenv(env_name);
+  if (env)
+    val = atoi(env);
+  // printf("Using %s = %d\n", env_name, val);
+  return val;
+}
+
 inline int guess_mpi_rank() {
   const char* env_names[] = {
       "RANK", "PMI_RANK", "OMPI_COMM_WORLD_RANK", "MV2_COMM_WORLD_RANK"};
