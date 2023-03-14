@@ -1809,6 +1809,10 @@ class XformExtTPP {
     }
     if (dtype == LIBXSMM_DATATYPE_BF8) {
       this->xtype = xtype = XformTPP::XFORM_N2V_TPP;
+      this->out_rows = out_rows = in_rows;
+      this->out_cols = out_cols = in_cols;
+      this->ldi = ldi = in_cols;
+      this->ldo = ldo = in_cols;
     }
     const int BS = xsmm_get_vnni_block_size(dtype == LIBXSMM_DATATYPE_BF8 ? LIBXSMM_DATATYPE_BF16 : dtype);
     if (xtype == XformTPP::XFORM_N2V_TPP) {
@@ -1851,6 +1855,7 @@ class XformExtTPP {
         unary_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_NORMT;
       }
     }
+    // printf("xtype = %d  in_rows_p = %d in_rows %d in_cols_p %d in_cols %d\n", xtype, in_rows_p, in_rows, in_cols_p, in_cols);
     TPP_ASSERT(
         (in_rows_p >= in_rows && in_cols_p >= in_cols),
         "Invalid output rows or cols value\n");
