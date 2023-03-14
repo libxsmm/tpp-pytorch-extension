@@ -656,6 +656,112 @@ class ConvertTPP {
   bool init_done = false;
 };
 
+#ifdef __aarch64__
+template <>
+class ConvertTPP<float, bfloat8> {
+ using Tin = float;
+ using Tout = bfloat8;
+ public:
+  ConvertTPP() {}
+  ConvertTPP(int N) : ConvertTPP(1, N) {}
+  ConvertTPP(int rows, int cols) : ConvertTPP(rows, cols, cols, cols) {}
+  ConvertTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
+                                                  : LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_QUANT),
+        init_done(true) {}
+  void operator()(Tin* in, Tout* out) {
+    float scf = 1.0f;
+    if (!(XsmmDtype<Tin>() == LIBXSMM_DATATYPE_F32 &&
+          XsmmDtype<Tout>() == LIBXSMM_DATATYPE_F32) ||
+        ((void*)in != (void*)out))
+      kernel((void*) in, (void*)&scf, nullptr, (void*)out, nullptr);
+  }
+  void ref(Tin* in, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i * ldo + j] = (Tout)in[i * ldi + j];
+      }
+    }
+  }
+  bool initialized() {
+    return init_done;
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  UnaryTPP kernel;
+  bool init_done = false;
+};
+
+template <>
+class ConvertTPP<bfloat8, float> {
+ using Tin = bfloat8;
+ using Tout = float;
+ public:
+  ConvertTPP() {}
+  ConvertTPP(int N) : ConvertTPP(1, N) {}
+  ConvertTPP(int rows, int cols) : ConvertTPP(rows, cols, cols, cols) {}
+  ConvertTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
+                                                  : LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_DEQUANT),
+        init_done(true) {}
+  void operator()(Tin* in, Tout* out) {
+    float scf = 1.0f;
+    if (!(XsmmDtype<Tin>() == LIBXSMM_DATATYPE_F32 &&
+          XsmmDtype<Tout>() == LIBXSMM_DATATYPE_F32) ||
+        ((void*)in != (void*)out))
+      kernel((void*) in, (void*)&scf, nullptr, (void*)out, nullptr);
+  }
+  void ref(Tin* in, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i * ldo + j] = (Tout)in[i * ldi + j];
+      }
+    }
+  }
+  bool initialized() {
+    return init_done;
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  UnaryTPP kernel;
+  bool init_done = false;
+};
+#endif
+
 template <typename T>
 class CpyTPP {
  public:
