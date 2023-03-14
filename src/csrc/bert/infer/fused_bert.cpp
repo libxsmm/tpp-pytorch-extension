@@ -326,7 +326,7 @@ class BertEncoderLayer {
         Ncb)));
     auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);
     auto layer_norm_fwd_tpp =
-        SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
+        SCOPEIT((LayerNormFwdTPP<bfloat16, LT>(Nk, S2/2, Hk, eps)), LAYER_NORM);
 
     {
       RECORD_SCOPE(o_gemm, {t_in, t_wt});
@@ -347,12 +347,12 @@ class BertEncoderLayer {
               add_tpp(out[s1][nk], in2[s1][nk], out[s1][nk]);
               if (!parallelized_on_nk && nk == Nk - 1) {
                 layer_norm_fwd_tpp(
-                    out[s1][0],
+                    (bfloat16*)out[s1][0],
                     gamma[0],
                     beta[0],
                     nullptr,
                     nullptr,
-                    out[s1][0]);
+                    (bfloat16*)out[s1][0]);
               }
             }
           },
@@ -363,7 +363,7 @@ class BertEncoderLayer {
 #pragma omp parallel for
         for (int s1 = 0; s1 < S1; s1++) {
           layer_norm_fwd_tpp(
-              out[s1][0], gamma[0], beta[0], nullptr, nullptr, out[s1][0]);
+              (bfloat16*)out[s1][0], gamma[0], beta[0], nullptr, nullptr, (bfloat16*)out[s1][0]);
         }
       }
     }

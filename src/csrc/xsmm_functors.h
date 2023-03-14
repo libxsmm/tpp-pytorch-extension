@@ -330,7 +330,7 @@ class BaseTPP {
         fprintf(stderr, "Unable to get JIT kernel for %s\n", hash.c_str());
         exit(1);
       }
-      // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
+      printf("TPP: %s @ %p\n", hash.c_str(), kernel);
       kernel_cache[hash] = kernel;
     }
     return kernel;
@@ -373,6 +373,26 @@ class UnaryTPP : public BaseTPP {
         dt_compute(dt_compute),
         flags(flags),
         type(type) {
+          if (dt_in == LIBXSMM_DATATYPE_BF8 && dt_out == LIBXSMM_DATATYPE_BF8) {
+            this->dt_out = this->dt_in = LIBXSMM_DATATYPE_BF16;
+            if (dt_compute == LIBXSMM_DATATYPE_BF8)
+              this-> dt_compute = LIBXSMM_DATATYPE_BF16;
+
+            if (cols % 2 == 0) {
+              this->cols = cols / 2;
+              this->ldi = ldi / 2;
+              this->ldo = ldo / 2;
+	    } else if (rows % 2 == 0) {
+              this->rows = rows / 2;
+	    } else
+            { printf("Invalid args\n"); exit(1);}
+          } else if (dt_in == LIBXSMM_DATATYPE_BF8 && type == LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_X2_OP_ADD) {
+		  this->cols = cols / 2;
+		  this->ldi = ldi / 2;
+		  this->dt_in = LIBXSMM_DATATYPE_BF16;
+	  }
+
+
     kernel = (libxsmm_meltwfunction_unary)get_kernel();
     if (kernel)
       initialized = true;
@@ -514,6 +534,15 @@ class BinaryTPP : public BaseTPP {
         dt_compute(dt_compute),
         flags(flags),
         type(type) {
+		if (dt_in0 == LIBXSMM_DATATYPE_BF8 && dt_in1 == LIBXSMM_DATATYPE_BF8 && dt_out == LIBXSMM_DATATYPE_BF8) {
+			this->dt_in0 = this->dt_in1 = this->dt_out = LIBXSMM_DATATYPE_BF16;
+			if (cols % 2 == 0) {
+				this->cols = cols / 2;
+				this->ldi0 = ldi0 / 2;
+				this->ldi1 = ldi1 / 2;
+				this->ldo = ldo / 2;
+			}
+		}
     kernel = (libxsmm_meltwfunction_binary)get_kernel();
     if (kernel)
       initialized = true;
@@ -676,7 +705,7 @@ class ConvertTPP<float, bfloat8> {
             ldi,
             ldo,
             XsmmDtype<Tin>(),
-            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_I8, /*XsmmDtype<Tout>(),*/
             XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
                                                   : LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_UNARY_NONE,
@@ -727,7 +756,7 @@ class ConvertTPP<bfloat8, float> {
             cols,
             ldi,
             ldo,
-            XsmmDtype<Tin>(),
+            LIBXSMM_DATATYPE_I8, /*XsmmDtype<Tin>(),*/
             XsmmDtype<Tout>(),
             XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
                                                   : LIBXSMM_DATATYPE_F32,
@@ -1778,7 +1807,10 @@ class XformExtTPP {
           "Only Transpose Xofrm supportd for FP32 datatype, specified %d\n",
           (int)xtype);
     }
-    const int BS = xsmm_get_vnni_block_size(dtype);
+    if (dtype == LIBXSMM_DATATYPE_BF8) {
+      this->xtype = xtype = XformTPP::XFORM_N2V_TPP;
+    }
+    const int BS = xsmm_get_vnni_block_size(dtype == LIBXSMM_DATATYPE_BF8 ? LIBXSMM_DATATYPE_BF16 : dtype);
     if (xtype == XformTPP::XFORM_N2V_TPP) {
       in_rows_p = out_rows;
       in_cols_p = out_cols;
@@ -1871,6 +1903,7 @@ class XformExtTPP {
         zero(tmp + zero_offset);
         kernel((void*)tmp, (void*)out);
       } else {
+	//printf("Calling XformTPP with xtype=%d out_rows=%d out_cols=%d\n", xtype, out_rows, out_cols);
         kernel((void*)in, (void*)out);
       }
     }
@@ -3511,10 +3544,11 @@ class VarSoftMaxFwdTPP {
             S3,
             S3,
             LIBXSMM_DATATYPE_F32,
-            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
-            LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
+            LIBXSMM_MELTW_TYPE_BINARY_MUL),
+	cvt(S3) {}
   void operator()(int S1, Tin* in, Tout* out) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
@@ -3536,7 +3570,8 @@ class VarSoftMaxFwdTPP {
       }
       sum = 1.0 / sum;
       for (int s1 = 0; s1 < S1; s1++) {
-        kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
+        kmul(&tmp[s1 * S3], &sum, &tmp[s1 * S3]);
+        cvt(&tmp[s1 * S3], &out[s1 * S2 * S3 + s2 * S3]);
       }
     }
   }
@@ -3656,6 +3691,7 @@ class VarSoftMaxFwdTPP {
   UnaryTPP kexp;
   UnaryTPP ksum;
   BinaryTPP kmul;
+  ConvertTPP<float, Tout> cvt;
 };
 
 template <typename T1, typename T2, typename T3>
