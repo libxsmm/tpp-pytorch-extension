@@ -37,7 +37,7 @@ if (Sp_t % QKV_BLOCKSIZE != 0) {
   nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
 }
 
-auto sfmask = -10000 * q_data.new_ones(S_t - Sp_t, at::kFloat).contiguous();
+auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t, at::kFloat).contiguous();
 auto sfmask_a = GetVLAPtr<float>(sfmask, {1L});
 
 auto q_data_a = GetVLAPtr<T>(q_data, {S_t, HS_t});
