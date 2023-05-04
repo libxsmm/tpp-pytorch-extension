@@ -172,8 +172,11 @@ if (training) {
       }
 #else
       auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto qkv_loop =
-          ThreadedLoop<3>({{0L, N, BN, false}, {S1}, {N}}, loop_scheme);
+      // auto qkv_loop =
+      //    ThreadedLoop<3>({{0L, N, BN, false}, {S1}, {N}}, loop_scheme);
+      auto qkv_loop = ThreadedLoop<3>(
+          {LoopSpecs{0L, N, BN, false}, LoopSpecs{S1}, LoopSpecs{N}},
+          loop_scheme);
       qkv_loop(
           [&](int* ind) {
             int bn = ind[0], s1 = ind[1], nk = ind[2];
@@ -212,7 +215,9 @@ if (training) {
       }
 #else
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
-      auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+      // auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+      auto qkv_loop =
+          ThreadedLoop<2>({LoopSpecs{S1}, LoopSpecs{N}}, loop_scheme);
       qkv_loop(
           [&](int* ind) {
             int s1 = ind[0], nk = ind[1];
@@ -251,7 +256,9 @@ if (training) {
       }
 #else
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
-      auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+      // auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+      auto qkv_loop =
+          ThreadedLoop<2>({LoopSpecs{S1}, LoopSpecs{N}}, loop_scheme);
       qkv_loop(
           [&](int* ind) {
             int s1 = ind[0], nk = ind[1];

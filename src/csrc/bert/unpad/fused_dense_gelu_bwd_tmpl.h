@@ -140,8 +140,11 @@ auto dw_gemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
   }
 #else
   auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-  auto di_loop =
-      ThreadedLoop<3>({{0, Nk, Nkb, false}, {S1}, {Nc}}, loop_scheme);
+  auto di_loop = ThreadedLoop<3>(
+      {LoopSpecs{0, Nk, Nkb, false}, LoopSpecs{S1}, LoopSpecs{Nc}},
+      loop_scheme);
+  // auto di_loop =
+  //    ThreadedLoop<3>({{0, Nk, Nkb, false}, {S1}, {Nc}}, loop_scheme);
   di_loop(
       [&](int* ind) {
         int nk = ind[0], s1 = ind[1], nc = ind[2];
@@ -181,7 +184,9 @@ auto dw_gemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
     }
   }
 #else
-  auto dw_loop = ThreadedLoop<3>({{0, S1, BS, false}, {Nk}, {Nc}}, "aBC");
+  // auto dw_loop = ThreadedLoop<3>({{0, S1, BS, false}, {Nk}, {Nc}}, "aBC");
+  auto dw_loop = ThreadedLoop<3>(
+      {LoopSpecs{0, S1, BS, false}, LoopSpecs{Nk}, LoopSpecs{Nc}}, "aBC");
   dw_loop(
       [&](int* ind) {
         int s1 = ind[0], nk = ind[1], nc = ind[2];
