@@ -14,7 +14,7 @@ set -e
 ARCH=$(lscpu | grep Architecture | awk '{print $2}')
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 CONDA_INSTALL_DIR=`realpath ./miniconda3`
-ENV_NAME=pt1131
+ENV_NAME=pt200
 
 while (( "$#" )); do
   case "$1" in
@@ -47,7 +47,7 @@ ${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.8
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
 if [ ${ARCH} == "x86_64" ] ; then
-  conda install -y pytorch==1.13.1 torchvision torchaudio cpuonly intel-openmp gperftools ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c pytorch -c intel -c conda-forge 
+  conda install -y pytorch==2.0.0 torchvision torchaudio cpuonly intel-openmp gperftools ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c pytorch -c intel -c conda-forge 
 elif [ ${ARCH} == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
 conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
