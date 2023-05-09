@@ -3028,7 +3028,7 @@ class SoftMaxFwdTPP {
     }
     void* build_kernel() override {
       auto dt_in = XsmmDtype<Tin>();
-      libxsmm_blasint tmp_ld = S2;
+      libxsmm_blasint tmp_ld = S3;
       libxsmm_blasint ld = S2 * S3;
       libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
       meqn_push_unary_op(my_eqn0, LIBXSMM_MELTW_TYPE_UNARY_EXP);
@@ -3091,7 +3091,7 @@ class SoftMaxFwdTPP {
     }
     void* build_kernel() override {
       auto dt_out = XsmmDtype<Tout>();
-      libxsmm_blasint tmp_ld = S2;
+      libxsmm_blasint tmp_ld = S3;
       libxsmm_blasint ld = S2 * S3;
       libxsmm_blasint my_eqn1 = libxsmm_matrix_eqn_create();
       meqn_push_binary_op(

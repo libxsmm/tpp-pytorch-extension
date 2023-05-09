@@ -271,7 +271,7 @@ class BlockedParameter(torch.nn.Parameter):
                 return
             self.unblocked_dtype = self.dtype
             self.blocked_dtype = (
-                self.blocking_param[2] if len(self.blocking_param) > 2 else self.dtype
+                self.blocking_param[2] if (len(self.blocking_param) > 2 and self.blocking_param[2] is not None) else self.dtype
             )
             self.blocking_manager = BlockingManager(
                 self.data.shape,

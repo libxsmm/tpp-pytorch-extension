@@ -122,6 +122,8 @@ sources += glob.glob("src/csrc/bert/pad/*.cpp")
 sources += glob.glob("src/csrc/bert/unpad/*.cpp")
 sources += glob.glob("src/csrc/bert/infer/*.cpp")
 
+sources += glob.glob("src/csrc/llm/*.cpp")
+
 # GNN sources
 sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
 sources += glob.glob("src/csrc/gnn/common/*.cpp")
