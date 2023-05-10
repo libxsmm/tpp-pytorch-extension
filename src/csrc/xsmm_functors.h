@@ -36,6 +36,19 @@
   } while (0)
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
+
+typedef struct tensor_bcsc_t {
+  void *data;
+  unsigned int *rowidx;
+  unsigned int *colptr;
+  unsigned int *Nblocks_offsets;
+  unsigned int n_blocks;
+  unsigned int nnz;
+  unsigned int bcsc_bn;
+  unsigned int bcsc_bk;
+  unsigned int bcsc_blocks_in_bn;
+} tensor_bcsc_t;
+
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -782,6 +795,43 @@ class CpyBiasTPP {
   UnaryTPP kernel;
 };
 
+template <typename Tin, typename Tout = Tin>
+class CpyBiasRowTPP {
+ public:
+  CpyBiasRowTPP() {}
+  CpyBiasRowTPP(int rows, int cols) : CpyBiasRowTPP(rows, cols, rows) {}
+  CpyBiasRowTPP(int rows, int cols, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            1,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
+                                                  : LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_BCAST_ROW,
+            LIBXSMM_MELTW_TYPE_UNARY_IDENTITY) {}
+  void operator()(Tin* in, Tout* out) {
+    kernel((void*)in, (void*)out);
+  }
+  void ref(Tin* in, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[j * ldo + i] = (Tout)in[j];
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldo;
+  UnaryTPP kernel;
+};
 template <typename Tin, typename Tout = Tin>
 class CpyBcastTPP {
  public:
@@ -1926,6 +1976,179 @@ class XformExtTPP {
   ConvertTPP<float, bfloat16> cvt;
   CpyTPP<T> cpy;
   SetZeroTPP<T> zero;
+};
+
+template <typename Tin, typename Tout>
+class SpmmTPP {
+ public:
+  SpmmTPP() {}
+  SpmmTPP(
+      long M,
+      long N,
+      long K,
+      long bcsc_bk,
+      long bcsc_bn,
+      long lda,
+      long ldb,
+      long ldc,
+      float beta,
+      int hardwire_sparsity)
+      : M(M),
+        N(N),
+        K(K),
+        bcsc_bk(bcsc_bk),
+        bcsc_bn(bcsc_bn),   
+        lda(lda),
+        ldb(ldb),
+        ldc(ldc),
+        beta(beta),
+        hardwire_sparsity(hardwire_sparsity),
+        k_spmm_with_tc(this, 0),
+        k_cfg(this, 1),
+        k_rls(this, 2),
+        k_spmm_no_tc(this, 3) {}
+  void config() {
+    k_cfg(NULL);
+  }
+  void release() {
+    k_rls(NULL);
+  }
+  void operator()(
+      Tin* A,
+      tensor_bcsc_t& B,
+      unsigned long long B_n_cols,    
+      unsigned long long B_col_offs,
+      Tout* C,
+      bool no_tile_cfg = false) {
+    libxsmm_gemm_param gemm_param;
+    memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+   
+    gemm_param.a.primary = (void*)A;
+    gemm_param.b.primary = (void*)B.data;
+    gemm_param.b.secondary = (void*)&(B.colptr[B_col_offs]);
+    gemm_param.b.tertiary  = (void*)B.rowidx;
+    gemm_param.b.quaternary = &B_n_cols;
+    gemm_param.c.primary = (void*)C;  
+    if (!no_tile_cfg) {
+      k_spmm_with_tc(&gemm_param);
+    } else {
+      k_spmm_no_tc(&gemm_param);
+    }
+  }
+  
+  long flops() {
+    return 2L * M * N * K;
+  }
+
+  class SpmmKernel : public BaseTPP {
+   public:
+    SpmmKernel() {}
+    SpmmKernel(SpmmTPP* p, int config) : p(p), config(config) {
+      auto dt_in = XsmmDtype<Tin>();
+      auto dt_out = XsmmDtype<Tout>();
+      long type = -1;
+      if (dt_in == LIBXSMM_DATATYPE_F32) {
+        TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_F32, "SPMM Assert\n");
+        type = 0;
+      } else if (dt_in == LIBXSMM_DATATYPE_BF16) {
+        TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_BF16, "SPMM Assert\n");
+        type = 1;
+      } else {
+        type = 2;
+      }
+      spmm_type = type;
+      kernel.gemm = (libxsmm_gemmfunction)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_gemm_param* gemm_param) {
+      if (!initialized)
+        return;
+      kernel.gemm(gemm_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "spmm_bm%ld_bn%ld_bk%ld_t%ld_beta%d_lda%ld_ldb%ld_ldc%ld_cfg%d_hwspars%d",
+          p->M,
+          p->N,
+          p->K,
+          spmm_type,
+          (int)p->beta,
+          (long)p->lda,
+          (long)p->ldb,
+          (long)p->ldc,
+          config,
+          (int)p->hardwire_sparsity);
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      libxsmm_gemm_shape l_shape;
+      libxsmm_bitfield l_flags = LIBXSMM_GEMM_FLAGS('N', 'N');
+      libxsmm_bitfield l_prefetch_flags = 0;
+      libxsmm_xmmfunction l_test_jit = {NULL};
+
+      if (p->hardwire_sparsity == 0)
+        l_flags |= LIBXSMM_GEMM_FLAG_NO_HARDWIRED_SPARSITY;
+
+      if (p->beta == 0)
+        l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+
+      // config = 0 - normal
+      // config = 1 - no tile release
+      // config = 2 - no tile config
+      // config = 3 - spmm with no tile config or release
+      if (config == 1) {
+        l_flags |= LIBXSMM_GEMM_FLAG_NO_RESET_TILECONFIG;
+      } else if (config == 2) {
+        l_flags |= LIBXSMM_GEMM_FLAG_NO_SETUP_TILECONFIG;
+      } else if (config == 3) {
+        l_flags |=
+            (LIBXSMM_GEMM_FLAG_NO_SETUP_TILECONFIG |
+             LIBXSMM_GEMM_FLAG_NO_RESET_TILECONFIG);
+      }
+
+      /* setting update GEMM struct */
+      l_shape.m = 1;
+      l_shape.n = 0;
+      l_shape.k = 0;
+      l_shape.lda = p->lda;
+      l_shape.ldb = p->ldb;
+      l_shape.ldc = p->ldc;
+      l_shape.a_in_type = XsmmDtype<Tin>();
+      l_shape.b_in_type = XsmmDtype<Tin>();
+      l_shape.out_type = XsmmDtype<Tout>();
+      l_shape.comp_type = LIBXSMM_DATATYPE_F32;
+      l_test_jit.gemm = libxsmm_create_packed_spgemm_bcsc(l_shape, l_flags, l_prefetch_flags, p->M, p->bcsc_bk, p->bcsc_bn, NULL, NULL);       
+
+      return (void*)l_test_jit.gemm;
+    }
+
+   private:
+    SpmmTPP* p;
+    int config;
+    libxsmm_xmmfunction kernel;
+    long spmm_type = -1;
+  };
+
+ private:
+  long M;
+  long N;
+  long K;
+  long bcsc_bk;
+  long bcsc_bn;
+  libxsmm_blasint lda;
+  libxsmm_blasint ldb;
+  libxsmm_blasint ldc;
+  float beta;
+  int hardwire_sparsity;
+  SpmmKernel k_spmm_with_tc;
+  SpmmKernel k_cfg;
+  SpmmKernel k_rls;
+  SpmmKernel k_spmm_no_tc;
 };
 
 template <typename Tin, typename Tout>

@@ -38,8 +38,10 @@ REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 class BertEncoderLayer {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv;
+  tensor_bcsc_t t_Wq_bcsc, t_Wk_bcsc, t_Wv_bcsc;
   at::Tensor t_Bq, t_Bk, t_Bv;
   at::Tensor t_Wso, t_Wi, t_Wo;
+  tensor_bcsc_t t_Wso_bcsc, t_Wi_bcsc, t_Wo_bcsc;
   at::Tensor t_Bso, t_Bi, t_Bo;
   at::Tensor t_Gso, t_Go, t_Beta_so, t_Beta_o;
   float eps, one_by_sqrt_H;
@@ -68,12 +70,25 @@ class BertEncoderLayer {
     t_Bo = params[i++];
     t_Go = params[i++];
     t_Beta_o = params[i++];
-
+  
     one_by_sqrt_H = 1.0 / sqrt(H);
     auto sizes = t_Wq.sizes();
     // std::cout << "t_Wq.sizes" << sizes << std::endl;
     F2 = sizes[3];
     H1 = H / F2;
+    
+    auto wt_i_sizes = t_Wi.sizes();
+    auto Nk = wt_i_sizes[0];
+    auto Nc = wt_i_sizes[1];
+    auto Hc = wt_i_sizes[2];
+    auto Hk = wt_i_sizes[3];
+    if (t_Wi.dtype() == at::kFloat) { // ? float : bfloat16;
+      auto wt_i = GetVLAPtr<float>(t_Wi, {Nc, Hc * Hk}); 
+      create_bcsc_from_blocked_weight_tensor(wt_i[0][0], Nk, Nc, Hc, Hk, env2int("V", 1), env2int("BK", 4), env2int("BN", 4), omp_get_max_threads(), &t_Wi_bcsc);
+    } else {
+      auto wt_i = GetVLAPtr<bfloat16>(t_Wi, {Nc, Hc * Hk});
+      create_bcsc_from_blocked_weight_tensor(wt_i[0][0], Nk, Nc, Hc, Hk, env2int("V", 1), env2int("BK", 4), env2int("BN", 4), omp_get_max_threads(), &t_Wi_bcsc);
+    }
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
 
@@ -188,7 +203,7 @@ class BertEncoderLayer {
     auto& t_offs = t_masks[1];
     auto& t_bmap = t_masks[2];
     auto sizes = t_QL.sizes();
-    long B = t_offs.sizes()[0] - 1;
+    //long B = t_offs.sizes()[0] - 1;
     long S1 = sizes[0];
     long S2 = sizes[2];
     long F2 = sizes[3];
@@ -373,6 +388,7 @@ class BertEncoderLayer {
   inline void intermediate(
       at::Tensor t_in,
       at::Tensor& t_wt,
+      tensor_bcsc_t& t_wt_bcsc,
       at::Tensor& t_bias,
       at::Tensor& t_out) {
     auto in_sizes = t_in.sizes();
@@ -387,33 +403,42 @@ class BertEncoderLayer {
 
     auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
     const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
+#if 0
     if (use_at_vnni_local) {
       t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
     }
-
-    auto Ncb = 8;
-
+#endif
+    if (t_in.dtype() == at::kFloat) {
+      t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
+    } else {
+      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
+    }
     // Create TPPs
-    auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, Hk), BIAS);
-    auto brgemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
+    auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
+    auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+    auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
         S2,
         Hk,
-        Hc,
-        S2 * Hc,
-        Hk * Hc,
+        Nc*Hc,
+        t_wt_bcsc.bcsc_bk,
+        t_wt_bcsc.bcsc_bn,
+        Nc*Hc,
+        -1,
+        Hk,
         1.0,
-        XformTPP::XFORM_NONE_TPP,
-        use_at_vnni_local ? 1 : 0,
-        Ncb)));
+        0)));
     auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(S2 * Hk), ACT);
-
+#if 0
     auto in = GetVLAPtr<T>(t_in, {Nc, S2 * Hc});
     auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+#endif
+    auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
 
     {
       RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
+#if 0
       auto loop_scheme = large_cache_opt ? "acB" : "aBC";
       auto gemm_loop =
           ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
@@ -429,9 +454,28 @@ class BertEncoderLayer {
             if (!(nc + Ncb < Nc)) { // last iter
               gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
             }
+#else
+      auto loop_scheme = large_cache_opt ? "bA" : "AB";
+      auto gemm_loop =
+          ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
+      gemm_loop(
+          [&](int* ind) {
+            int s1 = ind[0], i_n = ind[1];
+            T tmp_block[S2*Hk];
+            int cur_n_blocks = (t_wt_bcsc.Nblocks_offsets[i_n+1] - t_wt_bcsc.Nblocks_offsets[i_n])/t_wt_bcsc.bcsc_bn;
+            for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt_bcsc.bcsc_blocks_in_bn) {
+              int nk = (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/S2;
+              copy_bias_tpp(bias[nk], tmp_block);
+              spmm_tpp(in[s1], 
+                       t_wt_bcsc, t_wt_bcsc.bcsc_blocks_in_bn, (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/t_wt_bcsc.bcsc_bn, 
+                       tmp_block, true);
+              trans_out_tpp( tmp_block, out[s1][nk] );
+              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);     
+            }
+#endif
           },
-          [&]() { brgemm_tpp.config(); },
-          [&]() { brgemm_tpp.release(); });
+          [&]() { spmm_tpp.config(); },
+          [&]() { spmm_tpp.release(); });
     }
   }
 
@@ -465,7 +509,7 @@ class BertEncoderLayer {
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
     output<T, LT>(t_CL, t_HS, t_Wso, t_Bso, t_Gso, t_Beta_so, t_SO);
-    intermediate<T>(t_SO, t_Wi, t_Bi, t_I);
+    intermediate<T>(t_SO, t_Wi, t_Wi_bcsc, t_Bi, t_I);
     output<T, LT>(t_I, t_SO, t_Wo, t_Bo, t_Go, t_Beta_o, t_Out);
 
     return t_Out;
@@ -488,13 +532,18 @@ class BertEncoder {
     H = HS / N;
     auto nLayers = params.size();
     layers.reserve(nLayers);
-    for (int i = 0; i < nLayers; i++) {
+    for (long unsigned int i = 0; i < nLayers; i++) {
       layers.push_back(new BertEncoderLayer(params[i], eps, N, H));
     }
   }
 
   ~BertEncoder() {
-    for (int i = 0; i < layers.size(); i++) {
+    for (long unsigned int i = 0; i < layers.size(); i++) {
+      libxsmm_free( layers[i]->t_Wi_bcsc.data);
+      libxsmm_free( layers[i]->t_Wi_bcsc.rowidx);
+      libxsmm_free( layers[i]->t_Wi_bcsc.colptr);
+      libxsmm_free( layers[i]->t_Wi_bcsc.Nblocks_offsets);
+      //printf("N logical columns are %d with %d nnz\n", layers[i]->t_Wi_bcsc.n_blocks,  layers[i]->t_Wi_bcsc.nnz );
       delete layers[i];
       layers[i] = nullptr;
     }

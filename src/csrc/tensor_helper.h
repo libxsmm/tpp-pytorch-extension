@@ -13,6 +13,146 @@
 
 #include "utils.h"
 
+template<typename DType>
+void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int bcsc_bk, int bcsc_bn, int N_target_blocks, tensor_bcsc_t *sparse_wt) {
+  int nnz = 0, l_zero_block = 0;
+  int N = Nb*bn;
+  int K = Kb*bk*v;
+  unsigned int l_val_idx = 0;
+  unsigned int l_nz_block_id = 0;
+  unsigned int *l_colptr;
+  unsigned int *l_rowidx;
+  DType        *l_data, val;
+  unsigned int *Nblocks_offsets = (unsigned int*)libxsmm_aligned_malloc(sizeof(unsigned int) * N_target_blocks, 64);
+  int l_i, l_j, l_di, l_dj, l_ui, l_uj, l_ii, l_jj, total_nnz_processed, nnz_entries_per_block, all_done = 0, n_blocks = 0;
+  LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
+  int l_blocking_step = (bn + bcsc_bn - 1)/bcsc_bn;
+
+  if (bn % bcsc_bn != 0) {
+    printf("WARNING: end up with assymetric logical blocks...\n");
+  }
+
+  /* First pass to count number of non-zeros */
+  for ( l_i = 0; l_i < N/bcsc_bn; l_i++ ) {
+    for ( l_j = 0; l_j < K/bcsc_bk; l_j++ ) {
+      l_ui = l_i * bcsc_bn;
+      l_uj = l_j * bcsc_bk;
+      l_zero_block = 1;
+      /* Scan block to see if there are non-zeros */
+      for (l_di = 0; l_di < bcsc_bn; l_di++) {
+        for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
+          l_ii = l_ui + l_di;
+          l_jj = l_uj + l_dj;
+          val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+          if ((val != 0) && (val != -0)) {
+            l_zero_block = 0;
+          }
+        }
+      }
+      if (l_zero_block == 0) {
+        nnz += bcsc_bk * bcsc_bn;
+      }
+    }
+  }
+
+  /* Allocate BCSC structures */
+  l_colptr  = (unsigned int*) libxsmm_aligned_malloc( (N/bcsc_bn+1)*sizeof(unsigned int), 64 );
+  l_rowidx  = (unsigned int*) libxsmm_aligned_malloc( nnz/(bcsc_bk*bcsc_bn)*sizeof(unsigned int),   64 );
+  l_data    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );
+
+  /* Second pass to create BCSC */
+  l_nz_block_id = 0;
+  l_colptr[N/bcsc_bn] = nnz/(bcsc_bk*bcsc_bn);
+  for ( l_i = 0; l_i < N/bcsc_bn; l_i++ ) {
+    l_colptr[l_i] = l_nz_block_id;
+    for ( l_j = 0; l_j < K/bcsc_bk; l_j++ ) {
+      l_ui = l_i * bcsc_bn;
+      l_uj = l_j * bcsc_bk;
+      l_zero_block = 1;
+      /* Scan block to see if there are non-zeros */
+      for (l_di = 0; l_di < bcsc_bn; l_di++) {
+        for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
+          l_ii = l_ui + l_di;
+          l_jj = l_uj + l_dj;
+          val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+          if ((val != 0) && (val != -0)) {
+            l_zero_block = 0;
+          }
+        }
+      }
+      if (l_zero_block == 0) {
+        l_rowidx[l_nz_block_id] = l_j;
+        for (l_di = 0; l_di < bcsc_bn; l_di++) {
+          for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
+            l_ii = l_ui + l_di;
+            l_jj = l_uj + l_dj;
+            val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+            l_data[l_val_idx] = val;
+            l_val_idx++;
+          }
+        }
+        l_nz_block_id++;  
+      }
+    }
+  }
+
+  /* Convert the BCSC to be in VNNI4T if need be */
+  if ((v == 4) && (sizeof(DType) == 2) && (bcsc_bk > v)) {
+    l_di = 0;
+    l_dj = 0;  
+    for ( l_i = 0; l_i < nnz/(bcsc_bk*bcsc_bn); l_i++) {
+      DType tmp_block[bcsc_bk*bcsc_bn];
+      memcpy(tmp_block, &l_data[l_i*(bcsc_bk*bcsc_bn)], (bcsc_bk*bcsc_bn)*sizeof(DType));
+      for (l_di = 0; l_di < bcsc_bn; l_di++) {
+        for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
+          l_data[l_i*(bcsc_bk*bcsc_bn) + (l_dj/v) * (bcsc_bn * v) + l_di * v + l_dj % v] = tmp_block[l_di * bcsc_bk + l_dj];    
+        }
+      }
+    }
+  }
+
+  /* Logically partition the sparse BCSC matrix  */
+  total_nnz_processed = 0;
+  nnz_entries_per_block = (nnz+N_target_blocks-1)/N_target_blocks;
+  all_done = 0;
+  l_i = 0;
+  l_j = 0;
+  Nblocks_offsets[0] = 0;
+  while (all_done == 0) {
+    int nnz_so_far = 0;
+    while ((nnz_so_far < nnz_entries_per_block) && (l_j < N/bcsc_bn)) {
+      if (l_j + l_blocking_step <= N/bcsc_bn) {
+        nnz_so_far += (l_colptr[l_j+l_blocking_step] - l_colptr[l_j]) * bcsc_bk * bcsc_bn;
+        l_j += l_blocking_step;
+      } else {
+        /* Should not happen  */
+      }
+    }
+    total_nnz_processed += nnz_so_far;
+    l_i++;
+    if (total_nnz_processed < nnz) {
+      Nblocks_offsets[l_i] = l_j*bcsc_bn;
+      if (l_j >= N/bcsc_bn) {
+        all_done = 1; 
+      }
+    } else {
+      Nblocks_offsets[l_i] = N;
+      all_done = 1; 
+    }
+  }
+  n_blocks = l_i;
+
+  sparse_wt->data = (void*)l_data;
+  sparse_wt->colptr = l_colptr;
+  sparse_wt->rowidx = l_rowidx;
+  sparse_wt->Nblocks_offsets = Nblocks_offsets;
+  sparse_wt->n_blocks = n_blocks;
+  sparse_wt->nnz = nnz;
+  sparse_wt->bcsc_bn = bcsc_bn;
+  sparse_wt->bcsc_bk = bcsc_bk;
+  sparse_wt->bcsc_blocks_in_bn = l_blocking_step;
+}
+
 template <typename T>
 inline at::Tensor wt_tensor_n2v(
     long Nk,
@@ -330,7 +470,19 @@ inline at::Tensor act_tensor_trans(
   return input.permute({0, 1, 3, 2}).contiguous();
 #else
   auto output = input.new_empty({S1, N, H, S2});
-  if (input.dtype() == at::kBFloat16) {
+  if (input.dtype() == at::kFloat) {
+    auto out = GetVLAPtr<float>(output, {H * S2});
+    auto in = GetVLAPtr<float>(input, {H * S2});
+    auto trans_tpp =
+        SCOPEIT(XformExtTPP<float>(S2, H, XformTPP::XFORM_XPOSE_TPP), XPOSE);
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+      for (int n = 0; n < S1 * N; n++) {
+        trans_tpp(in[n], out[n]);
+      }
+    }
+  } else if (input.dtype() == at::kBFloat16) {
     auto out = GetVLAPtr<bfloat16>(output, {H * S2});
     auto in = GetVLAPtr<bfloat16>(input, {H * S2});
     auto trans_tpp =
