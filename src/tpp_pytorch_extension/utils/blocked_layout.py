@@ -249,6 +249,8 @@ class BlockedParameter(torch.nn.Parameter):
                 blocking_factors=self.blocking_param[0],
                 permute=self.blocking_param[1],
             )
+        if self.blocked_dtype == torch.uint8:
+            self.requires_grad_(False)
         self.data = self.blocking_manager.block(self.data).cvt_to(self.blocked_dtype)
         if self.grad is not None:
             self.grad.data = self.blocking_manager.block(self.grad.data).cvt_to(
