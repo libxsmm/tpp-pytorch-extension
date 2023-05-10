@@ -388,18 +388,20 @@ class GPTJBlock(BlockedModule):
             params += [self.mlp.fc_out.weight, self.mlp.fc_out.bias]
             params += [self.attn.embed_positions]
             self.cpp_block = fused_gptj_cpp.GPTJBlock(params, self.ln_1.eps, self.attn.num_attention_heads, self.attn.head_dim, self.attn.bias.size(-1), self.attn.rotary_dim)
-            self.blocked_input_signature = get_blocking_signature("BSF", "BSFSF")
+            self.blocked_input_signature = get_blocking_signature("BSF", "FBSF")
         orig_hidden_states = hidden_states
         S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, S, self.features_block_size])
+        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
      
         if layer_past is not None:
-            add_tensor_or_empty(layer_past[0])
-            add_tensor_or_empty(layer_past[1])
+            #add_tensor_or_empty(layer_past[0])
+            #add_tensor_or_empty(layer_past[1])
+            add_tensor_or_empty(self.get_blocked_tensor(layer_past[0], self.blocked_input_signature, [None, None, self.features_block_size]))
+            add_tensor_or_empty(self.get_blocked_tensor(layer_past[1], self.blocked_input_signature, [None, None, self.features_block_size]))
         else:
             inputs += [dummy_tensor, dummy_tensor]
         add_tensor_or_empty(attention_mask)
@@ -412,6 +414,8 @@ class GPTJBlock(BlockedModule):
         hs, k, v = self.cpp_block.forward(inputs, use_cache)
 
         hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
+        k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
+        v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
 
         if use_cache:
             outputs = (hs, (k, v,),)
