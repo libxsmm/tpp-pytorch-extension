@@ -117,6 +117,11 @@ class BuildMakeLib(Command):
                 ["cp", "-alf", lib_name + "/lib/.", self.final_common_libs_dir],
                 cwd=str(self.build_temp),
             )
+            # remove dynamic libraries to force static linking
+            check_call(
+                ["rm", "-f", "libxsmm.so", "libparlooper.so"],
+                cwd=str(self.build_clib),
+            )
 
 
 sources = [
