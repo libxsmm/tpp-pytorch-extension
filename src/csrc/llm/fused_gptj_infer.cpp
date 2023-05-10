@@ -215,7 +215,7 @@ inline void fc_out(
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
   auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
 
-  auto Ncb = 8;
+  auto Ncb = Nc;
 
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, Hk), BIAS);
   auto brgemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
@@ -232,7 +232,8 @@ inline void fc_out(
 
   {
     RECORD_SCOPE(o_gemm, {t_in, t_wt});
-    auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    //auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? "acB" : "aCb";
     auto ogemm_loop =
         ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
     ogemm_loop(
@@ -296,7 +297,7 @@ inline void fc_in(
     t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
   }
 
-  auto Ncb = 8;
+  auto Ncb = Nc;
 
   // Create TPPs
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, Hk), BIAS);
@@ -319,7 +320,8 @@ inline void fc_in(
 
   {
     RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
-    auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    //auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? "acB" : "aCb";
     auto gemm_loop =
         ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
     gemm_loop(
@@ -466,7 +468,8 @@ class GPTJBlock {
         XformTPP::XFORM_NONE_TPP,
         use_at_vnni_local ? 1 : 0,
         C1)));
-    auto loop_scheme = large_cache_opt ? "bA" : "AB";
+    //auto loop_scheme = large_cache_opt ? "bA" : "AB";
+    auto loop_scheme = large_cache_opt ? "bA" : "Ba";
     auto qkv_loop = ThreadedLoop<2>({{S1}, {K1}}, loop_scheme);
     {
       RECORD_SCOPE(qkv_gemm, {t_HS, t_W});
@@ -685,7 +688,7 @@ class GPTJBlock {
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_in<T>(t_HS_qkv, t_Wi, t_Bi, t_I);
     // printf("reached at %s:%d\n", __func__, __LINE__);
-    fc_out<T>(t_SO, t_I, t_HS, t_Wo, t_Bo, t_Out);
+    fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out);
     // printf("reached at %s:%d\n", __func__, __LINE__);
 
     if (use_cache) {
