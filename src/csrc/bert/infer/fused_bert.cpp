@@ -98,6 +98,23 @@ class BertEncoderLayer {
       create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wso), t_Wso.sizes()[0], t_Wso.sizes()[1], t_Wso.sizes()[2], t_Wso.sizes()[3], get_vnni_block_size(t_Wso.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wso_bcsc);    
     }
 
+    if (t_Wq.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wq_bcsc);
+    } else {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wq_bcsc);   
+    }
+
+    if (t_Wk.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wk_bcsc);
+    } else {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wk_bcsc);
+    }
+
+    if (t_Wv.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wv_bcsc);
+    } else {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wv_bcsc);
+    }
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
 
@@ -105,27 +122,24 @@ class BertEncoderLayer {
   inline void qkv_gemm(
       at::Tensor& t_HS,
       at::Tensor& t_W,
+      tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
-    const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
     auto sizes = t_HS.sizes();
     long S1 = sizes[0];
     long F1 = sizes[1];
-    long S2 = sizes[2];
-    long F2 = sizes[3];
-    if (use_at_vnni_local) {
-      TPP_ASSERT(sizes.size() == 5, "Incorrect dims");
-      S2 = sizes[3];
-      F2 = sizes[2] * sizes[4];
+    long S2, F2;
+    if (t_HS.dtype() == at::kFloat) {
+      S2 = sizes[2];
+      F2 = sizes[3];
     } else {
-      TPP_ASSERT(sizes.size() == 4, "Incorrect dims");
+      S2 = sizes[3];
+      F2 = sizes[2]*sizes[4]; 
     }
     bool dt_low_prec = (t_HS.dtype() != at::kFloat);
-    auto W = GetVLAPtr<T>(t_W, {F1, F2 * F2});
     auto B = GetVLAPtr<T>(t_B, {F2});
     auto Out = GetVLAPtr<T>(t_Out, {F1, S2 * F2});
-    auto HS = GetVLAPtr<T>(t_HS, {F1, S2 * F2});
-
+    auto HS = GetVLAPtr<T>(t_HS, {F1 * S2 * F2});
     auto xform = XformTPP::XFORM_XPOSE_TPP;
     if (vnni && dt_low_prec) {
       if (transpose) {
@@ -138,34 +152,46 @@ class BertEncoderLayer {
     }
     auto xform_tpp =
         SCOPEIT(XformExtTPP<T>(S2, F2, xform, true), transpose ? XPOSE : VNNI);
-    auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, F2), BIAS);
-    auto qkv_gemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
+
+    // Create TPPs
+    auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, F2), BIAS);
+    auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, F2, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+    auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
         S2,
         F2,
+        F1*F2,
+        t_wt_bcsc.bcsc_bk,
+        t_wt_bcsc.bcsc_bn,
+        F1*F2,
+        -1,
         F2,
-        S2 * F2,
-        F2 * F2,
         1.0,
-        XformTPP::XFORM_NONE_TPP,
-        use_at_vnni_local ? 1 : 0,
-        F1)));
+        0)));
     auto loop_scheme = large_cache_opt ? "bA" : "AB";
-    auto qkv_loop = ThreadedLoop<2>({{S1}, {F1}}, loop_scheme);
+    auto qkv_loop = ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
     {
       RECORD_SCOPE(qkv_gemm, {t_HS, t_W});
       qkv_loop(
           [&](int* ind) {
-            int s1 = ind[0], nk = ind[1];
-            T tmp[S2 * F2];
-            T* tmpp = (transpose || (vnni && dt_low_prec)) ? tmp : Out[s1][nk];
-            copy_bias_tpp(B[nk], tmpp);
-            qkv_gemm_tpp(HS[s1][0], W[nk][0], tmpp, F1, true);
-            if (transpose || (vnni && dt_low_prec)) {
-              xform_tpp(tmpp, Out[s1][nk]);
+            int s1 = ind[0], i_n = ind[1];
+            T tmp_block[S2*F2];
+            T tmp[S2*F2];
+            int cur_n_blocks = (t_wt_bcsc.Nblocks_offsets[i_n+1] - t_wt_bcsc.Nblocks_offsets[i_n])/t_wt_bcsc.bcsc_bn;
+            for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt_bcsc.bcsc_blocks_in_bn) {
+              int nk = (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/S2;
+              T* tmpp = (transpose || (vnni && dt_low_prec)) ? tmp : Out[s1][nk];
+              copy_bias_tpp(B[nk], tmp_block);
+              spmm_tpp(HS[s1], 
+                       t_wt_bcsc, t_wt_bcsc.bcsc_blocks_in_bn, (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/t_wt_bcsc.bcsc_bn, 
+                       tmp_block, true);
+              trans_out_tpp( tmp_block, tmpp );
+              if (transpose || (vnni && dt_low_prec)) {
+                xform_tpp(tmpp, Out[s1][nk]);
+              }    
             }
           },
-          [&]() { qkv_gemm_tpp.config(); },
-          [&]() { qkv_gemm_tpp.release(); });
+          [&]() { spmm_tpp.config(); },
+          [&]() { spmm_tpp.release(); });
     }
   }
 
@@ -173,13 +199,14 @@ class BertEncoderLayer {
   inline void q_gemm(
       at::Tensor& t_HS,
       at::Tensor& t_W,
+      tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
     const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
     if (use_at_vnni_local) {
-      qkv_gemm<T, true, true>(t_HS, t_W, t_B, t_Out);
+      qkv_gemm<T, true, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
     } else {
-      qkv_gemm<T, false, false>(t_HS, t_W, t_B, t_Out);
+      qkv_gemm<T, false, false>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
     }
   }
 
@@ -187,18 +214,20 @@ class BertEncoderLayer {
   inline void k_gemm(
       at::Tensor& t_HS,
       at::Tensor& t_W,
+      tensor_bcsc_t& t_wt_bcsc,  
       at::Tensor& t_B,
       at::Tensor& t_Out) {
-    qkv_gemm<T, true, true>(t_HS, t_W, t_B, t_Out);
+    qkv_gemm<T, true, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
   }
 
   template <typename T>
   inline void v_gemm(
       at::Tensor& t_HS,
       at::Tensor& t_W,
+      tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
-    qkv_gemm<T, false, true>(t_HS, t_W, t_B, t_Out);
+    qkv_gemm<T, false, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
   }
 
   template <typename T>
@@ -523,9 +552,11 @@ class BertEncoderLayer {
     auto& t_CL = t_scratch[3];
     auto& t_SO = t_scratch[4];
     auto& t_I = t_scratch[5];
+#if 0
     const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
+#endif
     auto t_HS_qkv = t_HS;
-
+#if 0
     if (use_at_vnni_local) {
       auto sizes = t_HS.sizes();
       long S1 = sizes[0];
@@ -534,10 +565,21 @@ class BertEncoderLayer {
       long F2 = sizes[3];
       t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);
     }
+#endif
+    auto sizes = t_HS.sizes();
+    long S1 = sizes[0];
+    long F1 = sizes[1];
+    long S2 = sizes[2];
+    long F2 = sizes[3];
+    if (t_HS_qkv.dtype() == at::kFloat) {
+      t_HS_qkv = act_tensor_trans(S1, F1, S2, F2, t_HS);
+    } else {
+      t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
+    }
 
-    q_gemm<T>(t_HS_qkv, t_Wq, t_Bq, t_QL);
-    k_gemm<T>(t_HS_qkv, t_Wk, t_Bk, t_KL_TV);
-    v_gemm<T>(t_HS_qkv, t_Wv, t_Bv, t_VL_V);
+    q_gemm<T>(t_HS_qkv, t_Wq, t_Wq_bcsc, t_Bq, t_QL);
+    k_gemm<T>(t_HS_qkv, t_Wk, t_Wk_bcsc, t_Bk, t_KL_TV);
+    v_gemm<T>(t_HS_qkv, t_Wv, t_Wv_bcsc, t_Bv, t_VL_V);
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
     output<T, LT>(t_CL, t_HS, t_Wso, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
