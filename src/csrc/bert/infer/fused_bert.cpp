@@ -321,8 +321,6 @@ class BertEncoderLayer {
     auto Nk = wt_sizes[0];
     auto Hk = wt_sizes[3];
 
-    auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
     const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
 #if 0
     if (use_at_vnni_local) {
@@ -339,7 +337,6 @@ class BertEncoderLayer {
 #endif
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto in2 = GetVLAPtr<T>(t_in2, {Nk, S2 * Hk});
-    auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
     auto gamma = GetVLAPtr<LT>(t_gamma, {Hk});
     auto beta = GetVLAPtr<LT>(t_beta, {Hk});
@@ -437,7 +434,6 @@ class BertEncoderLayer {
     auto Nk = wt_sizes[0];
     auto Hk = wt_sizes[3];
 
-    auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
     const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
 #if 0
     if (use_at_vnni_local) {
@@ -473,7 +469,7 @@ class BertEncoderLayer {
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
 
     {
-      RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
+      RECORD_SCOPE(i_gemm, {t_in, t_wt});
 #if 0
       auto loop_scheme = large_cache_opt ? "acB" : "aBC";
       auto gemm_loop =
