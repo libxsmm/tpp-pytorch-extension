@@ -14,6 +14,76 @@
 #include "utils.h"
 
 template<typename DType>
+int l_ullcompare( const void* a , const void* b ) {
+  const unsigned long long aull = *( const unsigned long long* )a;
+  const unsigned long long bull = *( const unsigned long long* )b;
+  if ( aull < bull ) {
+    return -1;
+  } else if( aull > bull ) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+template<typename DType>
+void l_shuffle_array(unsigned long long *array, int n) {
+  if (n > 1)
+  {
+    int i;
+    for (i = 0; i < n - 1; i++)
+    {
+      int j = i + rand() / (RAND_MAX / (n - i) + 1);
+      unsigned long long t = array[j];
+      array[j] = array[i];
+      array[i] = t;
+    }
+  }
+}
+
+template<typename DType>
+int l_is_dense_grid_point(unsigned long long grid_point_id, int n_dense_grid_points, unsigned long long *grid_point_array) {
+  unsigned long long key = grid_point_id;
+  unsigned long long *found_ptr = (unsigned long long*) bsearch(&key, grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
+  return ((found_ptr == NULL) ? 0 : 1);
+}
+
+template<typename DType>
+void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int sparse_block_bk, int sparse_block_bn, double sparse_frac) {
+  int N = Nb*bn;
+  int K = Kb*bk*v;
+  LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
+  unsigned long long n_grid_points = (N/sparse_block_bn) * (K/sparse_block_bk);
+  unsigned long long *grid_point_array = (unsigned long long *) malloc(n_grid_points * sizeof(unsigned long long));
+  unsigned long long n_dense_grid_points = (unsigned long long) ((double)(1.0-sparse_frac) * n_grid_points);
+  unsigned long long i;
+  long long l_i, l_j, in, ik;
+  for (i = 0; i < n_grid_points; i++) {
+    grid_point_array[i] = (unsigned long long)i;
+  }
+  /* Pemute array of n grid points and consider densifying on the ones with id <= n_dense_grid_points */
+  l_shuffle_array<DType>(grid_point_array, n_grid_points);
+  qsort(grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
+  for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
+    for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
+      if (l_is_dense_grid_point<DType>(l_i * (K/sparse_block_bk) + l_j, n_dense_grid_points, grid_point_array) == 0) {
+        long long l_ui = l_i * sparse_block_bn;
+        long long l_uj = l_j * sparse_block_bk;
+        long long l_di = 0, l_dj = 0;
+        for (l_di = 0; l_di < sparse_block_bn; l_di++) {
+          for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
+            in = l_ui+l_di;
+            ik = l_uj+l_dj;
+            LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+          }
+        }
+      }
+    }
+  }
+  free(grid_point_array);
+}
+
+template<typename DType>
 void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int bcsc_bk, int bcsc_bn, int N_target_blocks, tensor_bcsc_t *sparse_wt) {
   int nnz = 0, l_zero_block = 0;
   int N = Nb*bn;
@@ -27,9 +97,16 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   int l_i, l_j, l_di, l_dj, l_ui, l_uj, l_ii, l_jj, total_nnz_processed, nnz_entries_per_block, all_done = 0, n_blocks = 0;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
   int l_blocking_step = (bn + bcsc_bn - 1)/bcsc_bn;
+  auto sparse_pct = env2int("SPFRAC", 0);
+  double sparse_frac = (double) (1.0*sparse_pct/100.0);
 
   if (bn % bcsc_bn != 0) {
     printf("WARNING: end up with assymetric logical blocks...\n");
+  }
+  
+  /* Sparsify tensors for benchmarking purposes */
+  if (sparse_pct > 0) {
+    sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, bcsc_bk, bcsc_bn, sparse_frac);
   }
 
   /* First pass to count number of non-zeros */
