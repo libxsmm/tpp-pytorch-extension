@@ -151,6 +151,11 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   sparse_wt->bcsc_bn = bcsc_bn;
   sparse_wt->bcsc_bk = bcsc_bk;
   sparse_wt->bcsc_blocks_in_bn = l_blocking_step;
+  sparse_wt->sizes[0] = Nb;
+  sparse_wt->sizes[1] = Kb;
+  sparse_wt->sizes[2] = bk;
+  sparse_wt->sizes[3] = bn;
+  sparse_wt->sizes[4] = v;
 }
 
 template <typename T>

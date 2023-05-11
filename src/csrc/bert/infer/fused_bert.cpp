@@ -35,6 +35,14 @@ REGISTER_LOCAL_SCOPE(ac_gemm, "ac_gemm");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 
+void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bcsc, int bcsc_bk, int bcsc_bn) {
+  if (t_W.dtype() == at::kFloat) {
+    create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), t_W_bcsc);
+  } else {
+    create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), t_W_bcsc);
+  }
+}
+
 class BertEncoderLayer {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv;
@@ -80,48 +88,20 @@ class BertEncoderLayer {
     auto bcsc_bk = env2int("BK", 4);
     auto bcsc_bn = env2int("BN", 4);
 
-    if (t_Wi.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wi_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wi_bcsc);
-    }
+    /* Create BCSC sparse tensors */
+    create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk, bcsc_bn);
+    create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk, bcsc_bn);
+    create_bcsc_from_blocked_nkkn_weight(t_Wso, &t_Wso_bcsc, bcsc_bk, bcsc_bn);
+    create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk, bcsc_bn);
+    create_bcsc_from_blocked_nkkn_weight(t_Wk, &t_Wk_bcsc, bcsc_bk, bcsc_bn);
+    create_bcsc_from_blocked_nkkn_weight(t_Wv, &t_Wv_bcsc, bcsc_bk, bcsc_bn);
 
-    if (t_Wo.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wo_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wo_bcsc);   
-    }
-
-    if (t_Wso.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wso), t_Wso.sizes()[0], t_Wso.sizes()[1], t_Wso.sizes()[2], t_Wso.sizes()[3], get_vnni_block_size(t_Wso.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wso_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wso), t_Wso.sizes()[0], t_Wso.sizes()[1], t_Wso.sizes()[2], t_Wso.sizes()[3], get_vnni_block_size(t_Wso.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wso_bcsc);    
-    }
-
-    if (t_Wq.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wq_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wq_bcsc);   
-    }
-
-    if (t_Wk.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wk_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wk_bcsc);
-    }
-
-    if (t_Wv.dtype() == at::kFloat) {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wv_bcsc);
-    } else {
-      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wv_bcsc);
-    }
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
 
   template <typename T, bool transpose, bool vnni>
   inline void qkv_gemm(
       at::Tensor& t_HS,
-      at::Tensor& t_W,
       tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
@@ -170,7 +150,7 @@ class BertEncoderLayer {
     auto loop_scheme = large_cache_opt ? "bA" : "AB";
     auto qkv_loop = ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
     {
-      RECORD_SCOPE(qkv_gemm, {t_HS, t_W});
+      RECORD_SCOPE(qkv_gemm, {t_HS});
       qkv_loop(
           [&](int* ind) {
             int s1 = ind[0], i_n = ind[1];
@@ -198,36 +178,33 @@ class BertEncoderLayer {
   template <typename T>
   inline void q_gemm(
       at::Tensor& t_HS,
-      at::Tensor& t_W,
       tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
     const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
     if (use_at_vnni_local) {
-      qkv_gemm<T, true, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
+      qkv_gemm<T, true, true>(t_HS, t_wt_bcsc, t_B, t_Out);
     } else {
-      qkv_gemm<T, false, false>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
+      qkv_gemm<T, false, false>(t_HS, t_wt_bcsc, t_B, t_Out);
     }
   }
 
   template <typename T>
   inline void k_gemm(
       at::Tensor& t_HS,
-      at::Tensor& t_W,
       tensor_bcsc_t& t_wt_bcsc,  
       at::Tensor& t_B,
       at::Tensor& t_Out) {
-    qkv_gemm<T, true, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
+    qkv_gemm<T, true, true>(t_HS, t_wt_bcsc, t_B, t_Out);
   }
 
   template <typename T>
   inline void v_gemm(
       at::Tensor& t_HS,
-      at::Tensor& t_W,
       tensor_bcsc_t& t_wt_bcsc,    
       at::Tensor& t_B,
       at::Tensor& t_Out) {
-    qkv_gemm<T, false, true>(t_HS, t_W, t_wt_bcsc, t_B, t_Out);
+    qkv_gemm<T, false, true>(t_HS, t_wt_bcsc, t_B, t_Out);
   }
 
   template <typename T>
@@ -334,20 +311,18 @@ class BertEncoderLayer {
   inline void output(
       at::Tensor t_in,
       at::Tensor& t_in2,
-      at::Tensor& t_wt,
       tensor_bcsc_t& t_wt_bcsc,  
       at::Tensor& t_bias,
       at::Tensor& t_gamma,
       at::Tensor& t_beta,
       at::Tensor& t_out) {
     auto in_sizes = t_in.sizes();
-    auto wt_sizes = t_wt.sizes();
     auto S1 = in_sizes[0];
     auto Nc = in_sizes[1];
     auto S2 = in_sizes[2];
     auto Hc = in_sizes[3];
-    auto Nk = wt_sizes[0];
-    auto Hk = wt_sizes[3];
+    auto Nk = t_wt_bcsc.sizes[0];
+    auto Hk = t_wt_bcsc.sizes[3];
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
@@ -376,7 +351,7 @@ class BertEncoderLayer {
     auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);
     auto layer_norm_fwd_tpp = SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
     {
-      RECORD_SCOPE(o_gemm, {t_in, t_wt});
+      RECORD_SCOPE(o_gemm, {t_in});
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
       auto ogemm_loop =
           ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
@@ -422,18 +397,16 @@ class BertEncoderLayer {
   template <typename T>
   inline void intermediate(
       at::Tensor t_in,
-      at::Tensor& t_wt,
       tensor_bcsc_t& t_wt_bcsc,
       at::Tensor& t_bias,
       at::Tensor& t_out) {
     auto in_sizes = t_in.sizes();
-    auto wt_sizes = t_wt.sizes();
     auto S1 = in_sizes[0];
     auto Nc = in_sizes[1];
     auto S2 = in_sizes[2];
     auto Hc = in_sizes[3];
-    auto Nk = wt_sizes[0];
-    auto Hk = wt_sizes[3];
+    auto Nk = t_wt_bcsc.sizes[0];
+    auto Hk = t_wt_bcsc.sizes[3];
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
@@ -458,7 +431,7 @@ class BertEncoderLayer {
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
     {
-      RECORD_SCOPE(i_gemm, {t_in, t_wt});
+      RECORD_SCOPE(i_gemm, {t_in});
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
       auto gemm_loop =
           ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
@@ -505,14 +478,14 @@ class BertEncoderLayer {
     } else {
       t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
     }
-    q_gemm<T>(t_HS_qkv, t_Wq, t_Wq_bcsc, t_Bq, t_QL);
-    k_gemm<T>(t_HS_qkv, t_Wk, t_Wk_bcsc, t_Bk, t_KL_TV);
-    v_gemm<T>(t_HS_qkv, t_Wv, t_Wv_bcsc, t_Bv, t_VL_V);
+    q_gemm<T>(t_HS_qkv, t_Wq_bcsc, t_Bq, t_QL);
+    k_gemm<T>(t_HS_qkv, t_Wk_bcsc, t_Bk, t_KL_TV);
+    v_gemm<T>(t_HS_qkv, t_Wv_bcsc, t_Bv, t_VL_V);
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
-    output<T, LT>(t_CL, t_HS, t_Wso, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
-    intermediate<T>(t_SO, t_Wi, t_Wi_bcsc, t_Bi, t_I);
-    output<T, LT>(t_I, t_SO, t_Wo, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out);
+    output<T, LT>(t_CL, t_HS, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
+    intermediate<T>(t_SO, t_Wi_bcsc, t_Bi, t_I);
+    output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out);
 
     return t_Out;
   }

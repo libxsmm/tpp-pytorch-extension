@@ -47,6 +47,7 @@ typedef struct tensor_bcsc_t {
   unsigned int bcsc_bn;
   unsigned int bcsc_bk;
   unsigned int bcsc_blocks_in_bn;
+  long sizes[8];
 } tensor_bcsc_t;
 
 namespace tpp {
