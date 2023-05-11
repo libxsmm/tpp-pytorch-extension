@@ -346,31 +346,19 @@ class BertEncoderLayer {
     auto Nc = in_sizes[1];
     auto S2 = in_sizes[2];
     auto Hc = in_sizes[3];
-
     auto Nk = wt_sizes[0];
     auto Hk = wt_sizes[3];
-
-    const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
-#if 0
-    if (use_at_vnni_local) {
-      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
-    }
-#endif
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
       t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
     }
-#if 0
-    auto in = GetVLAPtr<T>(t_in, {Nc, S2 * Hc});
-#endif
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto in2 = GetVLAPtr<T>(t_in2, {Nk, S2 * Hk});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
     auto gamma = GetVLAPtr<LT>(t_gamma, {Hk});
     auto beta = GetVLAPtr<LT>(t_beta, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
-
     // Create TPPs
     auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
     auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
@@ -385,23 +373,8 @@ class BertEncoderLayer {
         Hk,
         1.0,
         0)));
-#if 0
-    auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, Hk), BIAS);
-    auto brgemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
-        S2,
-        Hk,
-        Hc,
-        S2 * Hc,
-        Hk * Hc,
-        1.0,
-        XformTPP::XFORM_NONE_TPP,
-        use_at_vnni_local ? 1 : 0,
-        Ncb)));
-#endif
     auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);
-    auto layer_norm_fwd_tpp =
-        SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
-
+    auto layer_norm_fwd_tpp = SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
     {
       RECORD_SCOPE(o_gemm, {t_in, t_wt});
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
@@ -435,7 +408,7 @@ class BertEncoderLayer {
           },
           [&]() { spmm_tpp.config(); },
           [&]() { spmm_tpp.release(); });
-
+      
       if (parallelized_on_nk) {
 #pragma omp parallel for
         for (int s1 = 0; s1 < S1; s1++) {
@@ -459,16 +432,8 @@ class BertEncoderLayer {
     auto Nc = in_sizes[1];
     auto S2 = in_sizes[2];
     auto Hc = in_sizes[3];
-
     auto Nk = wt_sizes[0];
     auto Hk = wt_sizes[3];
-
-    const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
-#if 0
-    if (use_at_vnni_local) {
-      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
-    }
-#endif
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
@@ -489,33 +454,11 @@ class BertEncoderLayer {
         1.0,
         0)));
     auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(S2 * Hk), ACT);
-#if 0
-    auto in = GetVLAPtr<T>(t_in, {Nc, S2 * Hc});
-    auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-#endif
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
-
     {
       RECORD_SCOPE(i_gemm, {t_in, t_wt});
-#if 0
-      auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto gemm_loop =
-          ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
-      gemm_loop(
-          [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            auto count = (nc + Ncb < Nc) ? Ncb : Nc - nc;
-
-            if (nc == 0) {
-              copy_bias_tpp(bias[nk], out[s1][nk]);
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last iter
-              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
-            }
-#else
       auto loop_scheme = large_cache_opt ? "bA" : "AB";
       auto gemm_loop =
           ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
@@ -533,7 +476,6 @@ class BertEncoderLayer {
               trans_out_tpp( tmp_block, out[s1][nk] );
               gelu_fwd_tpp(out[s1][nk], out[s1][nk]);     
             }
-#endif
           },
           [&]() { spmm_tpp.config(); },
           [&]() { spmm_tpp.release(); });
@@ -552,20 +494,7 @@ class BertEncoderLayer {
     auto& t_CL = t_scratch[3];
     auto& t_SO = t_scratch[4];
     auto& t_I = t_scratch[5];
-#if 0
-    const bool use_at_vnni_local = t_HS.dtype() != at::kFloat && use_at_vnni;
-#endif
     auto t_HS_qkv = t_HS;
-#if 0
-    if (use_at_vnni_local) {
-      auto sizes = t_HS.sizes();
-      long S1 = sizes[0];
-      long F1 = sizes[1];
-      long S2 = sizes[2];
-      long F2 = sizes[3];
-      t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);
-    }
-#endif
     auto sizes = t_HS.sizes();
     long S1 = sizes[0];
     long F1 = sizes[1];
@@ -576,7 +505,6 @@ class BertEncoderLayer {
     } else {
       t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
     }
-
     q_gemm<T>(t_HS_qkv, t_Wq, t_Wq_bcsc, t_Bq, t_QL);
     k_gemm<T>(t_HS_qkv, t_Wk, t_Wk_bcsc, t_Bk, t_KL_TV);
     v_gemm<T>(t_HS_qkv, t_Wv, t_Wv_bcsc, t_Bv, t_VL_V);
