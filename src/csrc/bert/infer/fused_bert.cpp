@@ -76,19 +76,28 @@ class BertEncoderLayer {
     // std::cout << "t_Wq.sizes" << sizes << std::endl;
     F2 = sizes[3];
     H1 = H / F2;
-    
-    auto wt_i_sizes = t_Wi.sizes();
-    auto Nk = wt_i_sizes[0];
-    auto Nc = wt_i_sizes[1];
-    auto Hc = wt_i_sizes[2];
-    auto Hk = wt_i_sizes[3];
-    if (t_Wi.dtype() == at::kFloat) { // ? float : bfloat16;
-      auto wt_i = GetVLAPtr<float>(t_Wi, {Nc, Hc * Hk}); 
-      create_bcsc_from_blocked_weight_tensor(wt_i[0][0], Nk, Nc, Hc, Hk, env2int("V", 1), env2int("BK", 4), env2int("BN", 4), omp_get_max_threads(), &t_Wi_bcsc);
+   
+    auto bcsc_bk = env2int("BK", 4);
+    auto bcsc_bn = env2int("BN", 4);
+
+    if (t_Wi.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wi_bcsc);
     } else {
-      auto wt_i = GetVLAPtr<bfloat16>(t_Wi, {Nc, Hc * Hk});
-      create_bcsc_from_blocked_weight_tensor(wt_i[0][0], Nk, Nc, Hc, Hk, env2int("V", 1), env2int("BK", 4), env2int("BN", 4), omp_get_max_threads(), &t_Wi_bcsc);
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wi_bcsc);
     }
+
+    if (t_Wo.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wo_bcsc);
+    } else {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wo_bcsc);   
+    }
+
+    if (t_Wso.dtype() == at::kFloat) {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_Wso), t_Wso.sizes()[0], t_Wso.sizes()[1], t_Wso.sizes()[2], t_Wso.sizes()[3], get_vnni_block_size(t_Wso.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wso_bcsc);
+    } else {
+      create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_Wso), t_Wso.sizes()[0], t_Wso.sizes()[1], t_Wso.sizes()[2], t_Wso.sizes()[3], get_vnni_block_size(t_Wso.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), &t_Wso_bcsc);    
+    }
+
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
 
@@ -297,6 +306,7 @@ class BertEncoderLayer {
       at::Tensor t_in,
       at::Tensor& t_in2,
       at::Tensor& t_wt,
+      tensor_bcsc_t& t_wt_bcsc,  
       at::Tensor& t_bias,
       at::Tensor& t_gamma,
       at::Tensor& t_beta,
@@ -314,11 +324,20 @@ class BertEncoderLayer {
     auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
 
     const bool use_at_vnni_local = t_in.dtype() != at::kFloat && use_at_vnni;
+#if 0
     if (use_at_vnni_local) {
       t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);
     }
-
+#endif
+    if (t_in.dtype() == at::kFloat) {
+      t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
+    } else {
+      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
+    }
+#if 0
     auto in = GetVLAPtr<T>(t_in, {Nc, S2 * Hc});
+#endif
+    auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto in2 = GetVLAPtr<T>(t_in2, {Nk, S2 * Hk});
     auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
@@ -326,8 +345,21 @@ class BertEncoderLayer {
     auto beta = GetVLAPtr<LT>(t_beta, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
 
-    auto Ncb = 8;
-
+    // Create TPPs
+    auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
+    auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+    auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
+        S2,
+        Hk,
+        Nc*Hc,
+        t_wt_bcsc.bcsc_bk,
+        t_wt_bcsc.bcsc_bn,
+        Nc*Hc,
+        -1,
+        Hk,
+        1.0,
+        0)));
+#if 0
     auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(S2, Hk), BIAS);
     auto brgemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
         S2,
@@ -339,26 +371,30 @@ class BertEncoderLayer {
         XformTPP::XFORM_NONE_TPP,
         use_at_vnni_local ? 1 : 0,
         Ncb)));
+#endif
     auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);
     auto layer_norm_fwd_tpp =
         SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
 
     {
       RECORD_SCOPE(o_gemm, {t_in, t_wt});
-      auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+      auto loop_scheme = large_cache_opt ? "bA" : "AB";
       auto ogemm_loop =
-          ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
+          ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
       bool parallelized_on_nk =
           large_cache_opt ? false : true; // ogemm_loop.is_parallel(2);
       ogemm_loop(
           [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-            if (nc == 0) {
-              copy_bias_tpp(bias[nk], out[s1][nk]);
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
+            int s1 = ind[0], i_n = ind[1];
+            T tmp_block[S2*Hk];
+            int cur_n_blocks = (t_wt_bcsc.Nblocks_offsets[i_n+1] - t_wt_bcsc.Nblocks_offsets[i_n])/t_wt_bcsc.bcsc_bn;
+            for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt_bcsc.bcsc_blocks_in_bn) {
+              int nk = (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/S2;
+              copy_bias_tpp(bias[nk], tmp_block);
+              spmm_tpp(in[s1], 
+                       t_wt_bcsc, t_wt_bcsc.bcsc_blocks_in_bn, (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/t_wt_bcsc.bcsc_bn, 
+                       tmp_block, true);
+              trans_out_tpp( tmp_block, out[s1][nk] );                
               add_tpp(out[s1][nk], in2[s1][nk], out[s1][nk]);
               if (!parallelized_on_nk && nk == Nk - 1) {
                 layer_norm_fwd_tpp(
@@ -371,8 +407,8 @@ class BertEncoderLayer {
               }
             }
           },
-          [&]() { brgemm_tpp.config(); },
-          [&]() { brgemm_tpp.release(); });
+          [&]() { spmm_tpp.config(); },
+          [&]() { spmm_tpp.release(); });
 
       if (parallelized_on_nk) {
 #pragma omp parallel for
@@ -508,9 +544,9 @@ class BertEncoderLayer {
     v_gemm<T>(t_HS_qkv, t_Wv, t_Bv, t_VL_V);
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
-    output<T, LT>(t_CL, t_HS, t_Wso, t_Bso, t_Gso, t_Beta_so, t_SO);
+    output<T, LT>(t_CL, t_HS, t_Wso, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
     intermediate<T>(t_SO, t_Wi, t_Wi_bcsc, t_Bi, t_I);
-    output<T, LT>(t_I, t_SO, t_Wo, t_Bo, t_Go, t_Beta_o, t_Out);
+    output<T, LT>(t_I, t_SO, t_Wo, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out);
 
     return t_Out;
   }
