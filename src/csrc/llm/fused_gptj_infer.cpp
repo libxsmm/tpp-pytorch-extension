@@ -139,7 +139,7 @@ static at::Tensor lyr_norm_wrap(
     at::Tensor& t_in,
     at::Tensor& t_gamma,
     at::Tensor& t_beta,
-    float eps) {
+    double eps) {
   GlobalPass _gp(FWD);
   auto dt = t_in.dtype();
   auto ldt = t_gamma.dtype();
@@ -153,8 +153,10 @@ static at::Tensor lyr_norm_wrap(
     lyr_norm<bfloat16, bfloat16>(t_in, t_gamma, t_beta, t_out, eps);
   } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
     lyr_norm<bfloat8, float>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kBFloat8 && ldt == at::kBFloat8) {
+    lyr_norm<bfloat8, bfloat8>(t_in, t_gamma, t_beta, t_out, eps);
   } else {
-    TPP_ASSERT(0, "Should not come here\n");
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
   return t_out;
 }
@@ -251,7 +253,7 @@ static at::Tensor fc_plain_wrap(
   } else if (dt == at::kBFloat8) {
     fc_plain<bfloat8>(t_in, t_wt, t_bias, t_out);
   } else {
-    TPP_ASSERT(0, "Should not come here\n");
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
   return t_out;
 }
@@ -349,7 +351,7 @@ static at::Tensor fc_out_wrap(
   } else if (dt == at::kBFloat8) {
     fc_out<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out);
   } else {
-    TPP_ASSERT(0, "Should not come here\n");
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
   return t_out;
 }
@@ -444,12 +446,12 @@ static at::Tensor fc_in_wrap(
   } else if (dt == at::kBFloat8) {
     fc_in<bfloat8>(t_in, t_wt, t_bias, t_out);
   } else {
-    TPP_ASSERT(0, "Should not come here\n");
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
   return t_out;
 }
 
-class GPTJBlock {
+struct GPTJBlock : torch::CustomClassHolder {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
@@ -462,7 +464,7 @@ class GPTJBlock {
 
   GPTJBlock(
       std::vector<at::Tensor> params,
-      float eps,
+      double eps,
       long N,
       long H,
       long max_positions,
@@ -576,9 +578,9 @@ class GPTJBlock {
     // printf("B=%ld S1=%ld S2=%ld H1=%ld H2=%ld N=%ld\n", B, S1, S2, H1, H2,
     // N);
     // printf("B=%ld Sq1=%ld Sq2=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk1=%ld Sk2=%ld
-    // offset=%ld\n", B, Sq1, Sq2, N, H, H1, H2, Sk1, Sk2, offset);  printf("B=%ld
-    // Sq=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk=%ld offset=%ld\n", B, Sq, N, H, H1,
-    // H2, Sk, offset);
+    // offset=%ld\n", B, Sq1, Sq2, N, H, H1, H2, Sk1, Sk2, offset);
+    // printf("B=%ld Sq=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk=%ld offset=%ld\n", B,
+    // Sq, N, H, H1, H2, Sk, offset);
     auto t_KL_TV = at::empty_like(t_KL);
     auto QL = GetVLAPtr<T>(t_QL, {Sq, N, H1, H2});
     auto KL = GetVLAPtr<T>(t_KL, {Sk, N, H1, H2});
@@ -764,8 +766,19 @@ class GPTJBlock {
           t_Out,
           use_cache,
           t_scratch);
+    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
+      ret = this->_forward<bfloat8, bfloat16>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_AM,
+          t_pid,
+          t_Out,
+          use_cache,
+          t_scratch);
     } else {
-      TPP_ASSERT(0, "Should not come here\n");
+      std::cout << "Types: " << dt << "  " << ldt << std::endl;
+      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
     }
     // printf("Returning Layer \n");
 
@@ -783,7 +796,14 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
       &apply_rotary_pos_emb_wrap,
       "TPP apply_rotary_pos_emb");
   py::class_<GPTJBlock>(m, "GPTJBlock")
-      .def(py::init<std::vector<at::Tensor>, float, long, long, long, long>())
+      .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
       //.def("setMasks", &BertEncoder::setMasks)
+      .def("forward", &GPTJBlock::forward);
+}
+
+TORCH_LIBRARY(tpp_gptj, m) {
+  m.def("layer_norm", &lyr_norm_wrap);
+  m.class_<GPTJBlock>("GPTJBlock")
+      .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
 }
