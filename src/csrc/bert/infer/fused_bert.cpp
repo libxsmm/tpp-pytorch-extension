@@ -328,7 +328,8 @@ class BertEncoderLayer {
       at::Tensor& t_bias,
       at::Tensor& t_gamma,
       at::Tensor& t_beta,
-      at::Tensor& t_out) {
+      at::Tensor& t_out,
+      at::Tensor& t_out_trans) {
     auto in_sizes = t_in.sizes();
     auto S1 = in_sizes[0];
     auto Nc = in_sizes[1];
@@ -349,6 +350,7 @@ class BertEncoderLayer {
     auto gamma = GetVLAPtr<LT>(t_gamma, {Hk});
     auto beta = GetVLAPtr<LT>(t_beta, {Hk});
     auto out = GetVLAPtr<T>(t_out, {Nk, S2 * Hk});
+    auto out_tr = GetVLAPtr<T>(t_out_trans, {Nk, S2 * Hk});  
     // Create TPPs
     auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
     auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
@@ -393,6 +395,11 @@ class BertEncoderLayer {
                     nullptr,
                     nullptr,
                     out[s1][0]);
+                if (is_self_output == 1) {             
+                  for (int l_nk = 0; l_nk < Nk; l_nk++) {
+                    trans_output_block<T>( S2, Hk, out[s1][l_nk], out_tr[s1][l_nk]);
+                  }
+                }
               }
             }
           },
@@ -404,6 +411,11 @@ class BertEncoderLayer {
         for (int s1 = 0; s1 < S1; s1++) {
           layer_norm_fwd_tpp(
               out[s1][0], gamma[0], beta[0], nullptr, nullptr, out[s1][0]);
+          if (is_self_output == 1) {             
+            for (int l_nk = 0; l_nk < Nk; l_nk++) {
+              trans_output_block<T>( S2, Hk, out[s1][l_nk], out_tr[s1][l_nk]);
+            }
+          }
         }
       }
     }
@@ -422,11 +434,13 @@ class BertEncoderLayer {
     auto Hc = in_sizes[3];
     auto Nk = t_wt_bcsc.sizes[0];
     auto Hk = t_wt_bcsc.sizes[3];
+#if 0
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
       t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
     }
+#endif
     // Create TPPs
     auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
     auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
@@ -483,6 +497,7 @@ class BertEncoderLayer {
     auto& t_CL = t_scratch[3];
     auto& t_SO = t_scratch[4];
     auto& t_I = t_scratch[5];
+    auto& t_SO_trans = t_scratch[6];
     auto t_HS_qkv = t_HS;
     auto sizes = t_HS.sizes();
     long S1 = sizes[0];
@@ -506,10 +521,10 @@ class BertEncoderLayer {
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
     is_self_output = 1;
-    output<T, LT>(t_CL, t_HS, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
-    intermediate<T>(t_SO, t_Wi_bcsc, t_Bi, t_I);
+    output<T, LT>(t_CL, t_HS, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO, t_SO_trans);
+    intermediate<T>(t_SO_trans, t_Wi_bcsc, t_Bi, t_I);
     is_self_output = 0;
-    output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out);
+    output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out, t_SO_trans);
 
     return t_Out;
   }
@@ -599,6 +614,7 @@ class BertEncoder {
     ret.push_back(t_HS.new_empty(sizes1)); // CL
     ret.push_back(t_HS.new_empty(sizes1)); // SO
     ret.push_back(t_HS.new_empty(sizes2)); // I
+    ret.push_back(t_HS.new_empty(sizes1)); // SO_trans
 
     return ret;
   }
