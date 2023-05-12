@@ -12,6 +12,8 @@
 #define _TENSOR_HELPER_H_
 
 #include "utils.h"
+#include <fstream>
+#include <sstream>
 
 template<typename DType>
 int l_ullcompare( const void* a , const void* b ) {
@@ -81,6 +83,25 @@ void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn,
     }
   }
   free(grid_point_array);
+}
+
+template<typename DType>
+void read_dense_tensor_csv(DType *io_dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, char *filename) {
+  int N = Nb*bn;
+  int K = Kb*bk*v;
+  LIBXSMM_VLA_DECL(5, DType, l_wt_dense, io_dense_wt_ptr, Kb, bk, bn, v);
+  int l_i, l_j;
+  std::ifstream input_csv_tensor_file(filename);
+  for (l_i = 0; l_i < N; l_i++) {
+    std::string line;
+    std::getline(input_csv_tensor_file, line);
+    std::stringstream cur_line(line);
+    for (l_j = 0; l_j < K; l_j++) {
+      std::string val;
+      std::getline(cur_line, val, ',');
+      LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i/bn, l_j/(bk*v), (l_j%(bk*v))/v, l_i%bn, (l_j%(bk*v))%v, Kb, bk, bn, v) = (DType)std::stof(val);
+    }
+  }
 }
 
 template<typename DType>

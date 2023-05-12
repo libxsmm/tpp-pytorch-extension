@@ -28,12 +28,49 @@ using namespace tpp;
 static int my_rank = guess_mpi_rank();
 static int large_cache_opt = false;
 static int use_at_vnni = env2int("USE_AT_VNNI");
+int layer_id = 0;
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(ac_gemm, "ac_gemm");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
+
+void overwrite_blocked_nkkn_weights_from_files(at::Tensor& t_Wq, at::Tensor& t_Wk, at::Tensor& t_Wv, at::Tensor& t_Wso, at::Tensor& t_Wi,at::Tensor& t_Wo) {
+  char *csv_dir;
+  char w_q_csv[512];
+  char w_k_csv[512];
+  char w_v_csv[512];
+  char w_o_csv[512];
+  char w_so_csv[512];
+  char w_i_csv[512];
+
+  csv_dir = getenv("SPARSE_PATH");
+  sprintf(w_q_csv, "%sbert.encoder.layer.%d.attention.self.query.weight.csv", csv_dir, layer_id);
+  sprintf(w_k_csv, "%sbert.encoder.layer.%d.attention.self.key.weight.csv", csv_dir, layer_id);
+  sprintf(w_v_csv, "%sbert.encoder.layer.%d.attention.self.value.weight.csv", csv_dir, layer_id);
+  sprintf(w_o_csv, "%sbert.encoder.layer.%d.output.dense.weight.csv", csv_dir, layer_id);
+  sprintf(w_so_csv,"%sbert.encoder.layer.%d.attention.output.dense.weight.csv", csv_dir, layer_id);
+  sprintf(w_i_csv, "%sbert.encoder.layer.%d.intermediate.dense.weight.csv", csv_dir, layer_id);
+
+  if (t_Wq.dtype() == at::kFloat) {
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), w_q_csv );
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), w_k_csv );
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), w_v_csv );
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wso),t_Wso.sizes()[0],t_Wso.sizes()[1],t_Wso.sizes()[2],t_Wso.sizes()[3],get_vnni_block_size(t_Wso.dtype()),w_so_csv );
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), w_i_csv );
+    read_dense_tensor_csv<float>( GetVLAPtr<float>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), w_o_csv );
+  } else {
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wq), t_Wq.sizes()[0], t_Wq.sizes()[1], t_Wq.sizes()[2], t_Wq.sizes()[3], get_vnni_block_size(t_Wq.dtype()), w_q_csv );
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wk), t_Wk.sizes()[0], t_Wk.sizes()[1], t_Wk.sizes()[2], t_Wk.sizes()[3], get_vnni_block_size(t_Wk.dtype()), w_k_csv );
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wv), t_Wv.sizes()[0], t_Wv.sizes()[1], t_Wv.sizes()[2], t_Wv.sizes()[3], get_vnni_block_size(t_Wv.dtype()), w_v_csv );
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wso),t_Wso.sizes()[0],t_Wso.sizes()[1],t_Wso.sizes()[2],t_Wso.sizes()[3],get_vnni_block_size(t_Wso.dtype()),w_so_csv );
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wi), t_Wi.sizes()[0], t_Wi.sizes()[1], t_Wi.sizes()[2], t_Wi.sizes()[3], get_vnni_block_size(t_Wi.dtype()), w_i_csv );
+    read_dense_tensor_csv<bfloat16>( GetVLAPtr<bfloat16>(t_Wo), t_Wo.sizes()[0], t_Wo.sizes()[1], t_Wo.sizes()[2], t_Wo.sizes()[3], get_vnni_block_size(t_Wo.dtype()), w_o_csv );
+  }
+
+  layer_id++;
+}
 
 void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bcsc, int bcsc_bk, int bcsc_bn) {
   if (t_W.dtype() == at::kFloat) {
@@ -86,8 +123,14 @@ class BertEncoderLayer {
     H1 = H / F2;
    
     auto bcsc_bk = env2int("BK", 4);
-    auto bcsc_bn = env2int("BN", 4);
-
+    auto bcsc_bn = env2int("BN", 2);
+    
+    /* Overwrite dense tensors from csv files */
+    char *sparse_model_path = getenv("SPARSE_PATH");
+    if (sparse_model_path) {
+      overwrite_blocked_nkkn_weights_from_files(t_Wq, t_Wk, t_Wv, t_Wso, t_Wi, t_Wo);
+    }
+    
     /* Create BCSC sparse tensors */
     create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk, bcsc_bn);
     create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk, bcsc_bn);
