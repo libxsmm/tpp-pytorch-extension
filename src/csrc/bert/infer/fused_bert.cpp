@@ -28,12 +28,24 @@ using namespace tpp;
 static int my_rank = guess_mpi_rank();
 static int large_cache_opt = false;
 static int use_at_vnni = env2int("USE_AT_VNNI");
+int current_layer = 0;
+int is_self_output = 0;
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(ac_gemm, "ac_gemm");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
+
+template <typename T>
+void trans_output_block( long S, long H, T* input, T* output) {
+  auto xform = XformTPP::XFORM_XPOSE_TPP;
+  if (sizeof(T) != 4) {
+    xform = XformTPP::XFORM_XPOSE_N2V_TPP;
+  } 
+  auto xform_tpp = SCOPEIT(XformExtTPP<T>(H, S, xform, true), (sizeof(T) == 4) ? XPOSE : VNNI);
+  xform_tpp(input, output);
+}
 
 void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bcsc, int bcsc_bk, int bcsc_bn) {
   if (t_W.dtype() == at::kFloat) {
@@ -251,7 +263,6 @@ class BertEncoderLayer {
         SCOPEIT((VarSoftMaxFwdTPP<float, T>(S2, S2)), SOFTMAX);
     auto c_gemm_tpp = SCOPEITGEMM((BrgemmExtTPP<T, T>(
         S2, H2, S2, S2 * S2, N * S2 * H, 0.0, XformTPP::XFORM_NONE_TPP, 0, 1)));
-
     {
       RECORD_SCOPE(ac_gemm, {t_QL, t_KL_TV});
       {
@@ -265,6 +276,7 @@ class BertEncoderLayer {
             long len = end - start;
             float AS[len][S2][S2];
             T AST[len][S2][S2];
+            T tmp_block[H2*S2];
             for (int s21 = start; s21 < end; s21++) {
               long ls21 = s21 - start;
               a_gemm_tpp(QL[s11][n][0], KL_TV[s21][n][0], AS[ls21][0], H1);
@@ -274,7 +286,8 @@ class BertEncoderLayer {
             }
             softmax_fwd_tpp(len, AS[0][0], AST[0][0]);
             for (int h1 = 0; h1 < H1; h1++) {
-              c_gemm_tpp(AST[0][0], VL_V[start][n][h1], CL[s11][n][h1], len);
+              c_gemm_tpp(AST[0][0], VL_V[start][n][h1], tmp_block, len);
+              trans_output_block<T>( S2, H2, tmp_block, CL[s11][n][h1]);
             }
           }
         }
@@ -323,11 +336,13 @@ class BertEncoderLayer {
     auto Hc = in_sizes[3];
     auto Nk = t_wt_bcsc.sizes[0];
     auto Hk = t_wt_bcsc.sizes[3];
+#if 0
     if (t_in.dtype() == at::kFloat) {
       t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
     } else {
       t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
     }
+#endif
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto in2 = GetVLAPtr<T>(t_in2, {Nk, S2 * Hk});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
@@ -447,7 +462,8 @@ class BertEncoderLayer {
                        t_wt_bcsc, t_wt_bcsc.bcsc_blocks_in_bn, (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/t_wt_bcsc.bcsc_bn, 
                        tmp_block, true);
               trans_out_tpp( tmp_block, out[s1][nk] );
-              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);     
+              gelu_fwd_tpp(out[s1][nk], tmp_block);
+              trans_output_block<T>( S2, Hk, tmp_block, out[s1][nk]);
             }
           },
           [&]() { spmm_tpp.config(); },
@@ -473,18 +489,26 @@ class BertEncoderLayer {
     long F1 = sizes[1];
     long S2 = sizes[2];
     long F2 = sizes[3];
-    if (t_HS_qkv.dtype() == at::kFloat) {
-      t_HS_qkv = act_tensor_trans(S1, F1, S2, F2, t_HS);
+
+    if (current_layer == 0 || 1) {
+      if (t_HS_qkv.dtype() == at::kFloat) {
+        t_HS_qkv = act_tensor_trans(S1, F1, S2, F2, t_HS);
+      } else {
+        t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
+      }
     } else {
-      t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
+      t_HS_qkv = t_HS;
     }
+
     q_gemm<T>(t_HS_qkv, t_Wq_bcsc, t_Bq, t_QL);
     k_gemm<T>(t_HS_qkv, t_Wk_bcsc, t_Bk, t_KL_TV);
     v_gemm<T>(t_HS_qkv, t_Wv_bcsc, t_Bv, t_VL_V);
 
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
+    is_self_output = 1;
     output<T, LT>(t_CL, t_HS, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO);
     intermediate<T>(t_SO, t_Wi_bcsc, t_Bi, t_I);
+    is_self_output = 0;
     output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out);
 
     return t_Out;
@@ -585,6 +609,7 @@ class BertEncoder {
     auto dt = layers[0]->t_Wq.dtype();
     auto ldt = layers[0]->t_Go.dtype();
 
+    current_layer = 0;
     for (auto l : layers) {
       // printf("Layer %d\n", i++);
       if (dt == at::kFloat && ldt == at::kFloat) {
@@ -598,6 +623,7 @@ class BertEncoder {
       } else {
         TPP_ASSERT(0, "Should not come here\n");
       }
+      current_layer++;
     }
     // printf("Returning Layer \n");
 
