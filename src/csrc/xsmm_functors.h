@@ -2188,13 +2188,18 @@ template <typename Tin, typename Tout = Tin>
 class GeluFwdTPP {
  public:
   GeluFwdTPP() {}
-  GeluFwdTPP(int N)
-      : N(N),
+  GeluFwdTPP(int N) : GeluFwdTPP(1, N) {}
+  GeluFwdTPP(int M, int N) : GeluFwdTPP(M, N, N, N) {}
+  GeluFwdTPP(int M, int N, int ldi, int ldo)
+      : M(M),
+        N(N),
+        ldi(ldi),
+        ldo(ldo),
         kernel(
-            1,
+            M,
             N,
-            N,
-            N,
+            ldi,
+            ldo,
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
@@ -2205,31 +2210,38 @@ class GeluFwdTPP {
   }
   void ref(Tin* in, Tout* out) {
 #ifdef __AVX512F__
-    int i;
-    for (i = 0; i < ALIGNDOWN(N, 16); i += 16) {
-      auto vin = _mm512_loadu_ps_auto(&in[i]);
-      // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
-      auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
-      _mm512_storeu_ps_auto(&out[i], vout);
-    }
-    if (i < N) {
-      int rem = N - i;
-      __mmask16 mask = (1 << rem) - 1;
-      auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[i]);
-      // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
-      auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
-      _mm512_mask_storeu_ps_auto(&out[i], mask, vout);
+    for (int j = 0; j < M; j++) {
+      int i;
+      for (i = 0; i < ALIGNDOWN(N, 16); i += 16) {
+        auto vin = _mm512_loadu_ps_auto(&in[j * ldi + i]);
+        // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
+        auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
+        _mm512_storeu_ps_auto(&out[j * ldo + i], vout);
+      }
+      if (i < N) {
+        int rem = N - i;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[j * ldi + i]);
+        // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
+        auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
+        _mm512_mask_storeu_ps_auto(&out[j * ldo + i], mask, vout);
+      }
     }
 #else
-    for (int i = 0; i < N; i++) {
-      float x = in[i];
-      out[i] = (erff(x / sqrtf(2.0)) + 1.0) * 0.5 * x;
+    for (int j = 0; j < M; j++) {
+      for (int i = 0; i < N; i++) {
+        float x = in[j * ldi + i];
+        out[j * ldo + i] = (erff(x / sqrtf(2.0)) + 1.0) * 0.5 * x;
+      }
     }
 #endif
   }
 
  private:
+  int M = 0;
   int N = 0;
+  int ldi = 0;
+  int ldo = 0;
   UnaryTPP kernel;
 };
 

@@ -23,12 +23,33 @@ import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import transformers
+from transformers.utils import is_torch_fx_proxy
+import numpy as np
 
 USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
 global_layer_dtype = torch.float32
 unpad = True
 print_cou = 0
+
+
+def compare(ref, opt, name=""):
+    ref = ref.detach()
+    opt = opt.detach()
+    allclose = ref.allclose(opt, atol=1e-6, rtol=1e-6)
+    # print(f"{name}: ref: {ref.abs().mean():14g} allclose: {allclose}  shape: {ref.shape}")
+    if not allclose:
+        print(f"ref = {ref.view([-1])[:8]}, xsmm = {opt.view([-1])[:8]}")
+        avg = ref.abs().mean()
+        adiff = (ref - opt).abs()
+        rdiff = adiff / avg
+        err = 1e-6
+        for ind, rd in np.ndenumerate(rdiff):
+            if rd > err:
+                print(
+                    f"{ind}: ref: {ref[ind].item():.7g} opt: {opt[ind].item():.7g} diff: {adiff[ind].item():.7g}  rdiff: {rd:.7g}"
+                )
+                err = rd
 
 
 def print_grad_hook(var, name):
@@ -100,11 +121,21 @@ class UnpadInput(torch.autograd.Function):
 
         return grad_input, None
 
+
 class BlockedLinear(BlockedModule, torch.nn.Linear):
     def maybe_block_params(self):
         self.weight.block()
         if self.bias is not None:
             self.bias.block()
+
+    def forward(self, input):
+        self.maybe_block_params()
+        bias = (
+            self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
+        )
+        ret = fused_gptj_cpp.fc_plain(input, self.weight, bias)
+        return ret
+
 
 class BlockedLayerNorm(BlockedModule, torch.nn.LayerNorm):
     def maybe_block_params(self):
@@ -113,24 +144,45 @@ class BlockedLayerNorm(BlockedModule, torch.nn.LayerNorm):
             if self.bias is not None:
                 self.bias.block()
 
+
 def FixLinear(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, torch.nn.Linear):
         return
     self.__class__ = BlockedLinear
     self.weight = BlockedParameter(self.weight.data)
-    self.weight.set_blocking_param(([bk, bc], [0, 2, 3, 1],))
+    self.weight.set_blocking_param(
+        (
+            [bk, bc],
+            [0, 2, 3, 1],
+        )
+    )
     layer_use_low_prec = layer_dtype != torch.float32
     if layer_use_low_prec == True and USE_LOW_PREC_PARAMS:
         low_prec_vnni_blocking = get_vnni_blocking(layer_dtype)
-        self.weight.set_blocking_param(([bk, [bc // low_prec_vnni_blocking, low_prec_vnni_blocking,],], [0, 2, 3, 1, 4], layer_dtype,))
-    
+        self.weight.set_blocking_param(
+            (
+                [
+                    bk,
+                    [
+                        bc // low_prec_vnni_blocking,
+                        low_prec_vnni_blocking,
+                    ],
+                ],
+                [0, 2, 3, 1, 4],
+                layer_dtype,
+            )
+        )
+
     if self.bias is not None:
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
-    
+
+
 def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor:
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim))
-    sinusoid_inp = torch.einsum("i , j -> i j", torch.arange(num_pos, dtype=torch.float), inv_freq).float()
+    sinusoid_inp = torch.einsum(
+        "i , j -> i j", torch.arange(num_pos, dtype=torch.float), inv_freq
+    ).float()
     return torch.cat((torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)), dim=1)
 
 
@@ -146,7 +198,9 @@ def rotate_every_two(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)  # in einsum notation: rearrange(x, '... d j -> ... (d j)')
 
 
-def apply_rotary_pos_emb(tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb(
+    tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
+) -> torch.Tensor:
     sin = torch.repeat_interleave(sin[:, :, None, :], 2, 3)
     cos = torch.repeat_interleave(cos[:, :, None, :], 2, 3)
     return (tensor * cos) + (rotate_every_two(tensor) * sin)
@@ -159,9 +213,9 @@ class GPTJAttention(nn.Module):
         max_positions = config.max_position_embeddings
         self.register_buffer(
             "bias",
-            torch.tril(torch.ones((max_positions, max_positions), dtype=torch.bool)).view(
-                1, 1, max_positions, max_positions
-            ),
+            torch.tril(
+                torch.ones((max_positions, max_positions), dtype=torch.bool)
+            ).view(1, 1, max_positions, max_positions),
         )
         self.register_buffer("masked_bias", torch.tensor(-1e9))
 
@@ -176,7 +230,9 @@ class GPTJAttention(nn.Module):
                 f"embed_dim must be divisible by num_attention_heads (got `embed_dim`: {self.embed_dim} and"
                 f" `num_attention_heads`: {self.num_attention_heads})."
             )
-        self.scale_attn = torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)).to(torch.get_default_dtype())
+        self.scale_attn = torch.sqrt(
+            torch.tensor(self.head_dim, dtype=torch.float32)
+        ).to(torch.get_default_dtype())
 
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
@@ -195,11 +251,17 @@ class GPTJAttention(nn.Module):
         if rotary:
             return tensor
         if len(tensor.shape) == 5:
-            return tensor.permute(0, 1, 3, 2, 4)  # (batch, blocks, head, block_length, head_features)
+            return tensor.permute(
+                0, 1, 3, 2, 4
+            )  # (batch, blocks, head, block_length, head_features)
         elif len(tensor.shape) == 4:
-            return tensor.permute(0, 2, 1, 3)  # (batch, head, seq_length, head_features)
+            return tensor.permute(
+                0, 2, 1, 3
+            )  # (batch, head, seq_length, head_features)
         else:
-            raise ValueError(f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}")
+            raise ValueError(
+                f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
+            )
 
     def _merge_heads(self, tensor, num_attention_heads, attn_head_size):
         """
@@ -210,7 +272,9 @@ class GPTJAttention(nn.Module):
         elif len(tensor.shape) == 4:
             tensor = tensor.permute(0, 2, 1, 3).contiguous()
         else:
-            raise ValueError(f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}")
+            raise ValueError(
+                f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
+            )
         new_shape = tensor.size()[:-2] + (num_attention_heads * attn_head_size,)
         return tensor.view(new_shape)
 
@@ -224,7 +288,9 @@ class GPTJAttention(nn.Module):
     ):
         # compute causal mask from causal mask buffer
         query_length, key_length = query.size(-2), key.size(-2)
-        causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
+        causal_mask = self.bias[
+            :, :, key_length - query_length : key_length, :key_length
+        ]
 
         # Keep the attention weights computation in fp32 to avoid overflow issues
         query = query.to(torch.float32)
@@ -235,7 +301,9 @@ class GPTJAttention(nn.Module):
         mask_value = torch.finfo(attn_weights.dtype).min
         # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
         # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
-        mask_value = torch.tensor(mask_value, dtype=attn_weights.dtype).to(attn_weights.device)
+        mask_value = torch.tensor(mask_value, dtype=attn_weights.dtype).to(
+            attn_weights.device
+        )
         attn_weights = torch.where(causal_mask, attn_weights, mask_value)
 
         attn_weights = attn_weights / self.scale_attn
@@ -283,7 +351,26 @@ class GPTJAttention(nn.Module):
         query = self._split_heads(query, self.num_attention_heads, self.head_dim, True)
         key = self._split_heads(key, self.num_attention_heads, self.head_dim, True)
         value = self._split_heads(value, self.num_attention_heads, self.head_dim, False)
+        # print("query:", query.shape)
+        # print("1query:", query.dtype, query[1, :2, 0, :8])
+        query1 = query.to(torch.float32).clone()
+        key1 = key.to(torch.float32).clone()
+        fused_gptj_cpp.apply_rotary_pos_emb(
+            query1,
+            self.embed_positions,
+            position_ids.contiguous(),
+            self.num_attention_heads,
+            self.head_dim,
+        )
+        fused_gptj_cpp.apply_rotary_pos_emb(
+            key1,
+            self.embed_positions,
+            position_ids.contiguous(),
+            self.num_attention_heads,
+            self.head_dim,
+        )
 
+        #'''
         if is_torch_fx_proxy(position_ids):
             # The logic to conditionally copy to GPU could not be traced, so we do this
             # every time in the torch.fx case
@@ -291,7 +378,9 @@ class GPTJAttention(nn.Module):
         else:
             embed_positions = self._get_embed_positions(position_ids)
 
-        repeated_position_ids = position_ids.unsqueeze(-1).repeat(1, 1, embed_positions.shape[-1])
+        repeated_position_ids = position_ids.unsqueeze(-1).repeat(
+            1, 1, embed_positions.shape[-1]
+        )
         sincos = torch.gather(embed_positions, 1, repeated_position_ids)
         sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
 
@@ -311,6 +400,11 @@ class GPTJAttention(nn.Module):
             key = apply_rotary_pos_emb(key, sin, cos)
             query = apply_rotary_pos_emb(query, sin, cos)
 
+        #'''
+        # print("query:", query.dtype, query[1, :2, 0, :8])
+        # print("query1:", query1.dtype, query1[1, :2, 0, :8])
+        # compare(query, query1, "Query")
+        # compare(key, key1, "Key")
         key = key.permute(0, 2, 1, 3)
         query = query.permute(0, 2, 1, 3)
 
@@ -326,9 +420,13 @@ class GPTJAttention(nn.Module):
             present = None
 
         # compute self-attention: V x Softmax(QK^T)
-        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+        attn_output, attn_weights = self._attn(
+            query, key, value, attention_mask, head_mask
+        )
 
-        attn_output = self._merge_heads(attn_output, self.num_attention_heads, self.head_dim)
+        attn_output = self._merge_heads(
+            attn_output, self.num_attention_heads, self.head_dim
+        )
         attn_output = self.out_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
 
@@ -340,7 +438,9 @@ class GPTJAttention(nn.Module):
 
 
 class GPTJMLP(nn.Module):
-    def __init__(self, intermediate_size, config):  # in MLP: intermediate_size= 4 * embed_dim
+    def __init__(
+        self, intermediate_size, config
+    ):  # in MLP: intermediate_size= 4 * embed_dim
         super().__init__()
         embed_dim = config.n_embd
 
@@ -375,33 +475,49 @@ class GPTJBlock(BlockedModule):
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
-    ) -> Union[Tuple[torch.Tensor], Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]]]:
+    ) -> Union[
+        Tuple[torch.Tensor],
+        Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
+    ]:
         # print("HS:", hidden_states.shape)
         # print("layer_past:", layer_past[0].shape if layer_past is not None else layer_past)
         # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
         #'''
-        if not hasattr(self, 'cpp_block'):
+        if not hasattr(self, "cpp_block"):
             params = [self.ln_1.weight, self.ln_1.bias]
-            params += [self.attn.q_proj.weight, self.attn.k_proj.weight, self.attn.v_proj.weight, self.attn.out_proj.weight]
+            params += [
+                self.attn.q_proj.weight,
+                self.attn.k_proj.weight,
+                self.attn.v_proj.weight,
+                self.attn.out_proj.weight,
+            ]
             params += [self.mlp.fc_in.weight, self.mlp.fc_in.bias]
             params += [self.mlp.fc_out.weight, self.mlp.fc_out.bias]
             params += [self.attn.embed_positions]
-            self.cpp_block = fused_gptj_cpp.GPTJBlock(params, self.ln_1.eps, self.attn.num_attention_heads, self.attn.head_dim, self.attn.bias.size(-1), self.attn.rotary_dim)
-            self.blocked_input_signature = get_blocking_signature("BSF", "FBSF")
+            self.cpp_block = fused_gptj_cpp.GPTJBlock(
+                params,
+                self.ln_1.eps,
+                self.attn.num_attention_heads,
+                self.attn.head_dim,
+                self.attn.bias.size(-1),
+                self.attn.rotary_dim,
+            )
+            self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
         orig_hidden_states = hidden_states
         S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
+        # hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
+
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
-     
+
         if layer_past is not None:
-            #add_tensor_or_empty(layer_past[0])
-            #add_tensor_or_empty(layer_past[1])
-            add_tensor_or_empty(self.get_blocked_tensor(layer_past[0], self.blocked_input_signature, [None, None, self.features_block_size]))
-            add_tensor_or_empty(self.get_blocked_tensor(layer_past[1], self.blocked_input_signature, [None, None, self.features_block_size]))
+            add_tensor_or_empty(layer_past[0])
+            add_tensor_or_empty(layer_past[1])
+            # add_tensor_or_empty(self.get_blocked_tensor(layer_past[0], self.blocked_input_signature, [None, None, self.features_block_size]))
+            # add_tensor_or_empty(self.get_blocked_tensor(layer_past[1], self.blocked_input_signature, [None, None, self.features_block_size]))
         else:
             inputs += [dummy_tensor, dummy_tensor]
         add_tensor_or_empty(attention_mask)
@@ -410,20 +526,20 @@ class GPTJBlock(BlockedModule):
             i.cvt_to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
 
-        #print("PHS:", hidden_states.shape)
+        # print("PHS:", hidden_states.shape)
         hs, k, v = self.cpp_block.forward(inputs, use_cache)
 
-        hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
-        k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
-        v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
+        # hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
+        # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
+        # v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
 
         if use_cache:
-            outputs = (hs, (k, v,),)
+            outputs = (hs, (k, v))
         else:
             outputs = (hs,)
         #'''
 
-        '''
+        """
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         attn_outputs = self.attn(
@@ -438,16 +554,20 @@ class GPTJBlock(BlockedModule):
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
 
-        feed_forward_hidden_states = self.mlp(hidden_states)
-        hidden_states = attn_output + feed_forward_hidden_states + residual
+        #feed_forward_hidden_states = self.mlp(hidden_states)
+        #hidden_states = attn_output + feed_forward_hidden_states + residual
+        x = fused_gptj_cpp.fc_in(hidden_states, self.mlp.fc_in.weight, self.mlp.fc_in.bias)
+        hidden_states = fused_gptj_cpp.fc_out(x, attn_output, residual, self.mlp.fc_out.weight, self.mlp.fc_out.bias)
+
 
         if use_cache:
             outputs = (hidden_states,) + outputs
         else:
             outputs = (hidden_states,) + outputs[1:]
-        '''
+        """
 
         return outputs  # hidden_states, present, (attentions)
+
 
 def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):
@@ -456,10 +576,13 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     self.features_block_size = bc
     self.layer_dtype = layer_dtype
     for m in self.modules():
+        if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJAttention):
+            m.__class__ = GPTJAttention
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype)
     block(self)
- 
+
+
 # bm_default_blocking_factors = BlockedModule.default_blocking_factors
 # @staticmethod
 # def custom_blocking_factors(S):
