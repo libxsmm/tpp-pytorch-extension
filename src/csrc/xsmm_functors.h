@@ -1964,7 +1964,8 @@ class BrgemmTPP {
       long ldc,
       float beta,
       int a_trans,
-      int unroll_hint)
+      int unroll_hint,
+      int b_vnni = 1)
       : M(M),
         N(N),
         K(K),
@@ -1976,6 +1977,7 @@ class BrgemmTPP {
         beta(beta),
         a_trans(a_trans),
         unroll_hint(unroll_hint),
+        b_vnni(b_vnni),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
         k_rls(this, 2),
@@ -2014,7 +2016,7 @@ class BrgemmTPP {
     for (uint64_t c = 0; c < count; c++) {
       auto A_ = &A[c * str_a];
       auto B_ = &B[c * str_b];
-      if (std::is_same<Tin, float>::value) {
+      if (std::is_same<Tin, float>::value || b_vnni == 0) {
         for (int i = 0; i < M; i++) {
           for (int j = 0; j < N; j++) {
             if (beta == 0.0 && c == 0)
@@ -2090,7 +2092,7 @@ class BrgemmTPP {
       snprintf(
           hash,
           200,
-          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d",
+          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d",
           p->M,
           p->N,
           p->K,
@@ -2103,7 +2105,8 @@ class BrgemmTPP {
           (long)p->lda,
           (long)p->ldb,
           (long)p->ldc,
-          config);
+          config,
+          p->b_vnni);
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -2117,7 +2120,7 @@ class BrgemmTPP {
       if (p->a_trans == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
       if (brgemm_type != 0) {
-        l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->b_vnni) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
         if (p->a_trans == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
@@ -2178,6 +2181,7 @@ class BrgemmTPP {
   int a_trans;
   long brgemm_type = -1;
   int unroll_hint;
+  int b_vnni;
   BrgemmKernel k_gemm_with_tc;
   BrgemmKernel k_cfg;
   BrgemmKernel k_rls;

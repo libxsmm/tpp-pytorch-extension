@@ -36,6 +36,51 @@ REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
 REGISTER_LOCAL_SCOPE(rotary, "rotary");
+REGISTER_LOCAL_SCOPE(reorder, "rorder");
+
+
+template <typename T, typename CpTPP>
+inline void reorder_one(at::Tensor t_old, at::Tensor t_new, long *idx, long B, long d1, CpTPP cpy_tpp) {
+  auto in = GetVLAPtr<T>(t_old, {d1});
+  auto out = GetVLAPtr<T>(t_new, {d1});
+  for (int i = 0; i < B; i++) {
+    auto ind = idx[i];
+    cpy_tpp(in[ind], out[i]);
+  }
+}
+
+static std::vector<std::vector<at::Tensor>> reorder_cache(std::vector<std::vector<at::Tensor>> cache, at::Tensor t_idx) {
+  auto B = t_idx.size(0);
+  long NL = cache.size();
+  auto t0 = cache[0][0];
+  auto d0 = t0.size(0);
+  auto numel = t0.numel();
+  auto d1 = numel / d0;
+  auto cpy_tpp_f32 = SCOPEIT(CpyTPP<float>(d1), EW_COPY);
+  auto cpy_tpp_bf16 = SCOPEIT(CpyTPP<bfloat16>(d1), EW_COPY);
+  auto idx = GetVLAPtr<long>(t_idx);
+
+  RECORD_SCOPE(reorder, {t0, t_idx});
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < NL; i++) {
+    for (int j = 0; j < 2; j++) {
+      auto t_old = cache[i][j];
+      auto sizes = t_old.sizes().vec();
+      sizes[0] = B;
+      auto t_new = t_old.new_empty(sizes);
+      auto dt = t_old.dtype();
+      if (dt == at::kFloat) {
+        reorder_one<float>(t_old, t_new, idx, B, d1, cpy_tpp_f32);
+      } else if (dt == at::kBFloat16) {
+        reorder_one<bfloat16>(t_old, t_new, idx, B, d1, cpy_tpp_bf16);
+      } else {
+        TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+      }
+      cache[i][j] = t_new;
+    }
+  }
+  return cache;
+}
 
 template <typename T>
 inline void apply_rotary_pos_emb(
@@ -493,7 +538,7 @@ struct GPTJBlock : torch::CustomClassHolder {
 
     one_by_sqrt_H = 1.0 / sqrt(H);
     auto sizes = t_Wq.sizes();
-    // std::cout << "t_Wq.sizes" << sizes << std::endl;
+    //std::cout << "t_Wq.sizes" << sizes << std::endl;
     K1 = sizes[0];
     C1 = sizes[1];
     K2 = sizes[3];
@@ -595,7 +640,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto softmax_fwd_tpp =
         SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, Sq, Sk)), SOFTMAX);
     auto c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-        Sq, H2, Sk, Sq * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1)));
+        Sq, H2, Sk, Sq * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
     auto cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sq, H2, H2, N * H)), EW_COPY);
     auto cpy_tpp = SCOPEIT(CpyTPP<T>(Sk, H2, N * H, H2), EW_COPY);
     auto xform = XformTPP::XFORM_XPOSE_TPP;
@@ -650,18 +695,17 @@ struct GPTJBlock : torch::CustomClassHolder {
       at::Tensor t_Out,
       bool use_cache,
       std::vector<at::Tensor> t_scratch) {
+    typedef bfloat16 Tv;
+    auto vdtype = std::is_same<Tv, float>::value ? at::kFloat : at::kBFloat16;
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
-    auto t_QL = at::empty_like(t_HS); // t_scratch[0];
-    auto t_KL = at::empty_like(t_QL); // t_scratch[0];
-    auto t_VL = at::empty_like(t_QL, at::kFloat); // t_scratch[0];
-    // auto t_KL_TV = at::empty_like(t_KL); // t_scratch[1];
-    // auto t_VL_V = at::empty_like(t_VL); // t_scratch[2];
-    auto t_CL = at::empty_like(t_QL); // t_scratch[3];
-    auto t_SO = at::empty_like(t_HS); // t_scratch[4];
+    auto t_QL = at::empty_like(t_HS);
+    auto t_KL = at::empty_like(t_QL);
+    auto t_VL = at::empty_like(t_QL, vdtype);
+    auto t_CL = at::empty_like(t_QL);
+    auto t_SO = at::empty_like(t_HS);
     auto t_I = t_HS.new_empty({B, S, t_Wi.size(0) * t_Wi.size(3)});
-    // auto t_I = at::empty_like(t_HS); // t_scratch[5];
     auto t_HS_qkv = at::empty_like(t_HS);
 
     // std::cout << "HS: " << t_HS.sizes() << std::endl;
@@ -674,15 +718,22 @@ struct GPTJBlock : torch::CustomClassHolder {
     // printf("reached at %s:%d\n", __func__, __LINE__);
     apply_rotary_pos_emb<T>(t_KL, t_EP, t_pid, N, H);
     if (t_key_past.numel() > 0) {
+      // if (t_key_past.dim() == 4) {
+      //   std::cout << "0t_key_past: " << t_key_past.sizes() << std::endl;
+      //   t_key_past = t_key_past.view({B, -1, N*H});
+      //   std::cout << "1t_key_past: " << t_key_past.sizes() << std::endl;
+      // }
       // std::cout << "t_key_past: " << t_key_past.sizes() << std::endl;
       // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
       t_KL = at::cat({t_key_past, t_KL}, -2);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
     // std::cout << t_KL.sizes() << std::endl;
-    qkv_gemm<T, float>(t_HS_qkv, t_Wv, t_VL);
+    qkv_gemm<T, Tv>(t_HS_qkv, t_Wv, t_VL);
     // printf("reached at %s:%d\n", __func__, __LINE__);
-    if (t_value_past.numel() > 0) {
+    if (t_value_past.numel() > 0 && t_value_past.dim() == 3) {
+      // if (t_value_past.dim() == 4)
+      //   t_value_past = t_value_past.view({B, -1, N*H});
       t_VL = at::cat({t_value_past, t_VL}, -2);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
@@ -690,7 +741,12 @@ struct GPTJBlock : torch::CustomClassHolder {
     // printf("reached at %s:%d\n", __func__, __LINE__);
     apply_rotary_pos_emb<T>(t_QL, t_EP, t_pid, N, H);
 
-    attn<T, float>(t_QL, t_KL, t_am, t_VL, t_CL);
+    // std::cout << "t_QL: " << t_QL.dtype() << std::endl;
+    // std::cout << "t_KL: " << t_KL.dtype() << std::endl;
+    // std::cout << "t_VL: " << t_VL.dtype() << std::endl;
+    // std::cout << "t_CL: " << t_CL.dtype() << std::endl;
+    // std::cout << "t_am: " << t_am.dtype() << std::endl;
+    attn<T, Tv>(t_QL, t_KL, t_am, t_VL, t_CL);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     qkv_gemm<T>(t_CL, t_Wp, t_SO);
     // printf("reached at %s:%d\n", __func__, __LINE__);
@@ -714,6 +770,7 @@ struct GPTJBlock : torch::CustomClassHolder {
       std::vector<at::Tensor> t_inp,
       bool use_cache) {
     GlobalPass _gp(FWD);
+    RECORD_FUNCTION("gptj_fwd", std::vector<c10::IValue>());
     auto t_HS = t_inp[0];
     auto t_key_past = t_inp[1];
     auto t_value_past = t_inp[2];
@@ -791,6 +848,7 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
   m.def("fc_in", &fc_in_wrap, "TPP fc_in");
   m.def("fc_out", &fc_out_wrap, "TPP fc_out");
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
+  m.def("reorder_cache", &reorder_cache, "TPP reorder_cache");
   m.def(
       "apply_rotary_pos_emb",
       &apply_rotary_pos_emb_wrap,
@@ -803,6 +861,7 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
 
 TORCH_LIBRARY(tpp_gptj, m) {
   m.def("layer_norm", &lyr_norm_wrap);
+  m.def("reorder_cache", &reorder_cache);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);

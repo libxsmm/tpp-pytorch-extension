@@ -186,276 +186,276 @@ def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor:
     return torch.cat((torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)), dim=1)
 
 
-@torch.fx.wrap
-def get_embed_positions(embed_positions, position_ids):
-    return embed_positions.to(position_ids.device).repeat(position_ids.shape[0], 1, 1)
-
-
-def rotate_every_two(x: torch.Tensor) -> torch.Tensor:
-    x1 = x[:, :, :, ::2]
-    x2 = x[:, :, :, 1::2]
-    x = torch.stack((-x2, x1), dim=-1)
-    return x.flatten(-2)  # in einsum notation: rearrange(x, '... d j -> ... (d j)')
-
-
-def apply_rotary_pos_emb(
-    tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
-) -> torch.Tensor:
-    sin = torch.repeat_interleave(sin[:, :, None, :], 2, 3)
-    cos = torch.repeat_interleave(cos[:, :, None, :], 2, 3)
-    return (tensor * cos) + (rotate_every_two(tensor) * sin)
-
-
-class GPTJAttention(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
-        max_positions = config.max_position_embeddings
-        self.register_buffer(
-            "bias",
-            torch.tril(
-                torch.ones((max_positions, max_positions), dtype=torch.bool)
-            ).view(1, 1, max_positions, max_positions),
-        )
-        self.register_buffer("masked_bias", torch.tensor(-1e9))
-
-        self.attn_dropout = nn.Dropout(config.attn_pdrop)
-        self.resid_dropout = nn.Dropout(config.resid_pdrop)
-
-        self.embed_dim = config.hidden_size
-        self.num_attention_heads = config.num_attention_heads
-        self.head_dim = self.embed_dim // self.num_attention_heads
-        if self.head_dim * self.num_attention_heads != self.embed_dim:
-            raise ValueError(
-                f"embed_dim must be divisible by num_attention_heads (got `embed_dim`: {self.embed_dim} and"
-                f" `num_attention_heads`: {self.num_attention_heads})."
-            )
-        self.scale_attn = torch.sqrt(
-            torch.tensor(self.head_dim, dtype=torch.float32)
-        ).to(torch.get_default_dtype())
-
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.rotary_dim = config.rotary_dim
-        pos_embd_dim = self.rotary_dim or self.embed_dim
-        self.embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
-
-    def _split_heads(self, tensor, num_attention_heads, attn_head_size, rotary):
-        """
-        Splits hidden dim into attn_head_size and num_attention_heads
-        """
-        new_shape = tensor.size()[:-1] + (num_attention_heads, attn_head_size)
-        tensor = tensor.view(new_shape)
-        if rotary:
-            return tensor
-        if len(tensor.shape) == 5:
-            return tensor.permute(
-                0, 1, 3, 2, 4
-            )  # (batch, blocks, head, block_length, head_features)
-        elif len(tensor.shape) == 4:
-            return tensor.permute(
-                0, 2, 1, 3
-            )  # (batch, head, seq_length, head_features)
-        else:
-            raise ValueError(
-                f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
-            )
-
-    def _merge_heads(self, tensor, num_attention_heads, attn_head_size):
-        """
-        Merges attn_head_size dim and num_attn_heads dim into hidden dim
-        """
-        if len(tensor.shape) == 5:
-            tensor = tensor.permute(0, 1, 3, 2, 4).contiguous()
-        elif len(tensor.shape) == 4:
-            tensor = tensor.permute(0, 2, 1, 3).contiguous()
-        else:
-            raise ValueError(
-                f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
-            )
-        new_shape = tensor.size()[:-2] + (num_attention_heads * attn_head_size,)
-        return tensor.view(new_shape)
-
-    def _attn(
-        self,
-        query,
-        key,
-        value,
-        attention_mask=None,
-        head_mask=None,
-    ):
-        # compute causal mask from causal mask buffer
-        query_length, key_length = query.size(-2), key.size(-2)
-        causal_mask = self.bias[
-            :, :, key_length - query_length : key_length, :key_length
-        ]
-
-        # Keep the attention weights computation in fp32 to avoid overflow issues
-        query = query.to(torch.float32)
-        key = key.to(torch.float32)
-
-        attn_weights = torch.matmul(query, key.transpose(-1, -2))
-
-        mask_value = torch.finfo(attn_weights.dtype).min
-        # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
-        # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
-        mask_value = torch.tensor(mask_value, dtype=attn_weights.dtype).to(
-            attn_weights.device
-        )
-        attn_weights = torch.where(causal_mask, attn_weights, mask_value)
-
-        attn_weights = attn_weights / self.scale_attn
-
-        if attention_mask is not None:
-            # Apply the attention mask
-            attn_weights = attn_weights + attention_mask
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-        attn_weights = attn_weights.to(value.dtype)
-        attn_weights = self.attn_dropout(attn_weights)
-
-        # Mask heads if we want to
-        if head_mask is not None:
-            attn_weights = attn_weights * head_mask
-
-        attn_output = torch.matmul(attn_weights, value)
-
-        return attn_output, attn_weights
-
-    def _get_embed_positions(self, position_ids):
-        embed_positions = self.embed_positions
-        if embed_positions.device != position_ids.device:
-            embed_positions = embed_positions.to(position_ids.device)
-            self.embed_positions = embed_positions
-        return embed_positions.repeat(position_ids.shape[0], 1, 1)
-
-    def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        use_cache: Optional[bool] = False,
-        output_attentions: Optional[bool] = False,
-    ) -> Union[
-        Tuple[torch.Tensor, Tuple[torch.Tensor]],
-        Optional[Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor, ...]]],
-    ]:
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-
-        query = self._split_heads(query, self.num_attention_heads, self.head_dim, True)
-        key = self._split_heads(key, self.num_attention_heads, self.head_dim, True)
-        value = self._split_heads(value, self.num_attention_heads, self.head_dim, False)
-        # print("query:", query.shape)
-        # print("1query:", query.dtype, query[1, :2, 0, :8])
-        query1 = query.to(torch.float32).clone()
-        key1 = key.to(torch.float32).clone()
-        fused_gptj_cpp.apply_rotary_pos_emb(
-            query1,
-            self.embed_positions,
-            position_ids.contiguous(),
-            self.num_attention_heads,
-            self.head_dim,
-        )
-        fused_gptj_cpp.apply_rotary_pos_emb(
-            key1,
-            self.embed_positions,
-            position_ids.contiguous(),
-            self.num_attention_heads,
-            self.head_dim,
-        )
-
-        #'''
-        if is_torch_fx_proxy(position_ids):
-            # The logic to conditionally copy to GPU could not be traced, so we do this
-            # every time in the torch.fx case
-            embed_positions = get_embed_positions(self.embed_positions, position_ids)
-        else:
-            embed_positions = self._get_embed_positions(position_ids)
-
-        repeated_position_ids = position_ids.unsqueeze(-1).repeat(
-            1, 1, embed_positions.shape[-1]
-        )
-        sincos = torch.gather(embed_positions, 1, repeated_position_ids)
-        sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
-
-        if self.rotary_dim is not None:
-            k_rot = key[:, :, :, : self.rotary_dim]
-            k_pass = key[:, :, :, self.rotary_dim :]
-
-            q_rot = query[:, :, :, : self.rotary_dim]
-            q_pass = query[:, :, :, self.rotary_dim :]
-
-            k_rot = apply_rotary_pos_emb(k_rot, sin, cos)
-            q_rot = apply_rotary_pos_emb(q_rot, sin, cos)
-
-            key = torch.cat([k_rot, k_pass], dim=-1)
-            query = torch.cat([q_rot, q_pass], dim=-1)
-        else:
-            key = apply_rotary_pos_emb(key, sin, cos)
-            query = apply_rotary_pos_emb(query, sin, cos)
-
-        #'''
-        # print("query:", query.dtype, query[1, :2, 0, :8])
-        # print("query1:", query1.dtype, query1[1, :2, 0, :8])
-        # compare(query, query1, "Query")
-        # compare(key, key1, "Key")
-        key = key.permute(0, 2, 1, 3)
-        query = query.permute(0, 2, 1, 3)
-
-        if layer_past is not None:
-            past_key = layer_past[0]
-            past_value = layer_past[1]
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
-
-        if use_cache is True:
-            present = (key, value)
-        else:
-            present = None
-
-        # compute self-attention: V x Softmax(QK^T)
-        attn_output, attn_weights = self._attn(
-            query, key, value, attention_mask, head_mask
-        )
-
-        attn_output = self._merge_heads(
-            attn_output, self.num_attention_heads, self.head_dim
-        )
-        attn_output = self.out_proj(attn_output)
-        attn_output = self.resid_dropout(attn_output)
-
-        outputs = (attn_output, present)
-        if output_attentions:
-            outputs += (attn_weights,)
-
-        return outputs  # a, present, (attentions)
-
-
-class GPTJMLP(nn.Module):
-    def __init__(
-        self, intermediate_size, config
-    ):  # in MLP: intermediate_size= 4 * embed_dim
-        super().__init__()
-        embed_dim = config.n_embd
-
-        self.fc_in = nn.Linear(embed_dim, intermediate_size)
-        self.fc_out = nn.Linear(intermediate_size, embed_dim)
-
-        self.act = ACT2FN[config.activation_function]
-        self.dropout = nn.Dropout(config.resid_pdrop)
-
-    def forward(self, hidden_states: Optional[torch.FloatTensor]) -> torch.FloatTensor:
-        hidden_states = self.fc_in(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.fc_out(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        return hidden_states
+# @torch.fx.wrap
+# def get_embed_positions(embed_positions, position_ids):
+#     return embed_positions.to(position_ids.device).repeat(position_ids.shape[0], 1, 1)
+# 
+# 
+# def rotate_every_two(x: torch.Tensor) -> torch.Tensor:
+#     x1 = x[:, :, :, ::2]
+#     x2 = x[:, :, :, 1::2]
+#     x = torch.stack((-x2, x1), dim=-1)
+#     return x.flatten(-2)  # in einsum notation: rearrange(x, '... d j -> ... (d j)')
+# 
+# 
+# def apply_rotary_pos_emb(
+#     tensor: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor
+# ) -> torch.Tensor:
+#     sin = torch.repeat_interleave(sin[:, :, None, :], 2, 3)
+#     cos = torch.repeat_interleave(cos[:, :, None, :], 2, 3)
+#     return (tensor * cos) + (rotate_every_two(tensor) * sin)
+# 
+# 
+# class GPTJAttention(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+# 
+#         max_positions = config.max_position_embeddings
+#         self.register_buffer(
+#             "bias",
+#             torch.tril(
+#                 torch.ones((max_positions, max_positions), dtype=torch.bool)
+#             ).view(1, 1, max_positions, max_positions),
+#         )
+#         self.register_buffer("masked_bias", torch.tensor(-1e9))
+# 
+#         self.attn_dropout = nn.Dropout(config.attn_pdrop)
+#         self.resid_dropout = nn.Dropout(config.resid_pdrop)
+# 
+#         self.embed_dim = config.hidden_size
+#         self.num_attention_heads = config.num_attention_heads
+#         self.head_dim = self.embed_dim // self.num_attention_heads
+#         if self.head_dim * self.num_attention_heads != self.embed_dim:
+#             raise ValueError(
+#                 f"embed_dim must be divisible by num_attention_heads (got `embed_dim`: {self.embed_dim} and"
+#                 f" `num_attention_heads`: {self.num_attention_heads})."
+#             )
+#         self.scale_attn = torch.sqrt(
+#             torch.tensor(self.head_dim, dtype=torch.float32)
+#         ).to(torch.get_default_dtype())
+# 
+#         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+#         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+#         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+#         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
+#         self.rotary_dim = config.rotary_dim
+#         pos_embd_dim = self.rotary_dim or self.embed_dim
+#         self.embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
+# 
+#     def _split_heads(self, tensor, num_attention_heads, attn_head_size, rotary):
+#         """
+#         Splits hidden dim into attn_head_size and num_attention_heads
+#         """
+#         new_shape = tensor.size()[:-1] + (num_attention_heads, attn_head_size)
+#         tensor = tensor.view(new_shape)
+#         if rotary:
+#             return tensor
+#         if len(tensor.shape) == 5:
+#             return tensor.permute(
+#                 0, 1, 3, 2, 4
+#             )  # (batch, blocks, head, block_length, head_features)
+#         elif len(tensor.shape) == 4:
+#             return tensor.permute(
+#                 0, 2, 1, 3
+#             )  # (batch, head, seq_length, head_features)
+#         else:
+#             raise ValueError(
+#                 f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
+#             )
+# 
+#     def _merge_heads(self, tensor, num_attention_heads, attn_head_size):
+#         """
+#         Merges attn_head_size dim and num_attn_heads dim into hidden dim
+#         """
+#         if len(tensor.shape) == 5:
+#             tensor = tensor.permute(0, 1, 3, 2, 4).contiguous()
+#         elif len(tensor.shape) == 4:
+#             tensor = tensor.permute(0, 2, 1, 3).contiguous()
+#         else:
+#             raise ValueError(
+#                 f"Input tensor rank should be one of [4, 5], but is: {len(tensor.shape)}"
+#             )
+#         new_shape = tensor.size()[:-2] + (num_attention_heads * attn_head_size,)
+#         return tensor.view(new_shape)
+# 
+#     def _attn(
+#         self,
+#         query,
+#         key,
+#         value,
+#         attention_mask=None,
+#         head_mask=None,
+#     ):
+#         # compute causal mask from causal mask buffer
+#         query_length, key_length = query.size(-2), key.size(-2)
+#         causal_mask = self.bias[
+#             :, :, key_length - query_length : key_length, :key_length
+#         ]
+# 
+#         # Keep the attention weights computation in fp32 to avoid overflow issues
+#         query = query.to(torch.float32)
+#         key = key.to(torch.float32)
+# 
+#         attn_weights = torch.matmul(query, key.transpose(-1, -2))
+# 
+#         mask_value = torch.finfo(attn_weights.dtype).min
+#         # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
+#         # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
+#         mask_value = torch.tensor(mask_value, dtype=attn_weights.dtype).to(
+#             attn_weights.device
+#         )
+#         attn_weights = torch.where(causal_mask, attn_weights, mask_value)
+# 
+#         attn_weights = attn_weights / self.scale_attn
+# 
+#         if attention_mask is not None:
+#             # Apply the attention mask
+#             attn_weights = attn_weights + attention_mask
+# 
+#         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+#         attn_weights = attn_weights.to(value.dtype)
+#         attn_weights = self.attn_dropout(attn_weights)
+# 
+#         # Mask heads if we want to
+#         if head_mask is not None:
+#             attn_weights = attn_weights * head_mask
+# 
+#         attn_output = torch.matmul(attn_weights, value)
+# 
+#         return attn_output, attn_weights
+# 
+#     def _get_embed_positions(self, position_ids):
+#         embed_positions = self.embed_positions
+#         if embed_positions.device != position_ids.device:
+#             embed_positions = embed_positions.to(position_ids.device)
+#             self.embed_positions = embed_positions
+#         return embed_positions.repeat(position_ids.shape[0], 1, 1)
+# 
+#     def forward(
+#         self,
+#         hidden_states: torch.FloatTensor,
+#         layer_past: Optional[Tuple[torch.Tensor]] = None,
+#         attention_mask: Optional[torch.FloatTensor] = None,
+#         position_ids: Optional[torch.LongTensor] = None,
+#         head_mask: Optional[torch.FloatTensor] = None,
+#         use_cache: Optional[bool] = False,
+#         output_attentions: Optional[bool] = False,
+#     ) -> Union[
+#         Tuple[torch.Tensor, Tuple[torch.Tensor]],
+#         Optional[Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor, ...]]],
+#     ]:
+#         query = self.q_proj(hidden_states)
+#         key = self.k_proj(hidden_states)
+#         value = self.v_proj(hidden_states)
+# 
+#         query = self._split_heads(query, self.num_attention_heads, self.head_dim, True)
+#         key = self._split_heads(key, self.num_attention_heads, self.head_dim, True)
+#         value = self._split_heads(value, self.num_attention_heads, self.head_dim, False)
+#         # print("query:", query.shape)
+#         # print("1query:", query.dtype, query[1, :2, 0, :8])
+#         query1 = query.to(torch.float32).clone()
+#         key1 = key.to(torch.float32).clone()
+#         fused_gptj_cpp.apply_rotary_pos_emb(
+#             query1,
+#             self.embed_positions,
+#             position_ids.contiguous(),
+#             self.num_attention_heads,
+#             self.head_dim,
+#         )
+#         fused_gptj_cpp.apply_rotary_pos_emb(
+#             key1,
+#             self.embed_positions,
+#             position_ids.contiguous(),
+#             self.num_attention_heads,
+#             self.head_dim,
+#         )
+# 
+#         #'''
+#         if is_torch_fx_proxy(position_ids):
+#             # The logic to conditionally copy to GPU could not be traced, so we do this
+#             # every time in the torch.fx case
+#             embed_positions = get_embed_positions(self.embed_positions, position_ids)
+#         else:
+#             embed_positions = self._get_embed_positions(position_ids)
+# 
+#         repeated_position_ids = position_ids.unsqueeze(-1).repeat(
+#             1, 1, embed_positions.shape[-1]
+#         )
+#         sincos = torch.gather(embed_positions, 1, repeated_position_ids)
+#         sin, cos = torch.split(sincos, sincos.shape[-1] // 2, dim=-1)
+# 
+#         if self.rotary_dim is not None:
+#             k_rot = key[:, :, :, : self.rotary_dim]
+#             k_pass = key[:, :, :, self.rotary_dim :]
+# 
+#             q_rot = query[:, :, :, : self.rotary_dim]
+#             q_pass = query[:, :, :, self.rotary_dim :]
+# 
+#             k_rot = apply_rotary_pos_emb(k_rot, sin, cos)
+#             q_rot = apply_rotary_pos_emb(q_rot, sin, cos)
+# 
+#             key = torch.cat([k_rot, k_pass], dim=-1)
+#             query = torch.cat([q_rot, q_pass], dim=-1)
+#         else:
+#             key = apply_rotary_pos_emb(key, sin, cos)
+#             query = apply_rotary_pos_emb(query, sin, cos)
+# 
+#         #'''
+#         # print("query:", query.dtype, query[1, :2, 0, :8])
+#         # print("query1:", query1.dtype, query1[1, :2, 0, :8])
+#         # compare(query, query1, "Query")
+#         # compare(key, key1, "Key")
+#         key = key.permute(0, 2, 1, 3)
+#         query = query.permute(0, 2, 1, 3)
+# 
+#         if layer_past is not None:
+#             past_key = layer_past[0]
+#             past_value = layer_past[1]
+#             key = torch.cat((past_key, key), dim=-2)
+#             value = torch.cat((past_value, value), dim=-2)
+# 
+#         if use_cache is True:
+#             present = (key, value)
+#         else:
+#             present = None
+# 
+#         # compute self-attention: V x Softmax(QK^T)
+#         attn_output, attn_weights = self._attn(
+#             query, key, value, attention_mask, head_mask
+#         )
+# 
+#         attn_output = self._merge_heads(
+#             attn_output, self.num_attention_heads, self.head_dim
+#         )
+#         attn_output = self.out_proj(attn_output)
+#         attn_output = self.resid_dropout(attn_output)
+# 
+#         outputs = (attn_output, present)
+#         if output_attentions:
+#             outputs += (attn_weights,)
+# 
+#         return outputs  # a, present, (attentions)
+# 
+# 
+# class GPTJMLP(nn.Module):
+#     def __init__(
+#         self, intermediate_size, config
+#     ):  # in MLP: intermediate_size= 4 * embed_dim
+#         super().__init__()
+#         embed_dim = config.n_embd
+# 
+#         self.fc_in = nn.Linear(embed_dim, intermediate_size)
+#         self.fc_out = nn.Linear(intermediate_size, embed_dim)
+# 
+#         self.act = ACT2FN[config.activation_function]
+#         self.dropout = nn.Dropout(config.resid_pdrop)
+# 
+#     def forward(self, hidden_states: Optional[torch.FloatTensor]) -> torch.FloatTensor:
+#         hidden_states = self.fc_in(hidden_states)
+#         hidden_states = self.act(hidden_states)
+#         hidden_states = self.fc_out(hidden_states)
+#         hidden_states = self.dropout(hidden_states)
+#         return hidden_states
 
 
 class GPTJBlock(BlockedModule):
@@ -494,7 +494,13 @@ class GPTJBlock(BlockedModule):
             ]
             params += [self.mlp.fc_in.weight, self.mlp.fc_in.bias]
             params += [self.mlp.fc_out.weight, self.mlp.fc_out.bias]
-            params += [self.attn.embed_positions]
+            if hasattr(self.attn, "embed_positions"):
+                embed_positions = self.attn.embed_positions
+            else:
+                max_positions = self.attn.bias.size(-1)
+                pos_embd_dim = self.attn.rotary_dim or self.attn.embed_dim
+                embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
+            params += [embed_positions]
             #self.cpp_block = fused_gptj_cpp.GPTJBlock(
             self.cpp_block = torch.classes.tpp_gptj.GPTJBlock(
                 params,
@@ -515,6 +521,8 @@ class GPTJBlock(BlockedModule):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
         if layer_past is not None:
+            #print("KP: ", layer_past[0].shape)
+            #print("VP: ", layer_past[1].shape)
             add_tensor_or_empty(layer_past[0])
             add_tensor_or_empty(layer_past[1])
             # add_tensor_or_empty(self.get_blocked_tensor(layer_past[0], self.blocked_input_signature, [None, None, self.features_block_size]))
@@ -522,13 +530,23 @@ class GPTJBlock(BlockedModule):
         else:
             inputs += [dummy_tensor, dummy_tensor]
         add_tensor_or_empty(attention_mask)
+        if position_ids is None:
+            seq_len = hidden_states.shape[1]
+            offset = 0
+            if layer_past is not None:
+                offset = layer_past[0].shape[1]
+            position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
+
         add_tensor_or_empty(position_ids)
         inputs = [
-            i.cvt_to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
+            i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
+        #print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
         # print("PHS:", hidden_states.shape)
         hs, k, v = self.cpp_block.forward(inputs, use_cache)
+        #print("K: ", k.shape)
+        #print("V: ", v.shape)
 
         hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
         # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
@@ -577,12 +595,55 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     self.features_block_size = bc
     self.layer_dtype = layer_dtype
     for m in self.modules():
-        if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJAttention):
-            m.__class__ = GPTJAttention
+        #if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJAttention):
+        #    m.__class__ = GPTJAttention
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype)
     block(self)
+    if not hasattr(self, "cpp_block"):
+        params = [self.ln_1.weight, self.ln_1.bias]
+        params += [
+            self.attn.q_proj.weight,
+            self.attn.k_proj.weight,
+            self.attn.v_proj.weight,
+            self.attn.out_proj.weight,
+        ]
+        params += [self.mlp.fc_in.weight, self.mlp.fc_in.bias]
+        params += [self.mlp.fc_out.weight, self.mlp.fc_out.bias]
+        if hasattr(self.attn, "embed_positions"):
+            embed_positions = self.attn.embed_positions
+        else:
+            max_positions = self.attn.bias.size(-1)
+            pos_embd_dim = self.attn.rotary_dim or self.attn.embed_dim
+            embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
+        params += [embed_positions]
+        #self.cpp_block = fused_gptj_cpp.GPTJBlock(
+        self.cpp_block = torch.classes.tpp_gptj.GPTJBlock(
+            params,
+            self.ln_1.eps,
+            self.attn.num_attention_heads,
+            self.attn.head_dim,
+            self.attn.bias.size(-1),
+            self.attn.rotary_dim,
+        )
+        self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
+def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
+    """
+    This function is used to re-order the `past_key_values` cache if [`~PretrainedModel.beam_search`] or
+    [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
+    beam_idx at every generation step.
+    """
+    ret = fused_gptj_cpp.reorder_cache(past, beam_idx)
+    return tuple(
+        tuple(p for p in layer_past) for layer_past in ret
+    )
+    # return tuple(
+    #     tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
+    #     for layer_past in past
+    # )
+
+transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 
 # bm_default_blocking_factors = BlockedModule.default_blocking_factors
 # @staticmethod
