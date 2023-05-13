@@ -437,7 +437,7 @@ class BertEncoderLayer {
     auto Hk = t_wt_bcsc.sizes[3];
     // Create TPPs
     auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
-    auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+    auto norm2v_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_N2V_TPP, true), VNNI);
     auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
         S2,
         Hk,
@@ -465,13 +465,15 @@ class BertEncoderLayer {
             int cur_n_blocks = (t_wt_bcsc.Nblocks_offsets[i_n+1] - t_wt_bcsc.Nblocks_offsets[i_n])/t_wt_bcsc.bcsc_bn;
             for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt_bcsc.bcsc_blocks_in_bn) {
               int nk = (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/S2;
-              copy_bias_tpp(bias[nk], tmp_block);
+              T *dst = (t_out.dtype() == at::kFloat) ? out[s1][nk] : tmp_block;
+              copy_bias_tpp(bias[nk], dst);
               spmm_tpp(in[s1], 
                        t_wt_bcsc, t_wt_bcsc.bcsc_blocks_in_bn, (t_wt_bcsc.Nblocks_offsets[i_n] + l_block * t_wt_bcsc.bcsc_bn)/t_wt_bcsc.bcsc_bn, 
-                       tmp_block, true);
-              trans_out_tpp( tmp_block, out[s1][nk] );
-              gelu_fwd_tpp(out[s1][nk], tmp_block);
-              trans_output_block<T>( S2, Hk, tmp_block, out[s1][nk]);
+                       dst, true);
+              if (t_out.dtype() != at::kFloat) {
+                norm2v_out_tpp( dst, out[s1][nk] );
+              }
+              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
             }
           },
           [&]() { spmm_tpp.config(); },
