@@ -135,7 +135,8 @@ VLAPtr<T, N, index_t> GetVLAPtr(T* data_, const index_t (&list)[N]) {
 template <typename T>
 inline T* pt_get_data_ptr(at::Tensor t) {
   if (!t.is_contiguous()) {
-    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous" << std::endl;
+    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
+              << std::endl;
   }
   return t.data_ptr<T>();
 }
@@ -143,7 +144,8 @@ inline T* pt_get_data_ptr(at::Tensor t) {
 template <>
 inline at::BFloat8* pt_get_data_ptr<at::BFloat8>(at::Tensor t) {
   if (!t.is_contiguous()) {
-    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous" << std::endl;
+    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
+              << std::endl;
   }
   return (at::BFloat8*)t.data_ptr<uint8_t>();
 }
