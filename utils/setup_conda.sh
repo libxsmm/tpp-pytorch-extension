@@ -46,6 +46,9 @@ bash ./Miniconda3-latest-Linux-${ARCH}.sh -b -p ${CONDA_INSTALL_DIR}
 ${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.8
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
+conda install -n base conda-libmamba-solver
+conda config --set solver libmamba
+
 if [ ${ARCH} == "x86_64" ] ; then
   conda install -y pytorch==2.0.0 torchvision torchaudio cpuonly intel-openmp gperftools ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c pytorch -c intel -c conda-forge 
 elif [ ${ARCH} == "aarch64" ] ; then
