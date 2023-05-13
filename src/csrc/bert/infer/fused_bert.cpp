@@ -28,6 +28,7 @@ using namespace tpp;
 static int my_rank = guess_mpi_rank();
 static int large_cache_opt = false;
 static int use_at_vnni = env2int("USE_AT_VNNI");
+int n_Layers = 0;
 int current_layer = 0;
 int is_self_output = 0;
 
@@ -125,8 +126,14 @@ class BertEncoderLayer {
       S2 = sizes[2];
       F2 = sizes[3];
     } else {
-      S2 = sizes[3];
-      F2 = sizes[2]*sizes[4]; 
+      auto dims = sizes.size();
+      if (dims == 5) {
+        S2 = sizes[3];
+        F2 = sizes[2]*sizes[4];
+      } else {
+        S2 = sizes[2];
+        F2 = sizes[3];
+      }
     }
     bool dt_low_prec = (t_HS.dtype() != at::kFloat);
     auto B = GetVLAPtr<T>(t_B, {F2});
@@ -337,13 +344,6 @@ class BertEncoderLayer {
     auto Hc = in_sizes[3];
     auto Nk = t_wt_bcsc.sizes[0];
     auto Hk = t_wt_bcsc.sizes[3];
-#if 0
-    if (t_in.dtype() == at::kFloat) {
-      t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
-    } else {
-      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
-    }
-#endif
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto in2 = GetVLAPtr<T>(t_in2, {Nk, S2 * Hk});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
@@ -375,6 +375,7 @@ class BertEncoderLayer {
       bool parallelized_on_nk =
           large_cache_opt ? false : true; // ogemm_loop.is_parallel(2);
       ogemm_loop(
+
           [&](int* ind) {
             int s1 = ind[0], i_n = ind[1];
             T tmp_block[S2*Hk];
@@ -395,7 +396,7 @@ class BertEncoderLayer {
                     nullptr,
                     nullptr,
                     out[s1][0]);
-                if (is_self_output == 1) {             
+                if (is_self_output == 1 || current_layer < n_Layers-1) {             
                   for (int l_nk = 0; l_nk < Nk; l_nk++) {
                     trans_output_block<T>( S2, Hk, out[s1][l_nk], out_tr[s1][l_nk]);
                   }
@@ -411,7 +412,7 @@ class BertEncoderLayer {
         for (int s1 = 0; s1 < S1; s1++) {
           layer_norm_fwd_tpp(
               out[s1][0], gamma[0], beta[0], nullptr, nullptr, out[s1][0]);
-          if (is_self_output == 1) {             
+          if (is_self_output == 1 || current_layer < n_Layers-1) {             
             for (int l_nk = 0; l_nk < Nk; l_nk++) {
               trans_output_block<T>( S2, Hk, out[s1][l_nk], out_tr[s1][l_nk]);
             }
@@ -434,13 +435,6 @@ class BertEncoderLayer {
     auto Hc = in_sizes[3];
     auto Nk = t_wt_bcsc.sizes[0];
     auto Hk = t_wt_bcsc.sizes[3];
-#if 0
-    if (t_in.dtype() == at::kFloat) {
-      t_in = act_tensor_trans(S1, Nc, S2, Hc, t_in);
-    } else {
-      t_in = act_tensor_trans_n2v(S1, Nc, S2, Hc, t_in);  
-    }
-#endif
     // Create TPPs
     auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(S2, Hk), BIAS);
     auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(S2, Hk, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
@@ -498,6 +492,7 @@ class BertEncoderLayer {
     auto& t_SO = t_scratch[4];
     auto& t_I = t_scratch[5];
     auto& t_SO_trans = t_scratch[6];
+    auto& t_Out_trans = t_scratch[6];
     auto t_HS_qkv = t_HS;
     auto sizes = t_HS.sizes();
     long S1 = sizes[0];
@@ -505,27 +500,25 @@ class BertEncoderLayer {
     long S2 = sizes[2];
     long F2 = sizes[3];
 
-    if (current_layer == 0 || 1) {
+    if (current_layer == 0) {
       if (t_HS_qkv.dtype() == at::kFloat) {
         t_HS_qkv = act_tensor_trans(S1, F1, S2, F2, t_HS);
       } else {
         t_HS_qkv = act_tensor_trans_n2v(S1, F1, S2, F2, t_HS);  
       }
     } else {
-      t_HS_qkv = t_HS;
+      t_HS_qkv = t_Out_trans;
     }
-
     q_gemm<T>(t_HS_qkv, t_Wq_bcsc, t_Bq, t_QL);
     k_gemm<T>(t_HS_qkv, t_Wk_bcsc, t_Bk, t_KL_TV);
     v_gemm<T>(t_HS_qkv, t_Wv_bcsc, t_Bv, t_VL_V);
-
     self_attn<T>(t_QL, t_KL_TV, t_masks, t_VL_V, t_CL);
     is_self_output = 1;
     output<T, LT>(t_CL, t_HS, t_Wso_bcsc, t_Bso, t_Gso, t_Beta_so, t_SO, t_SO_trans);
     intermediate<T>(t_SO_trans, t_Wi_bcsc, t_Bi, t_I);
     is_self_output = 0;
-    output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out, t_SO_trans);
-
+    output<T, LT>(t_I, t_SO, t_Wo_bcsc, t_Bo, t_Go, t_Beta_o, t_Out, t_Out_trans);
+    
     return t_Out;
   }
 };
@@ -545,6 +538,7 @@ class BertEncoder {
       : eps(eps), N(N), HS(HS), IS(IS) {
     H = HS / N;
     auto nLayers = params.size();
+    n_Layers = nLayers;
     layers.reserve(nLayers);
     for (long unsigned int i = 0; i < nLayers; i++) {
       layers.push_back(new BertEncoderLayer(params[i], eps, N, H));
@@ -614,8 +608,8 @@ class BertEncoder {
     ret.push_back(t_HS.new_empty(sizes1)); // CL
     ret.push_back(t_HS.new_empty(sizes1)); // SO
     ret.push_back(t_HS.new_empty(sizes2)); // I
-    ret.push_back(t_HS.new_empty(sizes1)); // SO_trans
-
+    ret.push_back(t_HS.new_empty(sizes1)); // SO_trans, O_trans
+    
     return ret;
   }
 
