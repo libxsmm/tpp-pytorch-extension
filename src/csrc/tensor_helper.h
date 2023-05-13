@@ -225,6 +225,7 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   sparse_wt->Nblocks_offsets = Nblocks_offsets;
   sparse_wt->n_blocks = n_blocks;
   sparse_wt->nnz = nnz;
+  sparse_wt->n_dense_elts = N*K;
   sparse_wt->bcsc_bn = bcsc_bn;
   sparse_wt->bcsc_bk = bcsc_bk;
   sparse_wt->bcsc_blocks_in_bn = l_blocking_step;

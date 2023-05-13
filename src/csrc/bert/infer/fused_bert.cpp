@@ -31,6 +31,15 @@ static int use_at_vnni = env2int("USE_AT_VNNI");
 int n_Layers = 0;
 int current_layer = 0;
 int is_self_output = 0;
+unsigned int nnz_qkv = 0;
+unsigned int dense_qkv = 0;
+unsigned int nnz_intermediate = 0;
+unsigned int dense_intermediate = 0;
+unsigned int nnz_output = 0;
+unsigned int dense_output = 0;
+unsigned int nnz_selfoutput = 0;
+unsigned int dense_selfoutput = 0;
+unsigned int batch_execution = 0;
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
@@ -103,11 +112,19 @@ class BertEncoderLayer {
 
     /* Create BCSC sparse tensors */
     create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk, bcsc_bn);
+    nnz_intermediate += t_Wi_bcsc.nnz;
+    dense_intermediate += t_Wi_bcsc.n_dense_elts;
     create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk, bcsc_bn);
+    nnz_output += t_Wo_bcsc.nnz;
+    dense_output += t_Wo_bcsc.n_dense_elts;
     create_bcsc_from_blocked_nkkn_weight(t_Wso, &t_Wso_bcsc, bcsc_bk, bcsc_bn);
+    nnz_selfoutput += t_Wso_bcsc.nnz;
+    dense_selfoutput += t_Wso_bcsc.n_dense_elts;
     create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk, bcsc_bn);
     create_bcsc_from_blocked_nkkn_weight(t_Wk, &t_Wk_bcsc, bcsc_bk, bcsc_bn);
     create_bcsc_from_blocked_nkkn_weight(t_Wv, &t_Wv_bcsc, bcsc_bk, bcsc_bn);
+    nnz_qkv += t_Wq_bcsc.nnz + t_Wk_bcsc.nnz + t_Wv_bcsc.nnz;
+    dense_qkv += t_Wq_bcsc.n_dense_elts + t_Wk_bcsc.n_dense_elts + t_Wv_bcsc.n_dense_elts ;
 
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
@@ -637,6 +654,15 @@ class BertEncoder {
       }
       current_layer++;
     }
+
+    if (batch_execution == 0) {
+      printf("\nQKV sparsity: %.5g %%\n",(1.0-(double)nnz_qkv/(double)dense_qkv)*100.0);
+      printf("Intermediate sparsity: %.5g %%\n",(1.0-(double)nnz_intermediate/(double)dense_intermediate)*100.0);
+      printf("Self-output sparsity: %.5g %%\n", (1.0-(double)nnz_selfoutput/(double)dense_selfoutput))*100.0;
+      printf("Output sparsity: %.5g %%\n", (1.0-(double)nnz_output/(double)dense_output)*100.0);
+      batch_execution = 1;
+    }
+
     // printf("Returning Layer \n");
 
     return t_HS;

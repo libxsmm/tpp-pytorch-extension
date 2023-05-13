@@ -44,6 +44,7 @@ typedef struct tensor_bcsc_t {
   unsigned int *Nblocks_offsets;
   unsigned int n_blocks;
   unsigned int nnz;
+  unsigned int n_dense_elts;
   unsigned int bcsc_bn;
   unsigned int bcsc_bk;
   unsigned int bcsc_blocks_in_bn;
