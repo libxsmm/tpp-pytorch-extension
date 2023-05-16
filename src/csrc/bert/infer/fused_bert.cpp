@@ -658,7 +658,7 @@ class BertEncoder {
     if (batch_execution == 0) {
       printf("\nQKV sparsity: %.5g %%\n",(1.0-(double)nnz_qkv/(double)dense_qkv)*100.0);
       printf("Intermediate sparsity: %.5g %%\n",(1.0-(double)nnz_intermediate/(double)dense_intermediate)*100.0);
-      printf("Self-output sparsity: %.5g %%\n", (1.0-(double)nnz_selfoutput/(double)dense_selfoutput))*100.0;
+      printf("Self-output sparsity: %.5g %%\n", (1.0-(double)nnz_selfoutput/(double)dense_selfoutput)*100.0);
       printf("Output sparsity: %.5g %%\n", (1.0-(double)nnz_output/(double)dense_output)*100.0);
       batch_execution = 1;
     }
