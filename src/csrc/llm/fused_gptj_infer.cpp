@@ -699,7 +699,7 @@ struct GPTJBlock : torch::CustomClassHolder {
       at::Tensor t_Out,
       bool use_cache,
       std::vector<at::Tensor> t_scratch) {
-    typedef bfloat16 Tv;
+    typedef T Tv;
     auto vdtype = std::is_same<Tv, float>::value ? at::kFloat : at::kBFloat16;
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
