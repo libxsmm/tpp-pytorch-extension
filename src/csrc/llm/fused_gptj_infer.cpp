@@ -50,14 +50,18 @@ inline void reorder_one(at::Tensor t_old, at::Tensor t_new, long *idx, long B, l
 }
 
 static std::vector<std::vector<at::Tensor>> reorder_cache(std::vector<std::vector<at::Tensor>> cache, at::Tensor t_idx) {
+  GlobalPass _gp(OTH);
   auto B = t_idx.size(0);
   long NL = cache.size();
   auto t0 = cache[0][0];
+  auto sizes = t0.sizes().vec();
+  sizes[0] = B;
   auto d0 = t0.size(0);
   auto numel = t0.numel();
   auto d1 = numel / d0;
   auto cpy_tpp_f32 = SCOPEIT(CpyTPP<float>(d1), EW_COPY);
   auto cpy_tpp_bf16 = SCOPEIT(CpyTPP<bfloat16>(d1), EW_COPY);
+  auto cpy_tpp_bf8 = SCOPEIT(CpyTPP<bfloat8>(d1), EW_COPY);
   auto idx = GetVLAPtr<long>(t_idx);
 
   RECORD_SCOPE(reorder, {t0, t_idx});
@@ -65,14 +69,14 @@ static std::vector<std::vector<at::Tensor>> reorder_cache(std::vector<std::vecto
   for (int i = 0; i < NL; i++) {
     for (int j = 0; j < 2; j++) {
       auto t_old = cache[i][j];
-      auto sizes = t_old.sizes().vec();
-      sizes[0] = B;
       auto t_new = t_old.new_empty(sizes);
       auto dt = t_old.dtype();
       if (dt == at::kFloat) {
         reorder_one<float>(t_old, t_new, idx, B, d1, cpy_tpp_f32);
       } else if (dt == at::kBFloat16) {
         reorder_one<bfloat16>(t_old, t_new, idx, B, d1, cpy_tpp_bf16);
+      } else if (dt == at::kBFloat8) {
+        reorder_one<bfloat8>(t_old, t_new, idx, B, d1, cpy_tpp_bf8);
       } else {
         TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
       }
