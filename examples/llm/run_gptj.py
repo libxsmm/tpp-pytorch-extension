@@ -88,6 +88,7 @@ else:
 if args.jit:
     torch._C._jit_set_texpr_fuser_enabled(False)
     # generate_kwargs["jit"] = True
+    raise NotImplementedError("Torch JIT Not supported yet!")
 
 # dtype
 if args.dtype == "bfloat16":
@@ -131,7 +132,7 @@ if args.use_tpp:
     for m in model.modules():
         if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
             # FixGPTJBlock(m, 16, 16, torch.bfloat16)
-            FixGPTJBlock(m, 16, 64, torch.bfloat16)
+            FixGPTJBlock(m, 16, 64, amp_dtype)
     # block(model)
 for n, p in model.named_parameters():
     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
