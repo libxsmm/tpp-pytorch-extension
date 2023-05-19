@@ -160,6 +160,7 @@ class SafePrint {
   void print() {
     printf("%s", buf);
     len = 0;
+    buf[0] = 0;
   }
 
  private:
