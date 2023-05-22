@@ -1411,31 +1411,43 @@ template <typename Tin, typename Tout>
 class ScaleAddTPP {
  public:
   ScaleAddTPP() {}
-  ScaleAddTPP(int N)
-      : N(N),
+  ScaleAddTPP(int N) : ScaleAddTPP(1, N) {}
+  ScaleAddTPP(int rows, int cols) : ScaleAddTPP(rows, cols, cols, cols) {}
+  ScaleAddTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+	cols(cols),
+	ldi(ldi),
+	ldo(ldo),
         kernel(
-            1,
-            N,
-            N,
-            N,
+            rows,
+            cols,
+	    1,
+            ldi,
+            ldo,
+            XsmmDtype<float>(),
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
             LIBXSMM_MELTW_TYPE_BINARY_MULADD) {}
   void operator()(Tin* in, Tout* out, float scale) {
-    Tin alpha = scale;
+    float alpha = scale;
     kernel((void*)&alpha, (void*)in, (void*)out);
   }
   void ref(Tin* in, Tout* out, float scale) {
-    Tin alpha = scale;
-    for (int i = 0; i < N; i++) {
-      out[i] += (float)in[i] * (float)alpha;
+    float alpha = scale;
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i*ldo+j] += (float)in[i*ldi+j] * (float)alpha;
+      }
     }
   }
 
  private:
-  int N = 0;
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
   BinaryTPP kernel;
 };
 

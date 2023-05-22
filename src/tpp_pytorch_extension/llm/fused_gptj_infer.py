@@ -485,6 +485,7 @@ class GPTJBlock(BlockedModule):
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
         #'''
         if not hasattr(self, "cpp_block"):
+            raise
             params = [self.ln_1.weight, self.ln_1.bias]
             params += [
                 self.attn.q_proj.weight,
@@ -545,6 +546,9 @@ class GPTJBlock(BlockedModule):
 
         # print("PHS:", hidden_states.shape)
         hs, k, v = self.cpp_block.forward(inputs, use_cache)
+        if self.model_parallel:
+            all_reduce(hs)
+        # hs = hs + hidden_states
         #print("K: ", k.shape)
         #print("V: ", v.shape)
 
@@ -587,6 +591,33 @@ class GPTJBlock(BlockedModule):
 
         return outputs  # hidden_states, present, (attentions)
 
+def ShardLinear(m, dim, rank, size):
+    # dim = 0 - shard output features
+    # dim = 1 - shard input features
+    m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
+    if m.bias is not None:
+        if dim == 0:
+            m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
+        else:
+            m.bias.data = m.bias.data / size
+
+def get_rank():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        rank = torch.distributed.get_rank()
+    else:
+        rank = 0
+    return rank
+
+def get_size():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        size = torch.distributed.get_world_size()
+    else:
+        size = 1
+    return size
+
+def all_reduce(t):
+    with torch.autograd.profiler.record_function("allreduce"):
+        torch.distributed.all_reduce(t)
 
 def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):
@@ -594,6 +625,18 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     self.__class__ = GPTJBlock
     self.features_block_size = bc
     self.layer_dtype = layer_dtype
+    rank = get_rank()
+    wsize = get_size()
+    if wsize > 1:
+        ShardLinear(self.attn.q_proj, 0, rank, wsize)
+        ShardLinear(self.attn.k_proj, 0, rank, wsize)
+        ShardLinear(self.attn.v_proj, 0, rank, wsize)
+        ShardLinear(self.attn.out_proj, 1, rank, wsize)
+        ShardLinear(self.mlp.fc_in, 0, rank, wsize)
+        ShardLinear(self.mlp.fc_out, 1, rank, wsize)
+        self.model_parallel = True
+    else:
+        self.model_parallel = False
     for m in self.modules():
         #if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJAttention):
         #    m.__class__ = GPTJAttention
@@ -621,7 +664,7 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.cpp_block = torch.classes.tpp_gptj.GPTJBlock(
             params,
             self.ln_1.eps,
-            self.attn.num_attention_heads,
+            self.attn.num_attention_heads // wsize,
             self.attn.head_dim,
             self.attn.bias.size(-1),
             self.attn.rotary_dim,

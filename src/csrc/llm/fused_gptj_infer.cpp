@@ -314,7 +314,8 @@ inline void fc_out(
     at::Tensor& t_in2,
     at::Tensor& t_wt,
     at::Tensor& t_bias,
-    at::Tensor& t_out) {
+    at::Tensor& t_out,
+    float scale) {
   auto in_sizes = t_in.sizes();
   auto wt_sizes = t_wt.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
@@ -347,6 +348,8 @@ inline void fc_out(
       (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
+  auto sadd_tpp = SCOPEIT_REF((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
+  auto sadd_tpp_rem = SCOPEIT_REF((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
 
   {
     RECORD_SCOPE(o_gemm, {t_in, t_wt_V});
@@ -366,7 +369,7 @@ inline void fc_out(
             brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              add_tpp(out[s1][nk], in2[s1][nk], out[s1][nk]);
+              sadd_tpp(in2[s1][nk], out[s1][nk], scale);
             }
           } else {
             if (nc == 0) {
@@ -375,7 +378,7 @@ inline void fc_out(
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
             if (!(nc + Ncb < Nc)) { // last nc iter
               add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              add_tpp_rem(out[s1][nk], in2[s1][nk], out[s1][nk]);
+              sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
             }
           }
         },
@@ -389,16 +392,17 @@ static at::Tensor fc_out_wrap(
     at::Tensor& t_in1,
     at::Tensor& t_in2,
     at::Tensor& t_wt,
-    at::Tensor& t_bias) {
+    at::Tensor& t_bias,
+    float scale) {
   GlobalPass _gp(FWD);
   auto t_out = at::empty_like(t_in1);
   auto dt = t_wt.dtype();
   if (dt == at::kFloat) {
-    fc_out<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out);
+    fc_out<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else if (dt == at::kBFloat16) {
-    fc_out<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out);
+    fc_out<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else if (dt == at::kBFloat8) {
-    fc_out<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out);
+    fc_out<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -508,7 +512,8 @@ struct GPTJBlock : torch::CustomClassHolder {
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
   float eps, one_by_sqrt_H;
-  long K1, K2, C1, C2, N, H, H1, H2;
+  long N, H, H1, H2;
+  long mp_size; // model_paralle size
   long max_positions, rotary_dim;
 
   GPTJBlock(
@@ -541,15 +546,14 @@ struct GPTJBlock : torch::CustomClassHolder {
     t_EP = params[i++]; // embed_positions
 
     one_by_sqrt_H = 1.0 / sqrt(H);
+    mp_size = t_Wp.size(0) / t_Wq.size(0);
     auto sizes = t_Wq.sizes();
-    //std::cout << "t_Wq.sizes" << sizes << std::endl;
-    K1 = sizes[0];
-    C1 = sizes[1];
-    K2 = sizes[3];
-    C2 = sizes.size() == 4 ? sizes[2] : sizes[2] * sizes[4];
+    // std::cout << "t_Wq.sizes" << sizes << std::endl;
+    // std::cout << "t_Wp.sizes" << t_Wp.sizes() << std::endl;
+    long K2 = sizes[3];
     H2 = K2;
     H1 = H / H2;
-    std::cout << "H2=" << H2 << " H=" << H << " H1=" << H1 << std::endl;
+    std::cout << "mp_size=" << mp_size << " N=" << N << " H2=" << H2 << " H=" << H << " H1=" << H1 << std::endl;
   }
 
   template <typename T, typename Tout = T>
@@ -704,13 +708,15 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
-    auto t_QL = at::empty_like(t_HS);
+    //auto t_QL = at::empty_like(t_HS);
+    auto t_QL = t_HS.new_empty({B, S, N*H});
     auto t_KL = at::empty_like(t_QL);
     auto t_VL = at::empty_like(t_QL, vdtype);
     auto t_CL = at::empty_like(t_QL);
     auto t_SO = at::empty_like(t_HS);
     auto t_I = t_HS.new_empty({B, S, t_Wi.size(0) * t_Wi.size(3)});
     auto t_HS_qkv = at::empty_like(t_HS);
+    float scale = 1.0 / mp_size;
 
     // std::cout << "HS: " << t_HS.sizes() << std::endl;
     // std::cout << "use_cche: " << use_cache << " t_key_past.numel: " <<
@@ -756,7 +762,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_in<T>(t_HS_qkv, t_Wi, t_Bi, t_I);
     // printf("reached at %s:%d\n", __func__, __LINE__);
-    fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out);
+    fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out, scale);
     // printf("reached at %s:%d\n", __func__, __LINE__);
 
     if (use_cache) {

@@ -46,8 +46,35 @@ parser.add_argument("--num-warmup", default=10, type=int, help="num warmup")
 parser.add_argument("--batch-size", default=1, type=int, help="batch size")
 parser.add_argument("--print-memory", action="store_true")
 parser.add_argument("--profile", action="store_true")
+parser.add_argument("--dist-backend", default="mpi", type=str)
 args = parser.parse_args()
 print(args)
+
+def dist_init():
+    import os
+    if int(os.environ.get("PMI_SIZE", "0")) > 1:
+        if args.dist_backend == "ccl":
+            try:
+                import oneccl_bindings_for_pytorch
+            except:
+                print("CCL backend requested but import oneccl_bindings_for_pytorch failed")
+                raise
+        elif args.dist_backend == "mpi":
+            if not torch.distributed.is_mpi_available():
+                try:
+                    import torch_mpi
+                except:
+                    print(
+                        "MPI backend requested but not available try installing torch_mpi module"
+                    )
+                    raise
+        else:
+            raise ValueError(f"{args.dist_backend} backend requested but not supported")
+
+        os.environ["RANK"] = os.environ.get("PMI_RANK", "0")
+        os.environ["WORLD_SIZE"] = os.environ.get("PMI_SIZE", "1")
+        torch.distributed.init_process_group(backend=args.dist_backend)
+        print("My rank: {torch.distributed.get_rank()} size: {torch.distributed.get_world_size()}")
 
 
 def get_memory_usage(name, args):
@@ -127,6 +154,7 @@ if args.ipex:
     get_memory_usage("Ipex", args)
 
 if args.use_tpp:
+    dist_init()
     from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, block
 
     for m in model.modules():
