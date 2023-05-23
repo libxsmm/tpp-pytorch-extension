@@ -49,9 +49,13 @@ parser.add_argument("--profile", action="store_true")
 parser.add_argument("--dist-backend", default="mpi", type=str)
 args = parser.parse_args()
 print(args)
+my_rank = 0
+my_size = 1
 
 def dist_init():
     import os
+    global my_rank
+    global my_size
     if int(os.environ.get("PMI_SIZE", "0")) > 1:
         if args.dist_backend == "ccl":
             try:
@@ -74,7 +78,9 @@ def dist_init():
         os.environ["RANK"] = os.environ.get("PMI_RANK", "0")
         os.environ["WORLD_SIZE"] = os.environ.get("PMI_SIZE", "1")
         torch.distributed.init_process_group(backend=args.dist_backend)
-        print("My rank: {torch.distributed.get_rank()} size: {torch.distributed.get_world_size()}")
+        my_rank = torch.distributed.get_rank()
+        my_size = torch.distributed.get_world_size()
+        print("My rank: {my_rank} size: {my_size}")
 
 
 def get_memory_usage(name, args):
@@ -155,7 +161,7 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
-    from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, set_pg
+    from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, set_pg, FixLinear, block
 
     set_pg()
 
@@ -163,6 +169,9 @@ if args.use_tpp:
         if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
             # FixGPTJBlock(m, 16, 16, torch.bfloat16)
             FixGPTJBlock(m, 16, 64, amp_dtype)
+        elif isinstance(m, torch.nn.Linear):
+            FixLinear(m, 100, 64, amp_dtype, parallel_dim=0)
+            block(m)
 
 for n, p in model.named_parameters():
     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
@@ -200,7 +209,7 @@ def trace_handler(prof):
         flush=True,
     )
     prof.export_chrome_trace("my_trace.log" + str(prof.step_num) + ".json")
-    prof.profiler.print_op_timings(prof.profiler, prefix="gptj_time")
+    prof.profiler.print_op_timings(prof.profiler, prefix="gptj_time_" + str(my_rank))
 
 
 with torch.profiler.profile(
