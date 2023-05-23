@@ -128,12 +128,33 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         if self.bias is not None:
             self.bias.block()
 
+    def parallelize(self, dim, rank, size):
+        if size <= 1: return
+        ShardLinear(self, dim, rank, size)
+        self.model_parallel = True
+        self.parallel_dim = dim
+        self.parallel_rank = rank
+        self.parallel_size = size
+
     def forward(self, input):
-        self.maybe_block_params()
+        #if self.model_parallel == True and self.parallel_dim == 1:
+        #    input = input.chunk(self.parallel_size, dim=-1)[self.parallel_rank].contiguous()
+        #self.maybe_block_params()
         bias = (
             self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
         )
-        ret = fused_gptj_cpp.fc_plain(input, self.weight, bias)
+        # print("BIas:", bias.shape, bias.dtype)
+        input = input.to(self.weight.dtype)
+        parallel_dim = self.parallel_dim if self.model_parallel == True else -1
+        ret = torch.ops.tpp_gptj.fc_plain(input, self.weight, bias, parallel_dim)
+        # if self.model_parallel == True:
+        #     with torch.inference_mode(False):
+        #         if self.parallel_dim == 0:
+        #             agret = [t.view_as(ret) for t in ret.new_empty([self.parallel_size]+list(ret.shape)).chunk(self.parallel_size)]
+        #             torch.distributed.all_gather(agret, ret)
+        #             ret = torch.cat(agret, dim = -1)
+        #         else:
+        #             torch.distributed.all_reduce(ret)
         return ret
 
 
@@ -145,10 +166,14 @@ class BlockedLayerNorm(BlockedModule, torch.nn.LayerNorm):
                 self.bias.block()
 
 
-def FixLinear(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
+def FixLinear(self, bk=None, bc=None, layer_dtype=global_layer_dtype, parallel_dim=None):
     if not isinstance(self, torch.nn.Linear):
         return
+    if isinstance(self, BlockedLinear): return
     self.__class__ = BlockedLinear
+    self.model_parallel = False
+    if parallel_dim is not None:
+        self.parallelize(parallel_dim, get_rank(), get_size())
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
@@ -176,6 +201,7 @@ def FixLinear(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if self.bias is not None:
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
+    
 
 
 def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor:
@@ -591,10 +617,10 @@ class GPTJBlock(BlockedModule):
 def ShardLinear(m, dim, rank, size):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
-    m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
+    m.weight.data = fused_gptj_cpp.fixup_snc(torch.chunk(m.weight.data, size, dim)[rank].contiguous())
     if m.bias is not None:
         if dim == 0:
-            m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
+            m.bias.data = fused_gptj_cpp.fixup_snc(torch.chunk(m.bias.data, size, dim)[rank].contiguous())
         else:
             m.bias.data = m.bias.data / size
 

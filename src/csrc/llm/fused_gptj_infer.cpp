@@ -30,10 +30,12 @@ using namespace tpp;
 #include "tensor_helper.h"
 
 static int my_rank = guess_mpi_rank();
+static int my_size = 1;
 static int large_cache_opt = false;
 static int use_at_vnni = false; // env2int("USE_AT_VNNI");
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
+REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(ac_gemm, "ac_gemm");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
@@ -46,8 +48,10 @@ REGISTER_LOCAL_SCOPE(allred, "allred");
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
 void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
-  printf("Setting PG");
   process_group = process_group_;
+  my_size = process_group->getSize();
+  my_rank = process_group->getRank();
+  printf("Setting PG: my_size = %d  my_rank = %d\n", my_size, my_rank);
 }
 
 std::vector<int> get_snc_node_list() {
@@ -122,12 +126,12 @@ void touch_buffer_numa_aware( unsigned char* buf, unsigned long long n_bytes, in
       unsigned long long chunksize = (n_bytes + n_numa_domains - 1)/n_numa_domains;
       unsigned long long zero_chunksize = (my_numa_node < (n_numa_domains-1)) ? chunksize : n_bytes - (n_numa_domains-1) * chunksize;
       memset( (unsigned char*)buf + my_numa_node * chunksize, 0 , zero_chunksize);
-      printf("tid %3d: numa %d: %016p - %016p\n", tid, my_numa_node, buf+my_numa_node * chunksize, buf+(my_numa_node+1) * chunksize);
+      //printf("tid %3d: numa %d: %016p - %016p\n", tid, my_numa_node, buf+my_numa_node * chunksize, buf+(my_numa_node+1) * chunksize);
     }
   }
   ret = move_pages(0, n_pages, pptr, status_req, status_after, MPOL_MF_MOVE);
-  for (int i = 0; i < 1/*n_pages*/; i+=512)
-    printf("%5d/%d: Numa node of %016p  is %d  --> %d\n", i, n_pages, pptr[i], status_before[i], status_after[i]);
+  //for (int i = 0; i < 1/*n_pages*/; i+=512)
+  //  printf("%5d/%d: Numa node of %016p  is %d  --> %d\n", i, n_pages, pptr[i], status_before[i], status_after[i]);
 }
 
 at::Tensor fixup_snc(at::Tensor t) {
@@ -338,11 +342,17 @@ inline void fc_plain(
   auto K = Nk * Hk;
 
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+  //std::cout << "XXX " << t_in.dtype() << "  " << t_wt_V.dtype() << std::endl;
 
+  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
+  //printf("reached at %s:%d\n", __func__, __LINE__);
 
   auto Ncb = Nc;
   auto BSb = 64L;
@@ -359,7 +369,7 @@ inline void fc_plain(
       (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
 
   {
-    RECORD_SCOPE(qkv_gemm, {t_in, t_wt_V});
+    RECORD_SCOPE(pln_gemm, {t_in, t_wt_V});
     // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
     auto loop_scheme = large_cache_opt ? "acB" : "aCb";
     auto ogemm_loop = ThreadedLoop<3>(
@@ -396,14 +406,20 @@ inline void fc_plain(
 
 static at::Tensor fc_plain_wrap(
     at::Tensor t_in,
-    at::Tensor& t_wt,
-    at::Tensor& t_bias) {
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    long parallel_dim) {
   GlobalPass _gp(FWD);
+  if (parallel_dim == 1) {
+    t_in = t_in.chunk(my_size, -1)[my_rank].contiguous();
+  }
+	
   auto sizes = t_in.sizes().vec();
   auto wt_sizes = t_wt.sizes();
   sizes[2] = wt_sizes[0] * wt_sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
+  //std::cout << "YYY " << t_out.dtype() << "  " << t_in.dtype() << std::endl;
   auto dt = t_wt.dtype();
   if (dt == at::kFloat) {
     fc_plain<float>(t_in, t_wt, t_bias, t_out);
@@ -413,6 +429,19 @@ static at::Tensor fc_plain_wrap(
     fc_plain<bfloat8>(t_in, t_wt, t_bias, t_out);
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+  if (parallel_dim == 0) {
+    std::vector<std::vector<at::Tensor>> ag_vec(1);
+    for (int i = 0; i < my_size; i++) {
+      c10::InferenceMode guard(false);
+      ag_vec[0].push_back(at::empty_like(t_out));
+    }
+    std::vector<at::Tensor> temp_out_vec = {t_out};
+    process_group->allgather(ag_vec, temp_out_vec)->wait();
+    t_out = at::cat(ag_vec[0], -1);
+  } else if (parallel_dim == 1) {
+    std::vector<at::Tensor> temp_out_vec = {t_out};
+    process_group->allreduce(temp_out_vec)->wait();
   }
   return t_out;
 }
@@ -503,7 +532,7 @@ static at::Tensor fc_out_wrap(
     at::Tensor& t_in2,
     at::Tensor& t_wt,
     at::Tensor& t_bias,
-    float scale) {
+    double scale) {
   GlobalPass _gp(FWD);
   auto t_out = at::empty_like(t_in1);
   auto dt = t_wt.dtype();
@@ -663,7 +692,9 @@ struct GPTJBlock : torch::CustomClassHolder {
     long K2 = sizes[3];
     H2 = K2;
     H1 = H / H2;
-    std::cout << "mp_size=" << mp_size << " N=" << N << " H2=" << H2 << " H=" << H << " H1=" << H1 << std::endl;
+    if (my_rank == 0) {
+      std::cout << "mp_size=" << mp_size << " N=" << N << " H2=" << H2 << " H=" << H << " H1=" << H1 << std::endl;
+    }
   }
 
   template <typename T, typename Tout = T>
@@ -828,6 +859,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_HS_qkv = at::empty_like(t_HS);
     float scale = 1.0 / mp_size;
 
+    //printf("reached at %s:%d\n", __func__, __LINE__);
     // std::cout << "HS: " << t_HS.sizes() << std::endl;
     // std::cout << "use_cche: " << use_cache << " t_key_past.numel: " <<
     // t_key_past.numel() << std::endl;
@@ -873,7 +905,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     fc_in<T>(t_HS_qkv, t_Wi, t_Bi, t_I);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out, scale);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
+    //printf("reached at %s:%d\n", __func__, __LINE__);
     if (mp_size > 1) {
       RECORD_SCOPE(allred, {t_Out});
       if (!process_group) {
@@ -979,6 +1011,7 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("reorder_cache", &reorder_cache, "TPP reorder_cache");
   m.def("set_pg", &set_pg);
+  m.def("fixup_snc", &fixup_snc);
   m.def(
       "apply_rotary_pos_emb",
       &apply_rotary_pos_emb_wrap,
@@ -991,8 +1024,12 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
 
 TORCH_LIBRARY(tpp_gptj, m) {
   m.def("layer_norm", &lyr_norm_wrap);
+  m.def("fc_in", &fc_in_wrap);
+  m.def("fc_out", &fc_out_wrap);
+  m.def("fc_plain", &fc_plain_wrap);
   m.def("reorder_cache", &reorder_cache);
   m.def("set_pg", &set_pg);
+  m.def("fixup_snc", &fixup_snc);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
