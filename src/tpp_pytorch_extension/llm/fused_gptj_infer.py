@@ -546,9 +546,6 @@ class GPTJBlock(BlockedModule):
 
         # print("PHS:", hidden_states.shape)
         hs, k, v = self.cpp_block.forward(inputs, use_cache)
-        if self.model_parallel:
-            all_reduce(hs)
-        # hs = hs + hidden_states
         #print("K: ", k.shape)
         #print("V: ", v.shape)
 
@@ -618,6 +615,10 @@ def get_size():
 def all_reduce(t):
     with torch.autograd.profiler.record_function("allreduce"):
         torch.distributed.all_reduce(t)
+
+def set_pg():
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        fused_gptj_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 
 def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):

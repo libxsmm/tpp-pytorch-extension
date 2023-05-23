@@ -21,6 +21,7 @@
 #endif
 #include "timing.h"
 #include "xsmm_functors.h"
+#include <torch/csrc/distributed/c10d/comm.hpp>
 
 using namespace tpp;
 #include "tensor_helper.h"
@@ -37,7 +38,14 @@ REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
 REGISTER_LOCAL_SCOPE(rotary, "rotary");
 REGISTER_LOCAL_SCOPE(reorder, "rorder");
+REGISTER_LOCAL_SCOPE(allred, "allred");
 
+static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
+
+void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
+  printf("Setting PG");
+  process_group = process_group_;
+}
 
 template <typename T, typename CpTPP>
 inline void reorder_one(at::Tensor t_old, at::Tensor t_new, long *idx, long B, long d1, CpTPP cpy_tpp) {
@@ -764,6 +772,15 @@ struct GPTJBlock : torch::CustomClassHolder {
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out, scale);
     // printf("reached at %s:%d\n", __func__, __LINE__);
+    if (mp_size > 1) {
+      RECORD_SCOPE(allred, {t_Out});
+      if (!process_group) {
+        printf("Missing process group when using model parallel, use set_pg()\n");
+        exit(1);
+      }
+      std::vector<at::Tensor> temp_out_vec = {t_Out};
+      process_group->allreduce(temp_out_vec)->wait();
+    }
 
     if (use_cache) {
       return {t_Out, t_KL, t_VL};
@@ -859,6 +876,7 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
   m.def("fc_out", &fc_out_wrap, "TPP fc_out");
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("reorder_cache", &reorder_cache, "TPP reorder_cache");
+  m.def("set_pg", &set_pg);
   m.def(
       "apply_rotary_pos_emb",
       &apply_rotary_pos_emb_wrap,
@@ -872,6 +890,7 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
 TORCH_LIBRARY(tpp_gptj, m) {
   m.def("layer_norm", &lyr_norm_wrap);
   m.def("reorder_cache", &reorder_cache);
+  m.def("set_pg", &set_pg);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);

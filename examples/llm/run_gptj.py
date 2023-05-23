@@ -155,13 +155,15 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
-    from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, block
+    from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, set_pg
+
+    set_pg()
 
     for m in model.modules():
         if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
             # FixGPTJBlock(m, 16, 16, torch.bfloat16)
             FixGPTJBlock(m, 16, 64, amp_dtype)
-    # block(model)
+
 for n, p in model.named_parameters():
     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 # input prompt
