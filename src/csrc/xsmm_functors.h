@@ -2104,7 +2104,7 @@ class BrgemmTPP {
       snprintf(
           hash,
           200,
-          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d",
+          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dto%d",
           p->M,
           p->N,
           p->K,
@@ -2118,7 +2118,9 @@ class BrgemmTPP {
           (long)p->ldb,
           (long)p->ldc,
           config,
-          p->b_vnni);
+          p->b_vnni,
+          XsmmDtype<Tin>(),
+          XsmmDtype<Tout>());
       return std::string(hash);
     }
     void* build_kernel() override {

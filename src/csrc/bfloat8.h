@@ -41,6 +41,14 @@ class BFloat8 {
 
 }; // namespace at
 
+namespace c10 {
+
+template <>
+struct CppTypeToScalarType<at::BFloat8> : std::integral_constant<c10::ScalarType, c10::ScalarType::Byte> {};
+
+};
+
+
 #endif // PYTORCH_SUPPORTS_BFLOAT8
 
 #endif // _TPP_BFLOAT8_H_
