@@ -44,6 +44,7 @@ REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
 REGISTER_LOCAL_SCOPE(rotary, "rotary");
 REGISTER_LOCAL_SCOPE(reorder, "rorder");
 REGISTER_LOCAL_SCOPE(allred, "allred");
+REGISTER_LOCAL_SCOPE(concat, "concat");
 
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
@@ -152,6 +153,64 @@ at::Tensor fixup_snc(at::Tensor t) {
 #define FIXUP_SNC(x) (x)
 #endif
 
+
+template <typename T>
+inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim) {
+  auto ndim =  t_in1.dim();
+  dim = dim >= 0 ? dim : dim+ndim;
+
+  auto out_sizes = t_in1.sizes().vec();
+  out_sizes[dim] += t_in2.size(dim);
+  auto t_out = t_in1.new_empty(out_sizes);
+
+
+  auto F = out_sizes[2];
+  auto B = out_sizes[0];
+  auto S = out_sizes[1];
+  auto BS = B * S;
+  auto S1 = t_in1.size(1);
+  auto S2 = t_in2.size(1);
+
+  auto cpy_tpp = SCOPEIT(CpyTPP<T>(F), EW_COPY);
+
+  auto in1 = GetVLAPtr<T>(t_in1, {S1, F});
+  auto in2 = GetVLAPtr<T>(t_in2, {S2, F});
+  auto out = GetVLAPtr<T>(t_out, {F});
+  T *ptrs[BS];
+  int p = 0;
+  for (int j = 0; j < B; j++) {
+    for (int i = 0; i < S1; i++) {
+      ptrs[p++] = in1[j][i];
+    }
+    for (int i = 0; i < S2; i++) {
+      ptrs[p++] = in2[j][i];
+    }
+  }
+  TPP_ASSERT(p == BS, "Unmatched p=%d and BS=%ld\n", p, BS);
+  {
+    RECORD_SCOPE(concat, {t_in1, t_in2});
+#pragma omp parallel for
+    for (int i = 0; i < BS; i++) {
+      cpy_tpp(ptrs[i], out[i]);
+    }
+  }
+  return t_out;
+}
+
+template <typename T>
+inline at::Tensor concat(std::vector<at::Tensor> t_lst, int dim) {
+  auto t_0 = t_lst[0];
+  auto ndim =  t_0.dim();
+  dim = dim >= 0 ? dim : dim+ndim;
+
+  auto out_sizes = t_0.sizes().vec();
+  for (int i = 1; i < t_lst.size(); i++) {
+    out_sizes[dim] += t_lst[i].size(dim);
+  }
+  auto t_out = t_0.new_empty(out_sizes);
+
+  return t_out;
+}
 
 template <typename T, typename CpTPP>
 inline void reorder_one(at::Tensor t_old, at::Tensor t_new, long *idx, long B, long d1, CpTPP cpy_tpp) {
@@ -487,8 +546,8 @@ inline void fc_out(
       (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-  auto sadd_tpp = SCOPEIT_REF((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
-  auto sadd_tpp_rem = SCOPEIT_REF((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
+  auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
+  auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
 
   {
     RECORD_SCOPE(o_gemm, {t_in, t_wt_V});
@@ -877,7 +936,8 @@ struct GPTJBlock : torch::CustomClassHolder {
       // }
       // std::cout << "t_key_past: " << t_key_past.sizes() << std::endl;
       // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
-      t_KL = at::cat({t_key_past, t_KL}, -2);
+      //t_KL = at::cat({t_key_past, t_KL}, -2);
+      t_KL = kv_concat<T>(t_key_past, t_KL, 1);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
     // std::cout << t_KL.sizes() << std::endl;
@@ -886,7 +946,8 @@ struct GPTJBlock : torch::CustomClassHolder {
     if (t_value_past.numel() > 0 && t_value_past.dim() == 3) {
       // if (t_value_past.dim() == 4)
       //   t_value_past = t_value_past.view({B, -1, N*H});
-      t_VL = at::cat({t_value_past, t_VL}, -2);
+      //t_VL = at::cat({t_value_past, t_VL}, -2);
+      t_VL = kv_concat<T>(t_value_past, t_VL, 1);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
     qkv_gemm<T>(t_HS_qkv, t_Wq, t_QL);
