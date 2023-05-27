@@ -80,7 +80,7 @@ def dist_init():
         torch.distributed.init_process_group(backend=args.dist_backend)
         my_rank = torch.distributed.get_rank()
         my_size = torch.distributed.get_world_size()
-        print("My rank: {my_rank} size: {my_size}")
+        print(f"My rank: {my_rank} size: {my_size}")
 
 
 def get_memory_usage(name, args):
