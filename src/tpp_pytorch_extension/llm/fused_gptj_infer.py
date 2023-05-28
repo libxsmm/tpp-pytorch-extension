@@ -617,10 +617,10 @@ class GPTJBlock(BlockedModule):
 def ShardLinear(m, dim, rank, size):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
-    m.weight.data = fused_gptj_cpp.fixup_snc(torch.chunk(m.weight.data, size, dim)[rank].contiguous())
+    m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
     if m.bias is not None:
         if dim == 0:
-            m.bias.data = fused_gptj_cpp.fixup_snc(torch.chunk(m.bias.data, size, dim)[rank].contiguous())
+            m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
         else:
             m.bias.data = m.bias.data / size
 
@@ -768,3 +768,8 @@ def block(model):
     for m in model.modules():
         if hasattr(m, "maybe_block_params"):
             m.maybe_block_params()
+
+def fixup_snc(model):
+    for n, p in model.named_parameters():
+        print(f"FIXUP_SNC ({n} {list(p.shape)})")
+        fused_gptj_cpp.fixup_snc(p.data, True)

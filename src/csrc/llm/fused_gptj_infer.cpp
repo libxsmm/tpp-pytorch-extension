@@ -73,6 +73,7 @@ std::vector<int> get_snc_node_list() {
 static auto snc_node_list = get_snc_node_list();
 
 static int numa_node = -1;
+#if 0
 void *my_malloc(size_t sz) {
 #if 1
   constexpr size_t align = 0x200000;
@@ -146,9 +147,53 @@ at::Tensor fixup_snc(at::Tensor t) {
   t_new.copy_(t);
   return t_new;
 }
+#else
+void move_to_node(void *ptr, size_t sz, int node, bool debug_print = false) {
+  constexpr int MAX_PGS = 100000;
+  constexpr int pg_size = 4096;
+  int n_pages = (sz + pg_size - 1) / pg_size;
+  auto a_ptr = (void*)((long)ptr & ~(pg_size - 1));
+
+  if (debug_print) {
+	  printf("MV PG: %20p - %20p (%lu)\n", a_ptr, a_ptr + n_pages*pg_size, n_pages * pg_size);
+  }
+
+  for (int j = 0; j < n_pages; j += MAX_PGS) {
+    int count = (j + MAX_PGS < n_pages ? MAX_PGS : n_pages - j);
+    void *buf = a_ptr + j * pg_size;
+    void *pptr[MAX_PGS];
+    int req[MAX_PGS];
+    int status[MAX_PGS];
+    int before[MAX_PGS];
+    for (int i = 0; i < count; i++) {
+      pptr[i] = buf + i * pg_size;
+      status[i] = -10;
+      req[i] = node;
+      before[i] = -10;
+    }
+    if (debug_print) move_pages(0, count, pptr, NULL, before, MPOL_MF_MOVE);
+    move_pages(0, count, pptr, req, status, MPOL_MF_MOVE);
+    if (debug_print) {
+      for (int i = 0; i < 2; i++) {
+        if (before[i] != status[i]) printf("MV PG: %20p  (%d --> %d)\n", pptr[i], before[i], status[i]);
+      }
+    }
+  }
+}
+
+at::Tensor fixup_snc(at::Tensor t, bool debug_print) {
+  if (snc_node_list.size() <= 0)
+    return t;
+  size_t sz = t.numel() * t.element_size();
+  numa_node = snc_node_list[0];
+  void *ptr = t.data_ptr();
+  move_to_node(ptr, sz, numa_node, debug_print);
+  return t;
+}
+#endif
 
 #if 1
-#define FIXUP_SNC(x) fixup_snc(x)
+#define FIXUP_SNC(x) fixup_snc(x, false)
 #else
 #define FIXUP_SNC(x) (x)
 #endif
@@ -291,6 +336,8 @@ inline void apply_rotary_pos_emb(
             float in0 = in[b][s][n][h];
             float in1 = in[b][s][n][h + 1];
             int p = pos[b][s];
+	    if (p >= MP) continue;
+	    //TPP_ASSERT(p < MP, "Invalid idx: %d (max %ld)\n", p, MP);
             float sin = emb_pos[p][h2];
             float cos = emb_pos[p][COFF + h2];
             float out0 = in0 * cos - in1 * sin;
@@ -456,6 +503,7 @@ inline void fc_plain(
               }
             }
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
           }
         },
         [&]() { brgemm_tpp.config(); },
@@ -574,6 +622,7 @@ inline void fc_out(
               copy_bias_tpp_rem(bias[nk], out[s1][nk]);
             }
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
               add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
               sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
@@ -668,6 +717,7 @@ inline void fc_in(
               copy_bias_tpp_rem(bias[nk], out[s1][nk]);
             }
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
               gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
             }
@@ -808,6 +858,7 @@ struct GPTJBlock : torch::CustomClassHolder {
               }
               brgemm_tpp_rem(
                   in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+              brgemm_tpp.config();
             }
           },
           [&]() { brgemm_tpp.config(); },
@@ -828,6 +879,10 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto ksizes = t_KL.sizes();
     long Sk = ksizes[1];
     long offset = Sk - Sq;
+    constexpr long Sqb = 8;
+    long rem = Sq % Sqb;
+    //long H2 = 256;
+    //long H1 = H / H2;
     // printf("B=%ld S1=%ld S2=%ld H1=%ld H2=%ld N=%ld\n", B, S1, S2, H1, H2,
     // N);
     // printf("B=%ld Sq1=%ld Sq2=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk1=%ld Sk2=%ld
@@ -842,14 +897,14 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto CL = GetVLAPtr<T>(t_CL, {Sq, N, H1, H2});
     auto AM = GetVLAPtr<T>(t_AM, {Sk});
     auto a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-        Sq, Sk, H2, H2, H2 * Sk, N * H, Sk, Sk, 0.0, 0, H1)));
-    auto scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sq * Sk)), EW_SCL);
-    auto add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sq, Sk), EW_ADD);
+        Sqb, Sk, H2, H2, H2 * Sk, N * H, Sk, Sk, 0.0, 0, H1)));
+    auto scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Sk)), EW_SCL);
+    auto add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Sk), EW_ADD);
     auto softmax_fwd_tpp =
-        SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, Sq, Sk)), SOFTMAX);
+        SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, Sqb, Sk)), SOFTMAX);
     auto c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-        Sq, H2, Sk, Sq * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
-    auto cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sq, H2, H2, N * H)), EW_COPY);
+        Sqb, H2, Sk, Sqb * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
+    auto cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H2, H2, N * H)), EW_COPY);
     auto cpy_tpp = SCOPEIT(CpyTPP<T>(Sk, H2, N * H, H2), EW_COPY);
     auto xform = XformTPP::XFORM_XPOSE_TPP;
     if (!std::is_same<T, float>::value) {
@@ -858,34 +913,84 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto xform_tpp =
         SCOPEIT(XformExtTPP<T>(Sk, H2, H2, Sk, N * H, Sk, xform, true), XPOSE);
 
+    auto a_gemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, float>(
+        rem, Sk, H2, H2, H2 * Sk, N * H, Sk, Sk, 0.0, 0, H1)));
+    auto scale_tpp_rem = SCOPEIT((ScaleTPP<float, float>(rem * Sk)), EW_SCL);
+    auto add_mask_tpp_rem = SCOPEIT(AddBiasTPP<T>(rem, Sk), EW_ADD);
+    auto softmax_fwd_tpp_rem =
+        SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, rem ? rem : 1, Sk)), SOFTMAX);
+    auto c_gemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
+        rem, H2, Sk, rem * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
+    auto cvt_tpp_rem = SCOPEIT((ConvertTPP<Tv, T>(rem, H2, H2, N * H)), EW_COPY);
+    bool inline_trans = ((Sq+Sqb-1) / Sqb == 1);
+
+    if (!inline_trans) {
+      RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
+#pragma omp parallel for collapse(3)
+      for (int n = 0; n < N; n++) {
+        for (int b = 0; b < B; b++) {
+          for (int h1 = 0; h1 < H1; h1++) {
+            xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
+          }
+        }
+      }
+    }
+
     {
       RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
       {
-#pragma omp parallel for collapse(2)
+#pragma omp parallel for collapse(3)
         for (int n = 0; n < N; n++) {
           for (int b = 0; b < B; b++) {
-            float AS[Sq][Sk];
-            Tv AST[Sq][Sk];
-            for (int h1 = 0; h1 < H1; h1++) {
-              // T tmp[Sk * H2];
-              // cpy_tpp(KL[b][0][n][h1], tmp);
-              xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
-            }
-            a_gemm_tpp(QL[b][0][n][0], KL_TV[b][n][0][0], AS[0], H1);
-            for (int sq = 0; sq < Sq; sq++) {
-              auto qval = sq + offset;
-              for (int sk = qval + 1; sk < Sk; sk++) {
-                AS[sq][sk] = -1e9;
+            for (int sq = 0; sq < Sq; sq += Sqb) {
+              auto is_rem = (sq + Sqb > Sq);
+              if (!is_rem) {
+                float AS[Sqb][Sk];
+                Tv AST[Sqb][Sk];
+		if (inline_trans)
+                for (int h1 = 0; h1 < H1; h1++) {
+                  xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
+                }
+                a_gemm_tpp(QL[b][sq][n][0], KL_TV[b][n][0][0], AS[0], H1);
+                for (int sq1 = 0; sq1 < Sqb; sq1++) {
+                  auto qval = sq + sq1 + offset;
+                  for (int sk = qval + 1; sk < Sk; sk++) {
+                    AS[sq1][sk] = -1e9;
+                  }
+                }
+                scale_tpp(AS[0], AS[0], one_by_sqrt_H);
+                if (t_AM.numel() != 0)
+                  add_mask_tpp(AM[b], AS[0]);
+                softmax_fwd_tpp(AS[0], AST[0]);
+                for (int h1 = 0; h1 < H1; h1++) {
+                  Tv tmp[Sqb * H2];
+                  c_gemm_tpp(AST[0], VL[b][0][n][h1], tmp, 1);
+                  cvt_tpp(tmp, CL[b][sq][n][h1]);
+                }
+              } else {
+                float AS[rem][Sk];
+                Tv AST[rem][Sk];
+		if (inline_trans)
+                for (int h1 = 0; h1 < H1; h1++) {
+                  xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
+                }
+                a_gemm_tpp_rem(QL[b][sq][n][0], KL_TV[b][n][0][0], AS[0], H1);
+                for (int sq1 = 0; sq1 < rem; sq1++) {
+                  auto qval = sq + sq1 + offset;
+                  for (int sk = qval + 1; sk < Sk; sk++) {
+                    AS[sq1][sk] = -1e9;
+                  }
+                }
+                scale_tpp_rem(AS[0], AS[0], one_by_sqrt_H);
+                if (t_AM.numel() != 0)
+                  add_mask_tpp_rem(AM[b], AS[0]);
+                softmax_fwd_tpp_rem(AS[0], AST[0]);
+                for (int h1 = 0; h1 < H1; h1++) {
+                  Tv tmp[rem * H2];
+                  c_gemm_tpp_rem(AST[0], VL[b][0][n][h1], tmp, 1);
+                  cvt_tpp_rem(tmp, CL[b][sq][n][h1]);
+                }
               }
-            }
-            scale_tpp(AS[0], AS[0], one_by_sqrt_H);
-            if (t_AM.numel() != 0)
-              add_mask_tpp(AM[b], AS[0]);
-            softmax_fwd_tpp(AS[0], AST[0]);
-            for (int h1 = 0; h1 < H1; h1++) {
-              Tv tmp[Sq * H2];
-              c_gemm_tpp(AST[0], VL[b][0][n][h1], tmp, 1);
-              cvt_tpp(tmp, CL[b][0][n][h1]);
             }
           }
         }
