@@ -33,6 +33,8 @@ static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
 static int use_at_vnni = false; // env2int("USE_AT_VNNI");
+static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
+static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
@@ -463,6 +465,7 @@ inline void fc_plain(
   auto Ncb = Nc;
   auto BSb = 64L;
   auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
   bool with_bias = (t_bias.numel() > 0);
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
@@ -477,7 +480,7 @@ inline void fc_plain(
   {
     RECORD_SCOPE(pln_gemm, {t_in, t_wt_V});
     // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? "acB" : "aCb";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
     auto ogemm_loop = ThreadedLoop<3>(
         {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
     ogemm_loop(
@@ -585,6 +588,7 @@ inline void fc_out(
   auto Ncb = Nc;
   auto BSb = 64L;
   auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
@@ -600,7 +604,7 @@ inline void fc_out(
   {
     RECORD_SCOPE(o_gemm, {t_in, t_wt_V});
     // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? "acB" : "aCb";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
     auto ogemm_loop = ThreadedLoop<3>(
         {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
     ogemm_loop(
@@ -683,6 +687,7 @@ inline void fc_in(
   auto Ncb = Nc;
   auto BSb = 64L;
   auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
@@ -696,7 +701,7 @@ inline void fc_in(
   {
     RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
     // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? "acB" : "aCb";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
     auto igemm_loop =
         ThreadedLoop<3>({{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
     igemm_loop(
@@ -828,6 +833,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto Ncb = Nc;
     auto BSb = 64L;
     auto rem = BS % 64;
+    if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
     auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
     auto zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
@@ -839,7 +845,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     {
       RECORD_SCOPE(qkv_gemm, {t_in, t_wt_V});
       // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto loop_scheme = large_cache_opt ? "acB" : "aCb";
+      auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
       auto gemm_loop = ThreadedLoop<3>(
           {{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
       gemm_loop(
@@ -883,6 +889,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     long rem = Sq % Sqb;
     //long H2 = 256;
     //long H1 = H / H2;
+    // printf("Offset = %ld  Sq = %ld  Sk = %ld  rem = %ld\n", offset, Sq, Sk, rem);
     // printf("B=%ld S1=%ld S2=%ld H1=%ld H2=%ld N=%ld\n", B, S1, S2, H1, H2,
     // N);
     // printf("B=%ld Sq1=%ld Sq2=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk1=%ld Sk2=%ld
@@ -1022,6 +1029,11 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_I = t_HS.new_empty({B, S, t_Wi.size(0) * t_Wi.size(3)});
     auto t_HS_qkv = at::empty_like(t_HS);
     float scale = 1.0 / mp_size;
+
+    if (B*S / 64 > 4)
+      large_cache_opt = true;
+    else
+      large_cache_opt = false;
 
     //printf("reached at %s:%d\n", __func__, __LINE__);
     // std::cout << "HS: " << t_HS.sizes() << std::endl;
