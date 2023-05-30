@@ -33,6 +33,7 @@ static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
 static int use_at_vnni = false; // env2int("USE_AT_VNNI");
+static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
@@ -47,6 +48,7 @@ REGISTER_LOCAL_SCOPE(rotary, "rotary");
 REGISTER_LOCAL_SCOPE(reorder, "rorder");
 REGISTER_LOCAL_SCOPE(allred, "allred");
 REGISTER_LOCAL_SCOPE(concat, "concat");
+REGISTER_LOCAL_SCOPE(fftkn, "fftkn");
 
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
@@ -435,7 +437,7 @@ static at::Tensor lyr_norm_wrap(
 template <typename T>
 inline void fc_plain(
     at::Tensor t_in,
-    at::Tensor& t_wt,
+    at::Tensor t_wt,
     at::Tensor& t_bias,
     at::Tensor& t_out) {
   auto in_sizes = t_in.sizes();
@@ -556,18 +558,69 @@ static at::Tensor fc_plain_wrap(
   return t_out;
 }
 
+template<typename T>
+inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
+  RECORD_SCOPE(fftkn, {t});
+  auto dim = t.dim();
+  if (dim < 5) return t;
+  auto sizes = t.sizes();
+  constexpr long RBS = 2;
+  auto K1 = sizes[0];
+  if (K1 % RBS != 0) return t;
+  auto C1 = sizes[1];
+  auto C2 = sizes[2];
+  auto K2 = sizes[3];
+  auto C3 = sizes[4];
+#if 0
+  auto t_new = t.view({K1/RBS, RBS, C1, C2, K2, C3}).permute({0, 2, 3, 1, 4, 5}).contiguous().view({K1/RBS, C1, C2, RBS*K2, C3});
+#else
+  auto t_new = t.new_empty({K1/RBS, C1, C2, RBS*K2, C3});
+  auto in = GetVLAPtr<T>(t, {RBS, C1, C2, K2 * C3});
+  auto out = GetVLAPtr<T>(t_new, {C1, C2, RBS, K2 * C3});
+
+#if 1
+  auto cpy_tpp = SCOPEIT(CpyTPP<T>(C2, K2*C3, K2*C3, RBS*K2*C3), EW_COPY);
+
+#pragma omp parallel for collapse (2)
+  for (int i = 0; i < K1/RBS; i++) {
+    for (int j = 0; j < C1; j++) {
+      for (int k = 0; k < RBS; k++) {
+        cpy_tpp(in[i][k][j][0], out[i][j][0][k]);
+      }
+    }
+  }
+#else
+  auto cpy_tpp = SCOPEIT(CpyTPP<T>(RBS, K2*C3, C1*C2*K2*C3, K2*C3), EW_COPY);
+
+#pragma omp parallel for collapse (2)
+  for (int i = 0; i < K1/RBS; i++) {
+    for (int j = 0; j < C1; j++) {
+      for (int k = 0; k < C2; k++) {
+        cpy_tpp(in[i][0][j][k], out[i][j][k][0]);
+      }
+    }
+  }
+#endif
+
+#endif
+  return t_new;
+}
+
 template <typename T>
 inline void fc_out(
     at::Tensor t_in,
     at::Tensor& t_in1,
     at::Tensor& t_in2,
-    at::Tensor& t_wt,
+    at::Tensor t_wt,
     at::Tensor& t_bias,
     at::Tensor& t_out,
     float scale) {
   auto in_sizes = t_in.sizes();
-  auto wt_sizes = t_wt.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
   auto C = in_sizes[2];
 
   auto Nc = wt_sizes[1];
@@ -642,7 +695,7 @@ static at::Tensor fc_out_wrap(
     at::Tensor t_in,
     at::Tensor& t_in1,
     at::Tensor& t_in2,
-    at::Tensor& t_wt,
+    at::Tensor t_wt,
     at::Tensor& t_bias,
     double scale) {
   GlobalPass _gp(FWD);
@@ -663,12 +716,15 @@ static at::Tensor fc_out_wrap(
 template <typename T>
 inline void fc_in(
     at::Tensor t_in,
-    at::Tensor& t_wt,
+    at::Tensor t_wt,
     at::Tensor& t_bias,
     at::Tensor& t_out) {
   auto in_sizes = t_in.sizes();
-  auto wt_sizes = t_wt.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
   auto C = in_sizes[2];
 
   auto Nc = wt_sizes[1];
@@ -735,7 +791,7 @@ inline void fc_in(
 
 static at::Tensor fc_in_wrap(
     at::Tensor t_in,
-    at::Tensor& t_wt,
+    at::Tensor t_wt,
     at::Tensor& t_bias) {
   GlobalPass _gp(FWD);
   auto sizes = t_in.sizes().vec();
@@ -812,10 +868,13 @@ struct GPTJBlock : torch::CustomClassHolder {
   }
 
   template <typename T, typename Tout = T>
-  inline void qkv_gemm(at::Tensor t_in, at::Tensor& t_wt, at::Tensor& t_out) {
+  inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor& t_out) {
     auto in_sizes = t_in.sizes();
-    auto wt_sizes = t_wt.sizes();
     auto BS = in_sizes[0] * in_sizes[1];
+    if (BS > FT_OPT_SIZE) { // first token compute
+      t_wt = wt_tensor_for_first_token<T>(t_wt);
+    }
+    auto wt_sizes = t_wt.sizes();
     auto C = in_sizes[2];
 
     auto Nc = wt_sizes[1];
@@ -832,7 +891,7 @@ struct GPTJBlock : torch::CustomClassHolder {
 
     auto Ncb = Nc;
     auto BSb = 64L;
-    auto rem = BS % 64;
+    auto rem = BS % BSb;
     if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
     auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
