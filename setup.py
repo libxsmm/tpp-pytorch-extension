@@ -182,7 +182,6 @@ setup(
             ],
             # library_dirs=[xsmm_lib],
             # libraries=["xsmm"],
-            libraries=["numa"],
         )
     ],
     cmdclass={"build_ext": BuildExtension, "build_clib": BuildMakeLib},

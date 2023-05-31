@@ -14,3 +14,25 @@ For TPP Optimized code:
 OMP_NUM_THREADS=<physical cores num> numactl -m <node N> -C <cpu list> python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp
 
 To enable autograd profiling add "--profile" to above command line.
+
+Distributed Tensor Parallel implementation on multi-socket (or in SNC4 mode) requires Intel MPI and either MPI enabled PyTorch or Intel torch-ccl installed.
+Dual socket run 2 NUMA domains:
+run_dist_ht.sh -np 2 -ppn 2 python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp
+
+Dual socket run on Xeon Max (Sapphire Rapids with HBM) in Quad mode with flat HBM:
+run_dist_ht.sh -np 2 -ppn 2 bash numawrap.sh 2 python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp
+
+Single socket run with SNC4 enabled:
+run_dist_ht.sh -np 4 -ppn 4 -sso python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp
+
+Dual socket run with SNC4 enabled:
+run_dist_ht.sh -np 8 -ppn 8 python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp
+
+Dual socket run from HBM memory with SNC4 enabled:
+This runs out of memory while loading model. So, we first load model in DDR memory, shard it and save sharded model on disk. Then load sharded model when running from HBM.
+# One time model sharding from DDR 
+run_dist_ht.sh -np 8 -ppn 8 python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp --save-sharded-model
+
+# Run from HBM with sharded model
+run_dist_ht.sh -np 8 -ppn 8 bash numawrap.sh 8 python -u run_gptj.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use_tpp --load-sharded-model
+

@@ -1,4 +1,4 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GPTJConfig
 import torch
 import time
 import json
@@ -8,6 +8,8 @@ import argparse
 import numpy as np
 from itertools import chain
 import transformers
+import os
+from accelerate import init_empty_weights
 
 # import extend_profiler
 try:
@@ -47,6 +49,8 @@ parser.add_argument("--batch-size", default=1, type=int, help="batch size")
 parser.add_argument("--print-memory", action="store_true")
 parser.add_argument("--profile", action="store_true")
 parser.add_argument("--dist-backend", default="mpi", type=str)
+parser.add_argument("--load-sharded-model", action="store_true")
+parser.add_argument("--save-sharded-model", action="store_true")
 args = parser.parse_args()
 print(args)
 my_rank = 0
@@ -136,18 +140,22 @@ else:
 
 # load model
 model_id = "EleutherAI/gpt-j-6B"
-if args.jit:
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id, low_cpu_mem_usage=True, return_dict=False, torch_dtype=amp_dtype
-    )
+if args.use_tpp and args.load_sharded_model:
+    config = GPTJConfig.from_pretrained(model_id)
+    config.return_dict = return_dict=not args.jit
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(
+            config, torch_dtype=amp_dtype,
+        )
 else:
     model = AutoModelForCausalLM.from_pretrained(
-        model_id, low_cpu_mem_usage=True, torch_dtype=amp_dtype
+        model_id, low_cpu_mem_usage=True, return_dict=not args.jit, torch_dtype=amp_dtype
     )
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 get_memory_usage("Host", args)
-model = model.eval().to(device)
-get_memory_usage("Device", args)
+if not args.load_sharded_model:
+    model = model.eval().to(device)
+    get_memory_usage("Device", args)
 model = model.to(memory_format=torch.channels_last)
 
 # to hpu graph
@@ -161,20 +169,22 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
-    from tpp_pytorch_extension.llm.fused_gptj_infer import FixGPTJBlock, set_pg, FixLinear, block
+    from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
+    OptimizeModelForGPTJ(model, dtype=amp_dtype, device=device)
 
-    set_pg()
-
-    for m in model.modules():
-        if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
-            # FixGPTJBlock(m, 16, 16, torch.bfloat16)
-            FixGPTJBlock(m, 16, 64, amp_dtype)
-        elif isinstance(m, torch.nn.Linear):
-            FixLinear(m, 100, 64, amp_dtype, parallel_dim=0)
-            block(m)
+if my_size > 1:
+    sharded_model_path = f"./sharded_model/r{my_rank}_{my_size}"
+    model_file = f"{sharded_model_path}/model.pt"
+    if args.load_sharded_model == True:
+        model.load_state_dict(torch.load(model_file))
+    elif args.save_sharded_model == True:
+        os.makedirs(sharded_model_path, exist_ok=True)
+        torch.save(model.state_dict(), model_file)
+model = model.eval().to(device)
 
 for n, p in model.named_parameters():
     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
+
 # input prompt
 current_path = pathlib.Path(__file__).parent.resolve()
 with open(str(current_path) + "/prompt.json") as f:

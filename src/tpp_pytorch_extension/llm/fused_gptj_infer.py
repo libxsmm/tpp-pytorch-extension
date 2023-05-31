@@ -505,7 +505,7 @@ class GPTJBlock(BlockedModule):
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
     ]:
-        # print("HS:", hidden_states.shape)
+        #print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
         # print("layer_past:", layer_past[0].shape if layer_past is not None else layer_past)
         # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
@@ -618,11 +618,15 @@ def ShardLinear(m, dim, rank, size):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
     m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
+    if m.weight.is_meta:
+        m.weight = torch.nn.Parameter(torch.empty_like(m.weight.data, device='cpu'))
     if m.bias is not None:
         if dim == 0:
             m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
         else:
             m.bias.data = m.bias.data / size
+        if m.bias.is_meta:
+            m.bias = torch.nn.Parameter(torch.empty_like(m.bias.data, device='cpu'))
 
 def get_rank():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -665,6 +669,12 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     else:
         self.model_parallel = False
     for m in self.modules():
+        for name in m._parameters.keys():
+            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            param_cls = type(m._parameters[name])
+            kwargs = m._parameters[name].__dict__
+            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device='cpu'), **kwargs)
+
         #if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJAttention):
         #    m.__class__ = GPTJAttention
         if isinstance(m, torch.nn.Linear):
@@ -687,7 +697,6 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             pos_embd_dim = self.attn.rotary_dim or self.attn.embed_dim
             embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
         params += [embed_positions]
-        #self.cpp_block = fused_gptj_cpp.GPTJBlock(
         self.cpp_block = torch.classes.tpp_gptj.GPTJBlock(
             params,
             self.ln_1.eps,
@@ -697,6 +706,23 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             self.attn.rotary_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
+
+def OptimizeModelForGPTJ(model, dtype, device='cpu'):
+    set_pg()
+
+    for m in model.modules():
+        if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
+            FixGPTJBlock(m, 16, 64, dtype)
+        elif isinstance(m, torch.nn.Linear):
+            FixLinear(m, 100, 64, dtype, parallel_dim=0)
+            block(m)
+    for m in model.modules():
+        for name in m._parameters.keys():
+            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            param_cls = type(m._parameters[name])
+            kwargs = m._parameters[name].__dict__
+            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
+
 
 def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
     """
@@ -768,8 +794,3 @@ def block(model):
     for m in model.modules():
         if hasattr(m, "maybe_block_params"):
             m.maybe_block_params()
-
-def fixup_snc(model):
-    for n, p in model.named_parameters():
-        print(f"FIXUP_SNC ({n} {list(p.shape)})")
-        fused_gptj_cpp.fixup_snc(p.data, True)

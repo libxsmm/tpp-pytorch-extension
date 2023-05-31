@@ -14,9 +14,6 @@
 
 #include <iostream>
 #include <vector>
-#include <sys/mman.h>
-#include <numa.h>
-#include <numaif.h>
 #include "ext_tpp.h"
 #include "init.h"
 #ifndef NO_PARLOOPER
@@ -58,150 +55,6 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
   my_rank = process_group->getRank();
   printf("Setting PG: my_size = %d  my_rank = %d\n", my_size, my_rank);
 }
-
-std::vector<int> get_snc_node_list() {
-  auto env = getenv("TPP_SNC_NODE_LIST");
-  std::vector<int> vect;
-  if (env != NULL) {
-    std::stringstream ss(env);
-    for (int i; ss >> i;) {
-      vect.push_back(i);
-      if (ss.peek() == ',' || ss.peek() == ' ')
-        ss.ignore();
-    }
-    std::cout << "SNC Node list: " << vect << std::endl;
-  }
-  return vect;
-}
-
-static auto snc_node_list = get_snc_node_list();
-
-static int numa_node = -1;
-#if 0
-void *my_malloc(size_t sz) {
-#if 1
-  constexpr size_t align = 0x200000;
-  sz = sz + align;
-  void *p = mmap(0, sz, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) {
-    printf("mmap failed\n");
-    return NULL;
-  }
-  p = (void*)(((size_t)p + align - 1) & ~(align - 1));
-  return p;
-#else
-  void *ptr = numa_alloc_onnode(sz, numa_node);
-  if (ptr == NULL) {
-    printf("numa_alloc_onnode failed\n");
-    return NULL;
-  }
-  return ptr;
-  //return libxsmm_aligned_malloc(sz, 2097152);
-#endif
-}
-
-void touch_buffer_numa_aware( unsigned char* buf, unsigned long long n_bytes, int n_numa_domains) {
-  int n_threads = omp_get_max_threads();
-  int threads_per_numa = n_threads/n_numa_domains;
-  constexpr int pg_size = 4096;
-  int n_pages = n_bytes / pg_size;
-  if (n_pages > 100000) n_pages = 100000;
-  void *pptr[n_pages];
-  int status_before[n_pages];
-  int status_req[n_pages];
-  int status_after[n_pages];
-  for (int i = 0; i < n_pages; i++) {
-    pptr[i] = buf + i*pg_size;
-    status_before[i] = -10;
-    status_after[i] = -10;
-    status_req[i] = numa_node;
-  }
-  long ret = move_pages(0, n_pages, pptr, NULL, status_before, MPOL_MF_MOVE);
-
-#if defined(_OPENMP)
-# pragma omp parallel
-#endif
-  {
-#if defined(_OPENMP)
-    const int tid = omp_get_thread_num();
-#else
-    const int tid = 0;
-#endif
-    if (tid % threads_per_numa == 0) {
-      int my_numa_node = tid/threads_per_numa;
-      unsigned long long chunksize = (n_bytes + n_numa_domains - 1)/n_numa_domains;
-      unsigned long long zero_chunksize = (my_numa_node < (n_numa_domains-1)) ? chunksize : n_bytes - (n_numa_domains-1) * chunksize;
-      memset( (unsigned char*)buf + my_numa_node * chunksize, 0 , zero_chunksize);
-      //printf("tid %3d: numa %d: %016p - %016p\n", tid, my_numa_node, buf+my_numa_node * chunksize, buf+(my_numa_node+1) * chunksize);
-    }
-  }
-  ret = move_pages(0, n_pages, pptr, status_req, status_after, MPOL_MF_MOVE);
-  //for (int i = 0; i < 1/*n_pages*/; i+=512)
-  //  printf("%5d/%d: Numa node of %016p  is %d  --> %d\n", i, n_pages, pptr[i], status_before[i], status_after[i]);
-}
-
-at::Tensor fixup_snc(at::Tensor t) {
-  if (snc_node_list.size() <= 0)
-    return t;
-  size_t sz = t.numel() * t.element_size();
-  numa_node = snc_node_list[0];
-  void *ptr = my_malloc(sz);
-  auto t_new = torch::from_blob(ptr, t.sizes(), t.options());
-  touch_buffer_numa_aware((unsigned char*)ptr, sz, snc_node_list.size());
-  t_new.copy_(t);
-  return t_new;
-}
-#else
-void move_to_node(void *ptr, size_t sz, int node, bool debug_print = false) {
-  constexpr int MAX_PGS = 100000;
-  constexpr int pg_size = 4096;
-  int n_pages = (sz + pg_size - 1) / pg_size;
-  auto a_ptr = (void*)((long)ptr & ~(pg_size - 1));
-
-  if (debug_print) {
-	  printf("MV PG: %20p - %20p (%lu)\n", a_ptr, a_ptr + n_pages*pg_size, n_pages * pg_size);
-  }
-
-  for (int j = 0; j < n_pages; j += MAX_PGS) {
-    int count = (j + MAX_PGS < n_pages ? MAX_PGS : n_pages - j);
-    void *buf = a_ptr + j * pg_size;
-    void *pptr[MAX_PGS];
-    int req[MAX_PGS];
-    int status[MAX_PGS];
-    int before[MAX_PGS];
-    for (int i = 0; i < count; i++) {
-      pptr[i] = buf + i * pg_size;
-      status[i] = -10;
-      req[i] = node;
-      before[i] = -10;
-    }
-    if (debug_print) move_pages(0, count, pptr, NULL, before, MPOL_MF_MOVE);
-    move_pages(0, count, pptr, req, status, MPOL_MF_MOVE);
-    if (debug_print) {
-      for (int i = 0; i < 2; i++) {
-        if (before[i] != status[i]) printf("MV PG: %20p  (%d --> %d)\n", pptr[i], before[i], status[i]);
-      }
-    }
-  }
-}
-
-at::Tensor fixup_snc(at::Tensor t, bool debug_print) {
-  if (snc_node_list.size() <= 0)
-    return t;
-  size_t sz = t.numel() * t.element_size();
-  numa_node = snc_node_list[0];
-  void *ptr = t.data_ptr();
-  move_to_node(ptr, sz, numa_node, debug_print);
-  return t;
-}
-#endif
-
-#if 1
-#define FIXUP_SNC(x) fixup_snc(x, false)
-#else
-#define FIXUP_SNC(x) (x)
-#endif
-
 
 template <typename T>
 inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim) {
@@ -838,21 +691,21 @@ struct GPTJBlock : torch::CustomClassHolder {
         max_positions(max_positions),
         rotary_dim(rotary_dim) {
     int i = 0;
-    t_G =  FIXUP_SNC(params[i++]); // ln_gamma
-    t_B =  FIXUP_SNC(params[i++]); // ln_beta
+    t_G =  params[i++]; // ln_gamma
+    t_B =  params[i++]; // ln_beta
 
-    t_Wq = FIXUP_SNC(params[i++]); // q_proj
-    t_Wk = FIXUP_SNC(params[i++]); // k_proj
-    t_Wv = FIXUP_SNC(params[i++]); // v_proj
-    t_Wp = FIXUP_SNC(params[i++]); // out_proj
+    t_Wq = params[i++]; // q_proj
+    t_Wk = params[i++]; // k_proj
+    t_Wv = params[i++]; // v_proj
+    t_Wp = params[i++]; // out_proj
 
-    t_Wi = FIXUP_SNC(params[i++]); // fc_in
-    t_Bi = FIXUP_SNC(params[i++]);
+    t_Wi = params[i++]; // fc_in
+    t_Bi = params[i++];
 
-    t_Wo = FIXUP_SNC(params[i++]); // fc_out
-    t_Bo = FIXUP_SNC(params[i++]);
+    t_Wo = params[i++]; // fc_out
+    t_Bo = params[i++];
 
-    t_EP = FIXUP_SNC(params[i++]); // embed_positions
+    t_EP = params[i++]; // embed_positions
 
     one_by_sqrt_H = 1.0 / sqrt(H);
     mp_size = t_Wp.size(0) / t_Wq.size(0);
@@ -1248,7 +1101,6 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("reorder_cache", &reorder_cache, "TPP reorder_cache");
   m.def("set_pg", &set_pg);
-  m.def("fixup_snc", &fixup_snc);
   m.def(
       "apply_rotary_pos_emb",
       &apply_rotary_pos_emb_wrap,
@@ -1266,7 +1118,6 @@ TORCH_LIBRARY(tpp_gptj, m) {
   m.def("fc_plain", &fc_plain_wrap);
   m.def("reorder_cache", &reorder_cache);
   m.def("set_pg", &set_pg);
-  m.def("fixup_snc", &fixup_snc);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
