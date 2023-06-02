@@ -84,6 +84,32 @@ void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn,
 }
 
 template<typename DType>
+double measure_sparsity_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v) {
+  unsigned int n_entries = 0;
+  unsigned int nnz = 0;
+  double res = 0.0;
+  int N = Nb*bn;
+  int K = Kb*bk*v;
+  int l_i, l_j;
+  DType val;
+  LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
+
+  for ( l_i = 0; l_i < N; l_i++ ) {
+    for ( l_j = 0; l_j < K; l_j++ ) {
+      val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i/bn, l_j/(bk*v), (l_j%(bk*v))/v, l_i%bn, (l_j%(bk*v))%v, Kb, bk, bn, v);
+      if ((val != 0) && (val != -0)) {
+        nnz++;
+      }
+      n_entries++;
+    }
+  }
+  
+  res = 100.0*(1.0-((double)1.0*nnz)/((double)n_entries));
+  return res;
+}
+
+
+template<typename DType>
 void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int bcsc_bk, int bcsc_bn, int N_target_blocks, tensor_bcsc_t *sparse_wt) {
   int nnz = 0, l_zero_block = 0;
   int N = Nb*bn;

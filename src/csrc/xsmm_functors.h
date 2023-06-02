@@ -2074,7 +2074,7 @@ class SpmmTPP {
       snprintf(
           hash,
           200,
-          "spmm_bm%ld_bn%ld_bk%ld_t%ld_beta%d_lda%ld_ldb%ld_ldc%ld_cfg%d_hwspars%d",
+          "spmm_bm%ld_bn%ld_bk%ld_t%ld_beta%d_lda%ld_ldb%ld_ldc%ld_cfg%d_hwspars%d_bn%ld_bk%ld",
           p->M,
           p->N,
           p->K,
@@ -2084,7 +2084,9 @@ class SpmmTPP {
           (long)p->ldb,
           (long)p->ldc,
           config,
-          (int)p->hardwire_sparsity);
+          (int)p->hardwire_sparsity,
+          p->bcsc_bn,
+          p->bcsc_bk);
       return std::string(hash);
     }
     void* build_kernel() override {

@@ -30,6 +30,7 @@ static int large_cache_opt = false;
 static int use_at_vnni = env2int("USE_AT_VNNI");
 int n_Layers = 0;
 int current_layer = 0;
+int cur_packing_layer_id = 0;
 int is_self_output = 0;
 unsigned int nnz_qkv = 0;
 unsigned int dense_qkv = 0;
@@ -55,6 +56,16 @@ void trans_output_block( long S, long H, T* input, T* output) {
   } 
   auto xform_tpp = SCOPEIT(XformExtTPP<T>(H, S, xform, true), (sizeof(T) == 4) ? XPOSE : VNNI);
   xform_tpp(input, output);
+}
+
+double measure_sparsity_in_blocked_nkkn_weight(at::Tensor& t_W) {
+  double res = 0.0;
+  if (t_W.dtype() == at::kFloat) {
+    res = measure_sparsity_from_blocked_weight_tensor( GetVLAPtr<float>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()));
+  } else {
+    res = measure_sparsity_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()));
+  }
+  return res;
 }
 
 void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bcsc, int bcsc_bk, int bcsc_bn) {
@@ -109,22 +120,50 @@ class BertEncoderLayer {
    
     auto bcsc_bk = env2int("BK", 4);
     auto bcsc_bn = env2int("BN", 4);
+    double sparsity = 0.0;
+    int is_spr = 1;
+    int bcsc_bk_use, bcsc_bn_use;
 
     /* Create BCSC sparse tensors */
-    create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk, bcsc_bn);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wi);
+    printf("Wi in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity );
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;
+    create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk_use, bcsc_bn_use);
     nnz_intermediate += t_Wi_bcsc.nnz;
     dense_intermediate += t_Wi_bcsc.n_dense_elts;
-    create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk, bcsc_bn);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wo);
+    printf("Wo in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity );
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;   
+    create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk_use, bcsc_bn_use);
     nnz_output += t_Wo_bcsc.nnz;
     dense_output += t_Wo_bcsc.n_dense_elts;
-    create_bcsc_from_blocked_nkkn_weight(t_Wso, &t_Wso_bcsc, bcsc_bk, bcsc_bn);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wso);  
+    printf("Wso in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity );
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;
+    create_bcsc_from_blocked_nkkn_weight(t_Wso, &t_Wso_bcsc, bcsc_bk_use, bcsc_bn_use);
     nnz_selfoutput += t_Wso_bcsc.nnz;
     dense_selfoutput += t_Wso_bcsc.n_dense_elts;
-    create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk, bcsc_bn);
-    create_bcsc_from_blocked_nkkn_weight(t_Wk, &t_Wk_bcsc, bcsc_bk, bcsc_bn);
-    create_bcsc_from_blocked_nkkn_weight(t_Wv, &t_Wv_bcsc, bcsc_bk, bcsc_bn);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wq);
+    printf("Wq in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity ); 
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;
+    create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk_use, bcsc_bn_use);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wk);   
+    printf("Wk in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity ); 
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;
+    create_bcsc_from_blocked_nkkn_weight(t_Wk, &t_Wk_bcsc, bcsc_bk_use, bcsc_bn_use);
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wv);  
+    printf("Wv in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity);
+    bcsc_bk_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bk : 32;
+    bcsc_bn_use = (sparsity > 40.0 && is_spr > 0) ? bcsc_bn : 32;
+    create_bcsc_from_blocked_nkkn_weight(t_Wv, &t_Wv_bcsc, bcsc_bk_use, bcsc_bn_use);
     nnz_qkv += t_Wq_bcsc.nnz + t_Wk_bcsc.nnz + t_Wv_bcsc.nnz;
-    dense_qkv += t_Wq_bcsc.n_dense_elts + t_Wk_bcsc.n_dense_elts + t_Wv_bcsc.n_dense_elts ;
+    dense_qkv += t_Wq_bcsc.n_dense_elts + t_Wk_bcsc.n_dense_elts + t_Wv_bcsc.n_dense_elts;
+    cur_packing_layer_id++;
 
     // std::cout << "F2=" << F2 << " H=" << H << " H1=" << H1 << std::endl;
   }
