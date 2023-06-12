@@ -650,8 +650,8 @@ class ConvertTPP {
  private:
   int rows = 0;
   int cols = 0;
-  int ldi;
-  int ldo;
+  int ldi = 0;
+  int ldo = 0;
   UnaryTPP kernel;
   bool init_done = false;
 };
@@ -831,25 +831,17 @@ class AddBiasTPP {
         kernel(
             rows,
             cols,
+	    cols,
             ld,
             ld,
+	    XsmmDtype<T>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0,
-            LIBXSMM_MELTW_TYPE_BINARY_ADD),
-        cvt() {
-    if (!std::is_same<T, float>::value)
-      cvt = ConvertTPP<T, float>(1, cols);
-  }
+            LIBXSMM_MELTW_TYPE_BINARY_ADD) {}
   void operator()(T* in, float* out) {
-    if (std::is_same<T, float>::value) {
-      kernel((void*)in, (void*)out, (void*)out);
-    } else {
-      float tmp[cols];
-      cvt(in, tmp);
-      kernel((void*)tmp, (void*)out, (void*)out);
-    }
+    kernel((void*)in, (void*)out, (void*)out);
   }
   void ref(T* in, float* out) {
     for (int r = 0; r < rows; r++) {
@@ -864,7 +856,6 @@ class AddBiasTPP {
   int cols = 0;
   int ld;
   BinaryTPP kernel;
-  ConvertTPP<T, float> cvt;
 };
 
 template <typename Tin, typename Tout = Tin>
