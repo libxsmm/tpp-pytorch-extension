@@ -29,7 +29,6 @@ using namespace tpp;
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
-static int use_at_vnni = false; // env2int("USE_AT_VNNI");
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
@@ -46,6 +45,7 @@ REGISTER_LOCAL_SCOPE(reorder, "rorder");
 REGISTER_LOCAL_SCOPE(allred, "allred");
 REGISTER_LOCAL_SCOPE(concat, "concat");
 REGISTER_LOCAL_SCOPE(fftkn, "fftkn");
+REGISTER_LOCAL_SCOPE(k_trans, "k_trans");
 
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
@@ -57,7 +57,7 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
 }
 
 template <typename T>
-inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim) {
+inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Tensor t_beam_idx) {
   auto ndim =  t_in1.dim();
   dim = dim >= 0 ? dim : dim+ndim;
 
@@ -66,33 +66,41 @@ inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim) {
   auto t_out = t_in1.new_empty(out_sizes);
 
 
-  auto F = out_sizes[2];
   auto B = out_sizes[0];
-  auto S = out_sizes[1];
-  auto BS = B * S;
-  auto S1 = t_in1.size(1);
-  auto S2 = t_in2.size(1);
+  auto N = out_sizes[1];
+  auto S = out_sizes[2];
+  auto F = out_sizes[3];
+  auto BNS = B * N * S;
+  auto S1 = t_in1.size(dim);
+  auto S2 = t_in2.size(dim);
+  bool indirect = t_beam_idx.numel() > 0;
 
   auto cpy_tpp = SCOPEIT(CpyTPP<T>(F), EW_COPY);
 
-  auto in1 = GetVLAPtr<T>(t_in1, {S1, F});
-  auto in2 = GetVLAPtr<T>(t_in2, {S2, F});
+  auto in1 = GetVLAPtr<T>(t_in1, {N, S1, F});
+  auto in2 = GetVLAPtr<T>(t_in2, {N, S2, F});
   auto out = GetVLAPtr<T>(t_out, {F});
-  T *ptrs[BS];
+  auto beam_idx = GetVLAPtr<long>(t_beam_idx);
+  //std::cout << "t_beam_idx.dtype: " << t_beam_idx.dtype() << std::endl;
+  //auto beam_idx = (long*)t_beam_idx.data_ptr();
+  T *ptrs[BNS];
   int p = 0;
   for (int j = 0; j < B; j++) {
-    for (int i = 0; i < S1; i++) {
-      ptrs[p++] = in1[j][i];
-    }
-    for (int i = 0; i < S2; i++) {
-      ptrs[p++] = in2[j][i];
+    int j1 = indirect ? beam_idx[j] : j;
+    for (int k = 0; k < N; k++) {
+      for (int i = 0; i < S1; i++) {
+        ptrs[p++] = in1[j1][k][i];
+      }
+      for (int i = 0; i < S2; i++) {
+        ptrs[p++] = in2[j][k][i];
+      }
     }
   }
-  TPP_ASSERT(p == BS, "Unmatched p=%d and BS=%ld\n", p, BS);
+  TPP_ASSERT(p == BNS, "Unmatched p=%d and BNS=%ld\n", p, BNS);
   {
     RECORD_SCOPE(concat, {t_in1, t_in2});
 #pragma omp parallel for
-    for (int i = 0; i < BS; i++) {
+    for (int i = 0; i < BNS; i++) {
       cpy_tpp(ptrs[i], out[i]);
     }
   }
@@ -163,9 +171,9 @@ static std::vector<std::vector<at::Tensor>> reorder_cache(std::vector<std::vecto
 
 template <typename T>
 inline void apply_rotary_pos_emb(
-    at::Tensor& t_in,
-    at::Tensor& t_emb_pos,
-    at::Tensor& t_pos,
+    at::Tensor t_in,
+    at::Tensor t_emb_pos,
+    at::Tensor t_pos,
     long N,
     long H) {
   auto in_sizes = t_in.sizes(); // in[B][S][F]
@@ -214,8 +222,8 @@ inline void apply_rotary_pos_emb(
 
 static void apply_rotary_pos_emb_wrap(
     at::Tensor t_in,
-    at::Tensor& t_emb_pos,
-    at::Tensor& t_pos,
+    at::Tensor t_emb_pos,
+    at::Tensor t_pos,
     long N,
     long H) {
   GlobalPass _gp(FWD);
@@ -234,10 +242,10 @@ static void apply_rotary_pos_emb_wrap(
 
 template <typename T, typename LT = T>
 inline void lyr_norm(
-    at::Tensor& t_in,
-    at::Tensor& t_gamma,
-    at::Tensor& t_beta,
-    at::Tensor& t_out,
+    at::Tensor t_in,
+    at::Tensor t_gamma,
+    at::Tensor t_beta,
+    at::Tensor t_out,
     float eps) {
   auto in_sizes = t_in.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
@@ -262,9 +270,9 @@ inline void lyr_norm(
 }
 
 static at::Tensor lyr_norm_wrap(
-    at::Tensor& t_in,
-    at::Tensor& t_gamma,
-    at::Tensor& t_beta,
+    at::Tensor t_in,
+    at::Tensor t_gamma,
+    at::Tensor t_beta,
     double eps) {
   GlobalPass _gp(FWD);
   auto dt = t_in.dtype();
@@ -291,8 +299,8 @@ template <typename T>
 inline void fc_plain(
     at::Tensor t_in,
     at::Tensor t_wt,
-    at::Tensor& t_bias,
-    at::Tensor& t_out) {
+    at::Tensor t_bias,
+    at::Tensor t_out) {
   auto in_sizes = t_in.sizes();
   auto wt_sizes = t_wt.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
@@ -462,11 +470,11 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
 template <typename T>
 inline void fc_out(
     at::Tensor t_in,
-    at::Tensor& t_in1,
-    at::Tensor& t_in2,
+    at::Tensor t_in1,
+    at::Tensor t_in2,
     at::Tensor t_wt,
-    at::Tensor& t_bias,
-    at::Tensor& t_out,
+    at::Tensor t_bias,
+    at::Tensor t_out,
     float scale) {
   auto in_sizes = t_in.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
@@ -546,10 +554,10 @@ inline void fc_out(
 
 static at::Tensor fc_out_wrap(
     at::Tensor t_in,
-    at::Tensor& t_in1,
-    at::Tensor& t_in2,
+    at::Tensor t_in1,
+    at::Tensor t_in2,
     at::Tensor t_wt,
-    at::Tensor& t_bias,
+    at::Tensor t_bias,
     double scale) {
   GlobalPass _gp(FWD);
   auto t_out = at::empty_like(t_in1);
@@ -570,8 +578,8 @@ template <typename T>
 inline void fc_in(
     at::Tensor t_in,
     at::Tensor t_wt,
-    at::Tensor& t_bias,
-    at::Tensor& t_out) {
+    at::Tensor t_bias,
+    at::Tensor t_out) {
   auto in_sizes = t_in.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
   if (BS > FT_OPT_SIZE) { // first token compute
@@ -645,7 +653,7 @@ inline void fc_in(
 static at::Tensor fc_in_wrap(
     at::Tensor t_in,
     at::Tensor t_wt,
-    at::Tensor& t_bias) {
+    at::Tensor t_bias) {
   GlobalPass _gp(FWD);
   auto sizes = t_in.sizes().vec();
   auto wt_sizes = t_wt.sizes();
@@ -721,7 +729,7 @@ struct GPTJBlock : torch::CustomClassHolder {
   }
 
   template <typename T, typename Tout = T>
-  inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor& t_out) {
+  inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_out) {
     auto in_sizes = t_in.sizes();
     auto BS = in_sizes[0] * in_sizes[1];
     if (BS > FT_OPT_SIZE) { // first token compute
@@ -786,16 +794,17 @@ struct GPTJBlock : torch::CustomClassHolder {
 
   template <typename T, typename Tv>
   inline void attn(
-      at::Tensor& t_QL,
-      at::Tensor& t_KL,
-      at::Tensor& t_AM,
-      at::Tensor& t_VL,
-      at::Tensor& t_CL) {
+      at::Tensor t_QL,
+      at::Tensor t_KL,
+      at::Tensor t_AM,
+      at::Tensor t_VL,
+      at::Tensor t_CL) {
     auto sizes = t_QL.sizes();
     long B = sizes[0];
-    long Sq = sizes[1];
+    long N = sizes[1];
+    long Sq = sizes[2];
     auto ksizes = t_KL.sizes();
-    long Sk = ksizes[1];
+    long Sk = ksizes[2];
     long offset = Sk - Sq;
     constexpr long Sqb = 8;
     long rem = Sq % Sqb;
@@ -809,47 +818,48 @@ struct GPTJBlock : torch::CustomClassHolder {
     // printf("B=%ld Sq=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk=%ld offset=%ld\n", B,
     // Sq, N, H, H1, H2, Sk, offset);
     auto t_KL_TV = at::empty_like(t_KL);
-    auto QL = GetVLAPtr<T>(t_QL, {Sq, N, H1, H2});
-    auto KL = GetVLAPtr<T>(t_KL, {Sk, N, H1, H2});
+    auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H1, H2});
+    auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H1, H2});
     auto KL_TV = GetVLAPtr<T>(t_KL_TV, {N, H1, H2, Sk});
-    auto VL = GetVLAPtr<Tv>(t_VL, {Sk, N, H1, H2});
-    auto CL = GetVLAPtr<T>(t_CL, {Sq, N, H1, H2});
+    auto VL = GetVLAPtr<Tv>(t_VL, {N, Sk, H1, H2});
+    auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H1, H2});
     auto AM = GetVLAPtr<T>(t_AM, {Sk});
+    int kl_in_vnni = 1;
     auto a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-        Sqb, Sk, H2, H2, H2 * Sk, N * H, Sk, Sk, 0.0, 0, H1)));
+        Sqb, Sk, H2, H2, H2 * Sk, H, Sk, Sk, 0.0, 0, H1, kl_in_vnni)));
     auto scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Sk)), EW_SCL);
     auto add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Sk), EW_ADD);
     auto softmax_fwd_tpp =
         SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, Sqb, Sk)), SOFTMAX);
     auto c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-        Sqb, H2, Sk, Sqb * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
-    auto cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H2, H2, N * H)), EW_COPY);
-    auto cpy_tpp = SCOPEIT(CpyTPP<T>(Sk, H2, N * H, H2), EW_COPY);
+        Sqb, H2, Sk, Sqb * Sk, Sk * H, Sk, H, H2, 0.0, 0, 1, 0)));
+    auto cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H2, H2, H)), EW_COPY);
+    auto cpy_tpp = SCOPEIT(CpyTPP<T>(Sk, H2, H, H2), EW_COPY);
     auto xform = XformTPP::XFORM_XPOSE_TPP;
-    if (!std::is_same<T, float>::value) {
+    if (!std::is_same<T, float>::value && kl_in_vnni) {
       xform = XformTPP::XFORM_XPOSE_N2V_TPP;
     }
     auto xform_tpp =
-        SCOPEIT(XformExtTPP<T>(Sk, H2, H2, Sk, N * H, Sk, xform, true), XPOSE);
+        SCOPEIT(XformExtTPP<T>(Sk, H2, H2, Sk, H, Sk, xform, true), XPOSE);
 
     auto a_gemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, float>(
-        rem, Sk, H2, H2, H2 * Sk, N * H, Sk, Sk, 0.0, 0, H1)));
+        rem, Sk, H2, H2, H2 * Sk, H, Sk, Sk, 0.0, 0, H1, kl_in_vnni)));
     auto scale_tpp_rem = SCOPEIT((ScaleTPP<float, float>(rem * Sk)), EW_SCL);
     auto add_mask_tpp_rem = SCOPEIT(AddBiasTPP<T>(rem, Sk), EW_ADD);
     auto softmax_fwd_tpp_rem =
         SCOPEIT((SoftMaxFwdTPP<float, Tv>(1, rem ? rem : 1, Sk)), SOFTMAX);
     auto c_gemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-        rem, H2, Sk, rem * Sk, Sk * N * H, Sk, N * H, H2, 0.0, 0, 1, 0)));
-    auto cvt_tpp_rem = SCOPEIT((ConvertTPP<Tv, T>(rem, H2, H2, N * H)), EW_COPY);
+        rem, H2, Sk, rem * Sk, Sk * H, Sk, H, H2, 0.0, 0, 1, 0)));
+    auto cvt_tpp_rem = SCOPEIT((ConvertTPP<Tv, T>(rem, H2, H2, H)), EW_COPY);
     bool inline_trans = ((Sq+Sqb-1) / Sqb == 1);
 
     if (!inline_trans) {
-      RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
+      RECORD_SCOPE(k_trans, {t_QL, t_KL});
 #pragma omp parallel for collapse(3)
       for (int n = 0; n < N; n++) {
         for (int b = 0; b < B; b++) {
           for (int h1 = 0; h1 < H1; h1++) {
-            xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
+            xform_tpp(KL[b][n][0][h1], KL_TV[b][n][h1][0]);
           }
         }
       }
@@ -859,18 +869,18 @@ struct GPTJBlock : torch::CustomClassHolder {
       RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
       {
 #pragma omp parallel for collapse(3)
-        for (int n = 0; n < N; n++) {
-          for (int b = 0; b < B; b++) {
+        for (int b = 0; b < B; b++) {
+          for (int n = 0; n < N; n++) {
             for (int sq = 0; sq < Sq; sq += Sqb) {
               auto is_rem = (sq + Sqb > Sq);
               if (!is_rem) {
                 float AS[Sqb][Sk];
                 Tv AST[Sqb][Sk];
-		if (inline_trans)
-                for (int h1 = 0; h1 < H1; h1++) {
-                  xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
-                }
-                a_gemm_tpp(QL[b][sq][n][0], KL_TV[b][n][0][0], AS[0], H1);
+                if (inline_trans)
+                  for (int h1 = 0; h1 < H1; h1++) {
+                    xform_tpp(KL[b][n][0][h1], KL_TV[b][n][h1][0]);
+                  }
+                a_gemm_tpp(QL[b][n][sq][0], KL_TV[b][n][0][0], AS[0], H1);
                 for (int sq1 = 0; sq1 < Sqb; sq1++) {
                   auto qval = sq + sq1 + offset;
                   for (int sk = qval + 1; sk < Sk; sk++) {
@@ -883,17 +893,17 @@ struct GPTJBlock : torch::CustomClassHolder {
                 softmax_fwd_tpp(AS[0], AST[0]);
                 for (int h1 = 0; h1 < H1; h1++) {
                   Tv tmp[Sqb * H2];
-                  c_gemm_tpp(AST[0], VL[b][0][n][h1], tmp, 1);
-                  cvt_tpp(tmp, CL[b][sq][n][h1]);
+                  c_gemm_tpp(AST[0], VL[b][n][0][h1], tmp, 1);
+                  cvt_tpp(tmp, CL[b][n][sq][h1]);
                 }
               } else {
                 float AS[rem][Sk];
                 Tv AST[rem][Sk];
-		if (inline_trans)
-                for (int h1 = 0; h1 < H1; h1++) {
-                  xform_tpp(KL[b][0][n][h1], KL_TV[b][n][h1][0]);
-                }
-                a_gemm_tpp_rem(QL[b][sq][n][0], KL_TV[b][n][0][0], AS[0], H1);
+                if (inline_trans)
+                  for (int h1 = 0; h1 < H1; h1++) {
+                    xform_tpp(KL[b][n][0][h1], KL_TV[b][n][h1][0]);
+                  }
+                a_gemm_tpp_rem(QL[b][n][sq][0], KL_TV[b][n][0][0], AS[0], H1);
                 for (int sq1 = 0; sq1 < rem; sq1++) {
                   auto qval = sq + sq1 + offset;
                   for (int sk = qval + 1; sk < Sk; sk++) {
@@ -906,8 +916,8 @@ struct GPTJBlock : torch::CustomClassHolder {
                 softmax_fwd_tpp_rem(AS[0], AST[0]);
                 for (int h1 = 0; h1 < H1; h1++) {
                   Tv tmp[rem * H2];
-                  c_gemm_tpp_rem(AST[0], VL[b][0][n][h1], tmp, 1);
-                  cvt_tpp_rem(tmp, CL[b][sq][n][h1]);
+                  c_gemm_tpp_rem(AST[0], VL[b][n][0][h1], tmp, 1);
+                  cvt_tpp_rem(tmp, CL[b][n][sq][h1]);
                 }
               }
             }
@@ -919,14 +929,14 @@ struct GPTJBlock : torch::CustomClassHolder {
 
   template <typename T, typename LT = T>
   std::vector<at::Tensor> _forward(
-      at::Tensor& t_HS,
-      at::Tensor& t_key_past,
-      at::Tensor& t_value_past,
-      at::Tensor& t_am,
-      at::Tensor& t_pid,
+      at::Tensor t_HS,
+      at::Tensor t_key_past,
+      at::Tensor t_value_past,
+      at::Tensor t_beam_idx,
+      at::Tensor t_am,
+      at::Tensor t_pid,
       at::Tensor t_Out,
-      bool use_cache,
-      std::vector<at::Tensor> t_scratch) {
+      bool use_cache) {
     typedef T Tv;
     auto vdtype = torch::CppTypeToScalarType<Tv>::value;
     auto sizes = t_HS.sizes();
@@ -957,6 +967,10 @@ struct GPTJBlock : torch::CustomClassHolder {
     qkv_gemm<T>(t_HS_qkv, t_Wk, t_KL);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     apply_rotary_pos_emb<T>(t_KL, t_EP, t_pid, N, H);
+    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    // printf("reached at %s:%d\n", __func__, __LINE__);
+    // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
+    // std::cout << "t_beam_idx: " << t_beam_idx << std::endl;
     if (t_key_past.numel() > 0) {
       // if (t_key_past.dim() == 4) {
       //   std::cout << "0t_key_past: " << t_key_past.sizes() << std::endl;
@@ -966,22 +980,24 @@ struct GPTJBlock : torch::CustomClassHolder {
       // std::cout << "t_key_past: " << t_key_past.sizes() << std::endl;
       // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
       //t_KL = at::cat({t_key_past, t_KL}, -2);
-      t_KL = kv_concat<T>(t_key_past, t_KL, 1);
+      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
     // std::cout << t_KL.sizes() << std::endl;
     qkv_gemm<T, Tv>(t_HS_qkv, t_Wv, t_VL);
+    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
     // printf("reached at %s:%d\n", __func__, __LINE__);
-    if (t_value_past.numel() > 0 && t_value_past.dim() == 3) {
+    if (t_value_past.numel() > 0) {
       // if (t_value_past.dim() == 4)
       //   t_value_past = t_value_past.view({B, -1, N*H});
       //t_VL = at::cat({t_value_past, t_VL}, -2);
-      t_VL = kv_concat<T>(t_value_past, t_VL, 1);
+      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
     }
     // printf("reached at %s:%d\n", __func__, __LINE__);
     qkv_gemm<T>(t_HS_qkv, t_Wq, t_QL);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     apply_rotary_pos_emb<T>(t_QL, t_EP, t_pid, N, H);
+    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
 
     // std::cout << "t_QL: " << t_QL.dtype() << std::endl;
     // std::cout << "t_KL: " << t_KL.dtype() << std::endl;
@@ -989,13 +1005,14 @@ struct GPTJBlock : torch::CustomClassHolder {
     // std::cout << "t_CL: " << t_CL.dtype() << std::endl;
     // std::cout << "t_am: " << t_am.dtype() << std::endl;
     attn<T, Tv>(t_QL, t_KL, t_am, t_VL, t_CL);
+    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
     // printf("reached at %s:%d\n", __func__, __LINE__);
     qkv_gemm<T>(t_CL, t_Wp, t_SO);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_in<T>(t_HS_qkv, t_Wi, t_Bi, t_I);
     // printf("reached at %s:%d\n", __func__, __LINE__);
     fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out, scale);
-    //printf("reached at %s:%d\n", __func__, __LINE__);
+    // printf("reached at %s:%d\n", __func__, __LINE__);
     if (mp_size > 1) {
       RECORD_SCOPE(allred, {t_Out});
       if (!process_group) {
@@ -1012,10 +1029,6 @@ struct GPTJBlock : torch::CustomClassHolder {
       return {t_Out, t_null, t_null};
     }
   }
-  std::vector<at::Tensor> get_scratch(at::Tensor& t_HS) {
-    std::vector<at::Tensor> ret;
-    return ret;
-  }
 
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
@@ -1025,9 +1038,9 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_HS = t_inp[0];
     auto t_key_past = t_inp[1];
     auto t_value_past = t_inp[2];
-    auto t_AM = t_inp[3];
-    auto t_pid = t_inp[4];
-    auto t_scratch = get_scratch(t_HS);
+    auto t_beam_idx = t_inp[3];
+    auto t_AM = t_inp[4];
+    auto t_pid = t_inp[5];
     auto dt = this->t_Wq.dtype();
     auto ldt = this->t_G.dtype();
     std::vector<at::Tensor> ret;
@@ -1039,51 +1052,51 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_HS,
           t_key_past,
           t_value_past,
+          t_beam_idx,
           t_AM,
           t_pid,
           t_Out,
-          use_cache,
-          t_scratch);
+          use_cache);
     } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
       ret = this->_forward<bfloat16, float>(
           t_HS,
           t_key_past,
           t_value_past,
+          t_beam_idx,
           t_AM,
           t_pid,
           t_Out,
-          use_cache,
-          t_scratch);
+          use_cache);
     } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
       ret = this->_forward<bfloat16, bfloat16>(
           t_HS,
           t_key_past,
           t_value_past,
+          t_beam_idx,
           t_AM,
           t_pid,
           t_Out,
-          use_cache,
-          t_scratch);
+          use_cache);
     } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
       ret = this->_forward<bfloat8, float>(
           t_HS,
           t_key_past,
           t_value_past,
+          t_beam_idx,
           t_AM,
           t_pid,
           t_Out,
-          use_cache,
-          t_scratch);
+          use_cache);
     } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
       ret = this->_forward<bfloat8, bfloat16>(
           t_HS,
           t_key_past,
           t_value_past,
+          t_beam_idx,
           t_AM,
           t_pid,
           t_Out,
-          use_cache,
-          t_scratch);
+          use_cache);
     } else {
       std::cout << "Types: " << dt << "  " << ldt << std::endl;
       TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);

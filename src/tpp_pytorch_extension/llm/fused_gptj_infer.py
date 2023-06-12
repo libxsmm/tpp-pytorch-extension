@@ -174,6 +174,7 @@ class GPTJBlock(BlockedModule):
         hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
+        dummy_tensor_int = torch.Tensor().to(torch.long)
 
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
@@ -183,10 +184,12 @@ class GPTJBlock(BlockedModule):
             #print("VP: ", layer_past[1].shape)
             add_tensor_or_empty(layer_past[0])
             add_tensor_or_empty(layer_past[1])
-            # add_tensor_or_empty(self.get_blocked_tensor(layer_past[0], self.blocked_input_signature, [None, None, self.features_block_size]))
-            # add_tensor_or_empty(self.get_blocked_tensor(layer_past[1], self.blocked_input_signature, [None, None, self.features_block_size]))
+            if len(layer_past) > 2:
+                add_tensor_or_empty(layer_past[2].to(torch.long))
+            else:
+                inputs.append(dummy_tensor_int)
         else:
-            inputs += [dummy_tensor, dummy_tensor]
+            inputs += [dummy_tensor, dummy_tensor, dummy_tensor_int]
         add_tensor_or_empty(attention_mask)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
@@ -331,10 +334,13 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
     beam_idx at every generation step.
     """
-    ret = fused_gptj_cpp.reorder_cache(past, beam_idx)
-    return tuple(
-        tuple(p for p in layer_past) for layer_past in ret
-    )
+    return tuple(layer_past + (beam_idx,) for layer_past in past)
+
+    # ret = fused_gptj_cpp.reorder_cache(past, beam_idx)
+    # return tuple(
+    #     tuple(p for p in layer_past) for layer_past in ret
+    # )
+
     # return tuple(
     #     tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
     #     for layer_past in past
