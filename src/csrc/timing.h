@@ -54,11 +54,12 @@ extern double pass_timers[MAX_THREADS][3][NUM_TIMERS];
 extern double master_pass_timers[3];
 struct Scope {
   Scope(std::string const& name)
-      : name(name), master_timer(0.0), detailed_timers{0.0}, flops{0.0} {}
+      : name(name), master_timer(0.0), detailed_timers{0.0}, flops{0.0}, count(0) {}
   const std::string name;
   double master_timer;
   double detailed_timers[MAX_THREADS][NUM_TIMERS];
   double flops[MAX_THREADS][8];
+  long count;
 };
 
 inline std::vector<Scope>& get_scope_list() {
@@ -119,6 +120,7 @@ class GlobalScope {
     auto time = getTime() - start;
     auto& scope = get_scope_list()[globalScope];
     scope.master_timer += time;
+    scope.count++;
     if (oldScope != 0) {
       // Remove time from outer scope
       auto& outer_scope = get_scope_list()[oldScope];
@@ -139,6 +141,7 @@ class GlobalPass {
     auto time = getTime() - start;
     auto& pass = get_pass_list()[globalPass];
     pass.master_timer += time;
+    pass.count++;
     if (oldPass != 0) {
       auto& outer_pass = get_pass_list()[oldPass];
       outer_pass.master_timer -= time;
@@ -185,15 +188,15 @@ class ScopedTPP {
   DebugTimer t;
 };
 
-#if 1
 // Keeping below two definitions for backward compatibility for now
 #define SCOPEITGEMM SCOPEIT
 #define SCOPEITGEMM2 SCOPEIT
-
+#if 1
 #define SCOPEIT(f, ...) ScopedTPP<decltype(f), 0>(f, ##__VA_ARGS__)
 #define SCOPEIT_REF(f, ...) ScopedTPP<decltype(f), 1>(f, ##__VA_ARGS__)
+#define SCOPEIT_DECL(t) ScopedTPP<(t), 0>
 #else
-#define SCOPEIT(f, t) f
+#define SCOPEIT(f, ...) f
 #endif
 
 #define RECORD_SCOPE(scope, ...) \

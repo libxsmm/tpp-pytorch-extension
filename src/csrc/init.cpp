@@ -55,11 +55,13 @@ void reset_debug_timers() {
     if (scope.master_timer == 0.0)
       continue;
     scope.master_timer = 0.0;
+    scope.count = 0;
   }
   for (auto& scope : get_scope_list()) {
     if (scope.master_timer == 0.0)
       continue;
     scope.master_timer = 0.0;
+    scope.count = 0;
   }
 }
 
@@ -76,9 +78,10 @@ void print_debug_timers(int tid) {
     printf(" %7s", DebugTimerName(t));
   }
   printf(
-      " %8s  %8s  %8s (%4s) %6s\n",
+      " %8s  %8s  %5s %8s (%4s) %6s\n",
       "Total",
       "MTotal",
+      "Count",
       "TotalGFS",
       "IMBL",
       "TF/s");
@@ -98,14 +101,15 @@ void print_debug_timers(int tid) {
           t_flops += scope.flops[f][0];
         if (t_flops > 0.0) {
           printf(
-              " %8.1f  %8.1f  %8.3f (%4.2f) %6.3f\n",
+              " %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f\n",
               total * 1e3,
               scope.master_timer * 1e3,
+              scope.count,
               t_flops * 1e-9,
               t_flops * 100.0 / (scope.flops[i][0] * max_threads),
               t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM]);
         } else {
-          printf(" %8.1f  %8.1f\n", total * 1e3, scope.master_timer * 1e3);
+          printf(" %8.1f  %8.1f  %5ld\n", total * 1e3, scope.master_timer * 1e3, scope.count);
         }
       };
       for (auto& scope : get_pass_list())
