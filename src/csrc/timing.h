@@ -159,6 +159,7 @@ static thread_local std::string prev_class_name = "";
 template <typename T, int impl = 0>
 class ScopedTPP {
  public:
+  ScopedTPP() {}
   ScopedTPP(T func, DebugTimer t) : func(std::move(func)), t(t) {}
   template <typename... Types>
   void operator()(Types... vars) {
@@ -194,7 +195,7 @@ class ScopedTPP {
 #if 1
 #define SCOPEIT(f, ...) ScopedTPP<decltype(f), 0>(f, ##__VA_ARGS__)
 #define SCOPEIT_REF(f, ...) ScopedTPP<decltype(f), 1>(f, ##__VA_ARGS__)
-#define SCOPEIT_DECL(t) ScopedTPP<(t), 0>
+#define SCOPEIT_DECL(t, ...) ScopedTPP<t, ##__VA_ARGS__, 0>
 #else
 #define SCOPEIT(f, ...) f
 #endif

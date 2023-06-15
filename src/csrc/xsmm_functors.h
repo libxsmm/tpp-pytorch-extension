@@ -1741,21 +1741,21 @@ class XformExtTPP {
           unary_type);
     }
 
-    if ((xtype == XformTPP::XFORM_N2V_TPP ||
-         xtype == XformTPP::XFORM_XPOSE_TPP) &&
-        in_rows_p != in_rows) {
-      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols);
-      zero = SetZeroTPP<T>(in_rows_p - in_rows, in_cols);
-      zero_offset = in_rows * in_cols;
-    } else if (xtype == XformTPP::XFORM_XPOSE_N2V_TPP && in_cols_p != in_cols) {
-      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols_p);
-      zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
-      zero_offset = in_cols;
-    } else if (xtype == XformTPP::XFORM_XPOSE_V2V_TPP && in_cols_p != in_cols) {
+    if (xtype == XformTPP::XFORM_XPOSE_V2V_TPP && in_cols_p != in_cols) {
       cpy = CpyTPP<T>(in_rows / BS, in_cols * BS, ldi * BS, in_cols_p * BS);
       zero = SetZeroTPP<T>(
           in_rows / BS, (in_cols_p - in_cols) * BS, in_cols_p * BS);
       zero_offset = in_cols * BS;
+    } else if (/*(xtype == XformTPP::XFORM_N2V_TPP ||
+         xtype == XformTPP::XFORM_XPOSE_TPP) &&*/
+        in_rows_p != in_rows) {
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols);
+      zero = SetZeroTPP<T>(in_rows_p - in_rows, in_cols);
+      zero_offset = in_rows * in_cols;
+    } else if (/*xtype == XformTPP::XFORM_XPOSE_N2V_TPP &&*/ in_cols_p != in_cols) {
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols_p);
+      zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
+      zero_offset = in_cols;
     }
     if (std::is_same<T, bfloat16>::value)
       cvt = ConvertTPP<float, bfloat16>(in_rows, in_cols);
@@ -3367,8 +3367,10 @@ class VarSoftMaxFwdTPP {
             1,
             S3,
             S3,
+            1,
             S3,
             XsmmDtype<Tin>(),
+            LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
@@ -3403,10 +3405,10 @@ class VarSoftMaxFwdTPP {
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-  void operator()(int S1, Tin* in, Tout* out) {
+  void operator()(int S1, Tin* in, Tout* out, float *max_buf = nullptr, float *sum_buf = nullptr) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
-      Tin max = in[s2 * S3];
+      float max = (float)in[s2 * S3];
       float sum = 0.0f;
       for (int s1 = 0; s1 < S1; s1++) {
         float rmax = 0;
@@ -3422,13 +3424,15 @@ class VarSoftMaxFwdTPP {
         ksum(&tmp[s1 * S3], &lsum);
         sum += lsum;
       }
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (int s1 = 0; s1 < S1; s1++) {
         kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
       }
     }
   }
-  void ref(int S1, Tin* pinp, Tout* pout) {
+  void ref(int S1, Tin* pinp, Tout* pout, float *max_buf = nullptr, float *sum_buf = nullptr) {
     int s1, s2, s3;
     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
@@ -3482,6 +3486,8 @@ class VarSoftMaxFwdTPP {
         }
       }
       sum = _mm512_reduce_add_ps(vsum);
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       vsum = _mm512_set1_ps(sum);
       for (s1 = 0; s1 < S1; s1++) {
@@ -3524,6 +3530,8 @@ class VarSoftMaxFwdTPP {
           sum += z;
         }
       }
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < S3; s3++) {
@@ -3727,6 +3735,113 @@ class VarSoftMaxBwdTPP {
  private:
   int S2, S3;
   Eqn eqn0, eqn1;
+};
+
+template <typename T>
+class SoftMaxFixUpTPP {
+ public:
+  SoftMaxFixUpTPP() {}
+  SoftMaxFixUpTPP(int S2, int S3) : S2(S2), S3(S3), eqn(S3) {}
+  void operator()(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+    libxsmm_matrix_eqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[4];
+    eqn_param.inputs = arg_array;
+
+    for (int s2 = 0; s2 < S2; s2++) {
+      float nmax = std::max(cmax[s2], omax[s2]);
+      float oexp = expf(omax[s2] - nmax);
+      float cexp = expf(cmax[s2] - nmax);
+      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float rsum = 1.0 / nsum;
+      float oscale = osum[s2] * oexp * rsum;
+      float cscale = csum[s2] * cexp * rsum;
+      arg_array[0].primary = &out[s2*S3];
+      arg_array[1].primary = &oscale;
+      arg_array[2].primary = &cur[s2*S3];
+      arg_array[3].primary = &cscale;
+      eqn_param.output.primary = (void*)&out[s2 * S3];
+      eqn(&eqn_param);
+      omax[s2] = nmax;
+      osum[s2] = nsum;
+    }
+  }
+
+  void ref(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+    for (int s2 = 0; s2 < S2; s2++) {
+      float nmax = std::max(cmax[s2], omax[s2]);
+      float oexp = exp(omax[s2] - nmax);
+      float cexp = exp(cmax[s2] - nmax);
+      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float rsum = 1.0 / nsum;
+      float oscale = osum[s2] * oexp * rsum;
+      float cscale = csum[s2] * cexp * rsum;
+      for (int s3 = 0; s3 < S3; s3++) {
+        out[s2*S3+s3] = oscale * out[s2*S3+s3] + cscale * cur[s2*S3+s3];
+      }
+      omax[s2] = nmax;
+      osum[s2] = nsum;
+    }
+  }
+
+  class Eqn : BaseTPP {
+   public:
+    Eqn() {}
+    Eqn(int S3) : S3(S3) {
+      kernel = (libxsmm_matrix_eqn_function)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_matrix_eqn_param* eqn_param) {
+      if (!initialized)
+        return;
+      kernel(eqn_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "softmax_fixup_eqn_t1%d_S3%d",
+          XsmmDtype<T>(),
+          S3);
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      auto in_dt = XsmmDtype<T>();
+      auto out_dt = XsmmDtype<T>();
+      libxsmm_blasint tmp_ld = 1;
+      libxsmm_blasint ld = S3;
+      libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_ADD,
+          LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+      meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+      meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 3, 0, LIBXSMM_DATATYPE_F32);
+      debug_print_eqn_tree(my_eqn0); // printf
+      return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
+    }
+
+   private:
+    int S3;
+    libxsmm_matrix_eqn_function kernel = NULL;
+  };
+
+ protected:
+  int S2 = 0;
+  int S3 = 0;
+  Eqn eqn;
 };
 
 template <typename T, typename LT = T>
