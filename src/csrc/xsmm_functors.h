@@ -1991,20 +1991,16 @@ class SpmmTPP {
       long bcsc_bk,
       long bcsc_bn,
       long lda,
-      long ldb,
       long ldc,
-      float beta,
-      int hardwire_sparsity)
+      float beta )
       : M(M),
         N(N),
         K(K),
         bcsc_bk(bcsc_bk),
         bcsc_bn(bcsc_bn),   
         lda(lda),
-        ldb(ldb),
         ldc(ldc),
         beta(beta),
-        hardwire_sparsity(hardwire_sparsity),
         k_spmm_with_tc(this, 0),
         k_cfg(this, 1),
         k_rls(this, 2),
@@ -2049,6 +2045,12 @@ class SpmmTPP {
       auto dt_in = XsmmDtype<Tin>();
       auto dt_out = XsmmDtype<Tout>();
       long type = -1;
+      unsigned int use_bf16 = (XsmmDtype<Tin>() == LIBXSMM_DATATYPE_BF16) ? 1 : 0;
+      unsigned int use_i8   = (XsmmDtype<Tin>() == LIBXSMM_DATATYPE_I8)   ? 1 : 0;
+      unsigned int vnni_block_size = (use_bf16 > 0) ? libxsmm_cpuid_dot_pack_factor(LIBXSMM_DATATYPE_BF16) : ((use_i8 > 0) ? libxsmm_cpuid_dot_pack_factor(LIBXSMM_DATATYPE_I8) : 1);
+      spmm_flags = (use_bf16 == 1 || use_i8 == 1) ? (((use_bf16 > 0 && vnni_block_size == 4) || (use_i8 > 0 && vnni_block_size == 8)) ? LIBXSMM_GEMM_VNNI_FLAGS('N', 'T', 'V', 'V') 
+                                                                                                                                      : LIBXSMM_GEMM_VNNI_FLAGS('N', 'N', 'V', 'N'))
+                                                  : LIBXSMM_GEMM_FLAGS('N', 'N');
       if (dt_in == LIBXSMM_DATATYPE_F32) {
         TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_F32, "SPMM Assert\n");
         type = 0;
@@ -2056,8 +2058,11 @@ class SpmmTPP {
         TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_BF16, "SPMM Assert\n");
         type = 1;
       } else {
+        TPP_ASSERT(dt_in == LIBXSMM_DATATYPE_I8, "SPMM Assert\n");
+        TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_I32, "SPMM Assert\n");      
         type = 2;
       }
+
       spmm_type = type;
       kernel.gemm = (libxsmm_gemmfunction)get_kernel();
       initialized = true;
@@ -2074,29 +2079,31 @@ class SpmmTPP {
       snprintf(
           hash,
           200,
-          "spmm_bm%ld_bn%ld_bk%ld_t%ld_beta%d_lda%ld_ldb%ld_ldc%ld_cfg%d_hwspars%d_bn%ld_bk%ld",
+          "spmm_bm%ld_bn%ld_bk%ld_t%ld_beta%d_lda%ld_ldc%ld_cfg%d_bn%ld_bk%ld_flags%ld",
           p->M,
           p->N,
           p->K,
           spmm_type,
           (int)p->beta,
           (long)p->lda,
-          (long)p->ldb,
           (long)p->ldc,
           config,
-          (int)p->hardwire_sparsity,
           p->bcsc_bn,
-          p->bcsc_bk);
+          p->bcsc_bk,
+          (long)spmm_flags);
       return std::string(hash);
     }
     void* build_kernel() override {
       libxsmm_gemm_shape l_shape;
-      libxsmm_bitfield l_flags = LIBXSMM_GEMM_FLAGS('N', 'N');
+      libxsmm_spgemm_config spgemm_config;    
+      unsigned int use_bf16 = (XsmmDtype<Tin>() == LIBXSMM_DATATYPE_BF16) ? 1 : 0;
+      unsigned int use_i8   = (XsmmDtype<Tin>() == LIBXSMM_DATATYPE_I8)   ? 1 : 0;
+      unsigned int vnni_block_size = (use_bf16 > 0) ? libxsmm_cpuid_dot_pack_factor(LIBXSMM_DATATYPE_BF16) : ((use_i8 > 0) ? libxsmm_cpuid_dot_pack_factor(LIBXSMM_DATATYPE_I8) : 1);
+      libxsmm_bitfield l_flags = (use_bf16 == 1 || use_i8 == 1) ? (((use_bf16 > 0 && vnni_block_size == 4) || (use_i8 > 0 && vnni_block_size == 8)) ? LIBXSMM_GEMM_VNNI_FLAGS('N', 'T', 'V', 'V') 
+                                                                                                                                                    : LIBXSMM_GEMM_VNNI_FLAGS('N', 'N', 'V', 'N'))
+                                                                : LIBXSMM_GEMM_FLAGS('N', 'N');
       libxsmm_bitfield l_prefetch_flags = 0;
       libxsmm_xmmfunction l_test_jit = {NULL};
-
-      if (p->hardwire_sparsity == 0)
-        l_flags |= LIBXSMM_GEMM_FLAG_NO_HARDWIRED_SPARSITY;
 
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
@@ -2118,15 +2125,18 @@ class SpmmTPP {
       /* setting update GEMM struct */
       l_shape.m = 1;
       l_shape.n = 0;
-      l_shape.k = 0;
+      l_shape.k = p->K;
       l_shape.lda = p->lda;
-      l_shape.ldb = p->ldb;
+      l_shape.ldb = 0;
       l_shape.ldc = p->ldc;
       l_shape.a_in_type = XsmmDtype<Tin>();
       l_shape.b_in_type = XsmmDtype<Tin>();
       l_shape.out_type = XsmmDtype<Tout>();
-      l_shape.comp_type = LIBXSMM_DATATYPE_F32;
-      l_test_jit.gemm = libxsmm_create_packed_spgemm_bcsc(l_shape, l_flags, l_prefetch_flags, p->M, p->bcsc_bk, p->bcsc_bn, NULL, NULL);       
+      l_shape.comp_type = (use_i8 == 0) ? LIBXSMM_DATATYPE_F32 : LIBXSMM_DATATYPE_I32;
+      spgemm_config.packed_width = p->M;
+      spgemm_config.bk = p->bcsc_bk;
+      spgemm_config.bn = p->bcsc_bn;
+      l_test_jit.gemm = libxsmm_create_packed_spgemm_bcsc(l_shape, l_flags, l_prefetch_flags, spgemm_config);       
 
       return (void*)l_test_jit.gemm;
     }
@@ -2136,6 +2146,7 @@ class SpmmTPP {
     int config;
     libxsmm_xmmfunction kernel;
     long spmm_type = -1;
+    libxsmm_bitfield spmm_flags;
   };
 
  private:
@@ -2145,10 +2156,8 @@ class SpmmTPP {
   long bcsc_bk;
   long bcsc_bn;
   libxsmm_blasint lda;
-  libxsmm_blasint ldb;
   libxsmm_blasint ldc;
   float beta;
-  int hardwire_sparsity;
   SpmmKernel k_spmm_with_tc;
   SpmmKernel k_cfg;
   SpmmKernel k_rls;

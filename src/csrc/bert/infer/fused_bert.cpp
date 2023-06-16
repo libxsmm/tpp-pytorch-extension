@@ -219,10 +219,8 @@ class BertEncoderLayer {
         t_wt_bcsc.bcsc_bk,
         t_wt_bcsc.bcsc_bn,
         F1*F2,
-        -1,
         F2,
-        1.0,
-        0)));
+        1.0)));
     auto loop_scheme = large_cache_opt ? "bA" : "AB";
     auto qkv_loop = ThreadedLoop<2>({{S1}, {t_wt_bcsc.n_blocks}}, loop_scheme);
     {
@@ -418,10 +416,8 @@ class BertEncoderLayer {
         t_wt_bcsc.bcsc_bk,
         t_wt_bcsc.bcsc_bn,
         Nc*Hc,
-        -1,
         Hk,
-        1.0,
-        0)));
+        1.0)));
     auto add_tpp = SCOPEIT((AddTPP<T, T>(S2 * Hk)), EW_ADD);
     auto layer_norm_fwd_tpp = SCOPEIT((LayerNormFwdTPP<T, LT>(Nk, S2, Hk, eps)), LAYER_NORM);
     {
@@ -502,10 +498,8 @@ class BertEncoderLayer {
         t_wt_bcsc.bcsc_bk,
         t_wt_bcsc.bcsc_bn,
         Nc*Hc,
-        -1,
         Hk,
-        1.0,
-        0)));
+        1.0)));
     auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(S2 * Hk), ACT);
     auto in = GetVLAPtr<T>(t_in, {Nc * S2 * Hc});
     auto bias = GetVLAPtr<T>(t_bias, {Hk});
