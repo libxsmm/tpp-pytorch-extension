@@ -67,7 +67,6 @@ inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Ten
   out_sizes[dim] += t_in2.size(dim);
   auto t_out = t_in1.new_empty(out_sizes);
 
-#if 1
   auto B = out_sizes[0];
   auto N = out_sizes[1];
   auto S = out_sizes[2];
@@ -107,72 +106,7 @@ inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Ten
       cpy_tpp(ptrs[i], out[i]);
     }
   }
-#else
-  auto B = out_sizes[0];
-#endif
   return t_out;
-}
-
-template <typename T>
-inline at::Tensor concat(std::vector<at::Tensor> t_lst, int dim) {
-  auto t_0 = t_lst[0];
-  auto ndim =  t_0.dim();
-  dim = dim >= 0 ? dim : dim+ndim;
-
-  auto out_sizes = t_0.sizes().vec();
-  for (int i = 1; i < t_lst.size(); i++) {
-    out_sizes[dim] += t_lst[i].size(dim);
-  }
-  auto t_out = t_0.new_empty(out_sizes);
-
-  return t_out;
-}
-
-template <typename T, typename CpTPP>
-inline void reorder_one(at::Tensor t_old, at::Tensor t_new, long *idx, long B, long d1, CpTPP cpy_tpp) {
-  auto in = GetVLAPtr<T>(t_old, {d1});
-  auto out = GetVLAPtr<T>(t_new, {d1});
-  for (int i = 0; i < B; i++) {
-    auto ind = idx[i];
-    cpy_tpp(in[ind], out[i]);
-  }
-}
-
-static std::vector<std::vector<at::Tensor>> reorder_cache(std::vector<std::vector<at::Tensor>> cache, at::Tensor t_idx) {
-  GlobalPass _gp(OTH);
-  auto B = t_idx.size(0);
-  long NL = cache.size();
-  auto t0 = cache[0][0];
-  auto sizes = t0.sizes().vec();
-  sizes[0] = B;
-  auto d0 = t0.size(0);
-  auto numel = t0.numel();
-  auto d1 = numel / d0;
-  auto cpy_tpp_f32 = SCOPEIT(CpyTPP<float>(d1), EW_COPY);
-  auto cpy_tpp_bf16 = SCOPEIT(CpyTPP<bfloat16>(d1), EW_COPY);
-  auto cpy_tpp_bf8 = SCOPEIT(CpyTPP<bfloat8>(d1), EW_COPY);
-  auto idx = GetVLAPtr<long>(t_idx);
-
-  RECORD_SCOPE(reorder, {t0, t_idx});
-#pragma omp parallel for collapse(2)
-  for (int i = 0; i < NL; i++) {
-    for (int j = 0; j < 2; j++) {
-      auto t_old = cache[i][j];
-      auto t_new = t_old.new_empty(sizes);
-      auto dt = t_old.dtype();
-      if (dt == at::kFloat) {
-        reorder_one<float>(t_old, t_new, idx, B, d1, cpy_tpp_f32);
-      } else if (dt == at::kBFloat16) {
-        reorder_one<bfloat16>(t_old, t_new, idx, B, d1, cpy_tpp_bf16);
-      } else if (dt == at::kBFloat8) {
-        reorder_one<bfloat8>(t_old, t_new, idx, B, d1, cpy_tpp_bf8);
-      } else {
-        TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-      }
-      cache[i][j] = t_new;
-    }
-  }
-  return cache;
 }
 
 template <typename T>
@@ -226,26 +160,6 @@ inline void apply_rotary_pos_emb(
   }
 }
 
-static void apply_rotary_pos_emb_wrap(
-    at::Tensor t_in,
-    at::Tensor t_emb_pos,
-    at::Tensor t_pos,
-    long N,
-    long H) {
-  GlobalPass _gp(FWD);
-
-  auto dt = t_in.dtype();
-  if (dt == at::kFloat) {
-    apply_rotary_pos_emb<float>(t_in, t_emb_pos, t_pos, N, H);
-  } else if (dt == at::kBFloat16) {
-    apply_rotary_pos_emb<bfloat16>(t_in, t_emb_pos, t_pos, N, H);
-  } else if (dt == at::kBFloat8) {
-    apply_rotary_pos_emb<bfloat8>(t_in, t_emb_pos, t_pos, N, H);
-  } else {
-    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-  }
-}
-
 template <typename T, typename LT = T>
 inline void lyr_norm(
     at::Tensor t_in,
@@ -275,29 +189,14 @@ inline void lyr_norm(
   }
 }
 
-static at::Tensor lyr_norm_wrap(
+template <typename T, typename LT = T>
+inline at::Tensor lyr_norm(
     at::Tensor t_in,
     at::Tensor t_gamma,
     at::Tensor t_beta,
-    double eps) {
-  GlobalPass _gp(FWD);
-  auto dt = t_in.dtype();
-  auto ldt = t_gamma.dtype();
+    float eps) {
   auto t_out = at::empty_like(t_in);
-
-  if (dt == at::kFloat && ldt == at::kFloat) {
-    lyr_norm<float, float>(t_in, t_gamma, t_beta, t_out, eps);
-  } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
-    lyr_norm<bfloat16, float>(t_in, t_gamma, t_beta, t_out, eps);
-  } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
-    lyr_norm<bfloat16, bfloat16>(t_in, t_gamma, t_beta, t_out, eps);
-  } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
-    lyr_norm<bfloat8, float>(t_in, t_gamma, t_beta, t_out, eps);
-  } else if (dt == at::kBFloat8 && ldt == at::kBFloat8) {
-    lyr_norm<bfloat8, bfloat8>(t_in, t_gamma, t_beta, t_out, eps);
-  } else {
-    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-  }
+  lyr_norm<T, LT>(t_in, t_gamma, t_beta, t_out, eps);
   return t_out;
 }
 
@@ -319,17 +218,11 @@ inline void fc_plain(
   auto K = Nk * Hk;
 
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-  //std::cout << "XXX " << t_in.dtype() << "  " << t_wt_V.dtype() << std::endl;
 
-  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  //printf("reached at %s:%d\n", __func__, __LINE__);
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-  //printf("reached at %s:%d\n", __func__, __LINE__);
 
   auto Ncb = Nc;
   auto BSb = 64L;
@@ -348,7 +241,6 @@ inline void fc_plain(
 
   {
     RECORD_SCOPE(pln_gemm, {t_in, t_wt_V});
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
     auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
     auto ogemm_loop = ThreadedLoop<3>(
         {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
@@ -383,45 +275,17 @@ inline void fc_plain(
   }
 }
 
-static at::Tensor fc_plain_wrap(
+template <typename T>
+inline at::Tensor fc_plain(
     at::Tensor t_in,
     at::Tensor t_wt,
-    at::Tensor t_bias,
-    long parallel_dim) {
-  GlobalPass _gp(FWD);
-  if (parallel_dim == 1) {
-    t_in = t_in.chunk(my_size, -1)[my_rank].contiguous();
-  }
-	
+    at::Tensor t_bias) {
   auto sizes = t_in.sizes().vec();
   auto wt_sizes = t_wt.sizes();
   sizes[2] = wt_sizes[0] * wt_sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
-  //std::cout << "YYY " << t_out.dtype() << "  " << t_in.dtype() << std::endl;
-  auto dt = t_wt.dtype();
-  if (dt == at::kFloat) {
-    fc_plain<float>(t_in, t_wt, t_bias, t_out);
-  } else if (dt == at::kBFloat16) {
-    fc_plain<bfloat16>(t_in, t_wt, t_bias, t_out);
-  } else if (dt == at::kBFloat8) {
-    fc_plain<bfloat8>(t_in, t_wt, t_bias, t_out);
-  } else {
-    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-  }
-  if (parallel_dim == 0) {
-    std::vector<std::vector<at::Tensor>> ag_vec(1);
-    for (int i = 0; i < my_size; i++) {
-      c10::InferenceMode guard(false);
-      ag_vec[0].push_back(at::empty_like(t_out));
-    }
-    std::vector<at::Tensor> temp_out_vec = {t_out};
-    process_group->allgather(ag_vec, temp_out_vec)->wait();
-    t_out = at::cat(ag_vec[0], -1);
-  } else if (parallel_dim == 1) {
-    std::vector<at::Tensor> temp_out_vec = {t_out};
-    process_group->allreduce(temp_out_vec)->wait();
-  }
+  fc_plain<T>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -474,7 +338,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
 }
 
 template <typename T>
-inline void fc_out(
+inline void fc_add2_scale(
     at::Tensor t_in,
     at::Tensor t_in1,
     at::Tensor t_in2,
@@ -510,8 +374,11 @@ inline void fc_out(
   auto rem = BS % 64;
   if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
+  bool with_bias = (t_bias.numel() > 0);
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
   auto brgemm_tpp = SCOPEITGEMM(
       (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto brgemm_tpp_rem = SCOPEITGEMM(
@@ -534,7 +401,11 @@ inline void fc_out(
           bool is_rem = (s1 + BSb > BS);
           if (!is_rem) {
             if (nc == 0) {
-              copy_bias_tpp(bias[nk], out[s1][nk]);
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
             }
             brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -543,7 +414,11 @@ inline void fc_out(
             }
           } else {
             if (nc == 0) {
-              copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
             }
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
 	    brgemm_tpp.config();
@@ -558,30 +433,21 @@ inline void fc_out(
   }
 }
 
-static at::Tensor fc_out_wrap(
+template <typename T>
+inline at::Tensor fc_add2_scale(
     at::Tensor t_in,
     at::Tensor t_in1,
     at::Tensor t_in2,
     at::Tensor t_wt,
     at::Tensor t_bias,
-    double scale) {
-  GlobalPass _gp(FWD);
+    float scale) {
   auto t_out = at::empty_like(t_in1);
-  auto dt = t_wt.dtype();
-  if (dt == at::kFloat) {
-    fc_out<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
-  } else if (dt == at::kBFloat16) {
-    fc_out<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
-  } else if (dt == at::kBFloat8) {
-    fc_out<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
-  } else {
-    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-  }
+  fc_add2_scale<T>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   return t_out;
 }
 
 template <typename T>
-inline void fc_in(
+inline void fc_gelu(
     at::Tensor t_in,
     at::Tensor t_wt,
     at::Tensor t_bias,
@@ -612,8 +478,11 @@ inline void fc_in(
   auto rem = BS % 64;
   if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
+  bool with_bias = (t_bias.numel() > 0);
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
   auto brgemm_tpp = SCOPEITGEMM(
       (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto brgemm_tpp_rem = SCOPEITGEMM(
@@ -634,7 +503,11 @@ inline void fc_in(
           bool is_rem = (s1 + BSb > BS);
           if (!is_rem) {
             if (nc == 0) {
-              copy_bias_tpp(bias[nk], out[s1][nk]);
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
             }
             brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -642,7 +515,11 @@ inline void fc_in(
             }
           } else {
             if (nc == 0) {
-              copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
             }
             brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
 	    brgemm_tpp.config();
@@ -656,29 +533,287 @@ inline void fc_in(
   }
 }
 
-static at::Tensor fc_in_wrap(
+template <typename T>
+inline at::Tensor fc_gelu(
     at::Tensor t_in,
     at::Tensor t_wt,
     at::Tensor t_bias) {
-  GlobalPass _gp(FWD);
   auto sizes = t_in.sizes().vec();
   auto wt_sizes = t_wt.sizes();
   sizes[2] = wt_sizes[0] * wt_sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
-
-  auto dt = t_wt.dtype();
-  if (dt == at::kFloat) {
-    fc_in<float>(t_in, t_wt, t_bias, t_out);
-  } else if (dt == at::kBFloat16) {
-    fc_in<bfloat16>(t_in, t_wt, t_bias, t_out);
-  } else if (dt == at::kBFloat8) {
-    fc_in<bfloat8>(t_in, t_wt, t_bias, t_out);
-  } else {
-    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-  }
+  fc_gelu<T>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
+
+template <typename T, typename Tout = T>
+inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias, at::Tensor t_out) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
+  auto C = in_sizes[2];
+
+  auto Nc = wt_sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = wt_sizes[0];
+  auto Hk = wt_sizes[3];
+  auto K = Nk * Hk;
+
+  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % BSb;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
+  auto brgemm_tpp = SCOPEITGEMM(
+      (BrgemmTPP<T, Tout>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto brgemm_tpp_rem = SCOPEITGEMM(
+      (BrgemmTPP<T, Tout>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+
+  {
+    RECORD_SCOPE(qkv_gemm, {t_in, t_wt_V});
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto gemm_loop = ThreadedLoop<3>(
+        {{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
+    gemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            brgemm_tpp_rem(
+                in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+            brgemm_tpp.config();
+          }
+        },
+        [&]() { brgemm_tpp.config(); },
+        [&]() { brgemm_tpp.release(); });
+  }
+}
+
+template <typename T, typename Tout = T>
+inline at::Tensor qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
+  auto sizes = t_in.sizes().vec();
+  auto wt_sizes = t_wt.sizes();
+  sizes[2] = wt_sizes[0] * wt_sizes[3];
+  auto t_out = t_in.new_empty(sizes);
+  qkv_gemm<T, Tout>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T, typename Tv>
+struct AttnKernels
+{
+
+  SCOPEIT_DECL(BrgemmTPP<T, float>) a_gemm_tpp;
+  SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
+  SCOPEIT_DECL(AddBiasTPP<T>) add_mask_tpp;
+  SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
+  SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
+  SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
+  SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
+  SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
+  SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
+
+  AttnKernels(long Sqb, long Skb, long H, int pad, int kl_in_vnni, int vl_in_vnni) {
+    //printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb, Skb, H, pad, kl_in_vnni, vl_in_vnni);
+    if (Sqb == 0) Sqb = 1; // hack for unused kernels to not generate 0 size kernels
+    if (Skb == 0) Skb = 2; // hack for unused kernels to not generate 0 size kernels
+    // [Sqb, H] * [H, Skb] = [Sqb, Skb]
+    a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+            Sqb, Skb, H, H, H * Skb, H, Skb, Skb, 0.0, 0, 1, kl_in_vnni)));
+    // [Sqb, Skb]
+    scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
+    add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
+    softmax_fwd_tpp =
+      SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
+    softmax_fixup =
+      SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H)), EW_RCP);
+    // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
+    c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
+            Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
+    // [Sqb, H] --> [Sqb, H]
+    cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H, H, H)), EW_COPY);
+    auto xform = XformTPP::XFORM_XPOSE_TPP;
+    if (!std::is_same<T, float>::value && kl_in_vnni) {
+      xform = XformTPP::XFORM_XPOSE_N2V_TPP;
+    }
+    // [Skb-pad, H] --> [H, Skb]
+    xform_tpp =
+      SCOPEIT(XformExtTPP<T>(Skb-pad, H, H, Skb, H, Skb, xform, true), XPOSE);
+    if (vl_in_vnni != 0)
+      vnni_tpp =
+        SCOPEIT(XformExtTPP<T>(Skb-pad, H, Skb, H, H, H, XformTPP::XFORM_N2V_TPP, true), VNNI);
+  }
+};
+
+template <typename T, typename Tv>
+inline at::Tensor attn(
+    at::Tensor t_QL,
+    at::Tensor t_KL,
+    at::Tensor t_AM,
+    at::Tensor t_VL) {
+  RECORD_SCOPE(attn1, {t_QL, t_KL});
+  auto t_CL = at::empty_like(t_QL);
+  auto sizes = t_QL.sizes();
+  long B = sizes[0];
+  long N = sizes[1];
+  long Sq = sizes[2];
+  long H = sizes[3];
+  float one_by_sqrt_H = 1.0 / sqrtf(H);
+  auto ksizes = t_KL.sizes();
+  long Sk = ksizes[2];
+  long offset = Sk - Sq;
+  constexpr long Sqb = 64;
+  long qrem = Sq % Sqb;
+  bool inline_trans = ((Sq+Sqb-1) / Sqb == 1);
+
+  int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
+  const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
+  long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
+  const long Skb = (!inline_trans ? 512 : SK_BLOCK_SIZE); 
+  long krem = Sk % Skb;
+  int pad = Sk_pad - Sk;
+
+  auto t_KL_TV = t_KL.new_empty({B, N, Sk_pad, H});
+  auto t_VL_V = t_VL;
+  if (VBS != 1) {
+    t_VL_V = t_VL.new_empty({B, N, Sk_pad, H});
+  }
+  if (Sk != Sk_pad) {
+    auto t_tmp = t_AM.new_empty({B, pad});
+    t_tmp.fill_(-10000.0);
+    t_AM = at::cat({t_AM.view({B, -1}), t_tmp}, -1);
+  }
+  auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
+  auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
+  auto KL_TV = GetVLAPtr<T>(t_KL_TV, {N, Sk_pad, H});
+  auto VL = GetVLAPtr<Tv>(t_VL, {N, Sk, H});
+  auto VL_V = GetVLAPtr<Tv>(t_VL_V, {N, Sk_pad, H});
+  auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
+  auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
+  int kl_in_vnni = 1;
+
+
+  AttnKernels<T, Tv> attn_kern[4] =  {
+    AttnKernels<T,Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),
+    AttnKernels<T,Tv>(Sqb, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
+    AttnKernels<T,Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni),
+    AttnKernels<T,Tv>(qrem, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
+  };
+
+  if (!inline_trans) {
+    RECORD_SCOPE(k_trans, {t_QL, t_KL});
+#pragma omp parallel for collapse(3)
+    for (int n = 0; n < N; n++) {
+      for (int b = 0; b < B; b++) {
+        for (int sk = 0; sk < Sk; sk += Skb) {
+          int kid = (sk + Skb > Sk) ? 1 : 0;
+          attn_kern[kid].xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
+          if (VBS != 1)
+            attn_kern[kid].vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
+        }
+      }
+    }
+  }
+
+  {
+    RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
+    {
+#pragma omp parallel for collapse(3)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          for (int sq = 0; sq < Sq; sq += Sqb) {
+            long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
+            int qid = (sq + Sqb > Sq) ? 1 : 0;
+            float omax[qbs], osum[qbs], cmax[qbs], csum[qbs];
+            for (int sk = 0; sk < Sk; sk += Skb) {
+              long kbs = (Sk - sk >= Skb ? Skb : Sk_pad - sk);
+              int kid = qid * 2 + ((sk + Skb > Sk) ? 1 : 0);
+              auto &ak = attn_kern[kid];
+              float AS[qbs][kbs];
+              Tv AST[qbs][kbs];
+              T*k_ptr = KL_TV[b][n][sk];
+              T k_tmp[kbs*H];
+              if (inline_trans) {
+                //ak.xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
+                ak.xform_tpp(KL[b][n][sk], k_tmp);
+                k_ptr = k_tmp;
+              }
+              ak.a_gemm_tpp(QL[b][n][sq], k_ptr, AS[0], 1);
+              for (int sq1 = 0; sq1 < qbs; sq1++) {
+                auto qval = sq + sq1 + offset;
+                for (int sk1 = qval + 1; sk1 < sk+kbs; sk1++) {
+                  AS[sq1][sk1-sk] = -1e9;
+                }
+              }
+              ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
+              if (t_AM.numel() != 0)
+                ak.add_mask_tpp(&AM[b][sk], AS[0]);
+              float *pmax, *psum;
+              if (sk == 0) {
+                pmax = omax;
+                psum = osum;
+              } else {
+                pmax = cmax;
+                psum = csum;
+              }
+              ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
+              Tv tmp[qbs * H];
+              Tv *v_ptr = VL_V[b][n][sk];
+              Tv v_tmp[kbs*H];
+              if (inline_trans && VBS != 1) {
+                //ak.vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
+                ak.vnni_tpp(VL[b][n][sk], v_tmp);
+                v_ptr = v_tmp;
+              }
+              ak.c_gemm_tpp(AST[0], v_ptr, tmp, 1);
+              if (sk == 0) {
+                ak.cvt_tpp(tmp, CL[b][n][sq]);
+              } else {
+                ak.softmax_fixup(tmp, CL[b][n][sq], cmax, csum, omax, osum);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return t_CL;
+}
+
 
 struct GPTJBlock : torch::CustomClassHolder {
  public:
@@ -688,7 +823,7 @@ struct GPTJBlock : torch::CustomClassHolder {
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
   float eps, one_by_sqrt_H;
-  long N, H, H1, H2;
+  long N, H;
   long mp_size; // model_paralle size
   long max_positions, rotary_dim;
 
@@ -723,281 +858,8 @@ struct GPTJBlock : torch::CustomClassHolder {
 
     one_by_sqrt_H = 1.0 / sqrt(H);
     mp_size = t_Wp.size(0) / t_Wq.size(0);
-    auto sizes = t_Wq.sizes();
-    // std::cout << "t_Wq.sizes" << sizes << std::endl;
-    // std::cout << "t_Wp.sizes" << t_Wp.sizes() << std::endl;
-    long K2 = sizes[3];
-    H2 = K2;
-    H1 = H / H2;
     if (my_rank == 0) {
-      std::cout << "mp_size=" << mp_size << " N=" << N << " H2=" << H2 << " H=" << H << " H1=" << H1 << std::endl;
-    }
-  }
-
-  template <typename T, typename Tout = T>
-  inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_out) {
-    auto in_sizes = t_in.sizes();
-    auto BS = in_sizes[0] * in_sizes[1];
-    if (BS > FT_OPT_SIZE) { // first token compute
-      t_wt = wt_tensor_for_first_token<T>(t_wt);
-    }
-    auto wt_sizes = t_wt.sizes();
-    auto C = in_sizes[2];
-
-    auto Nc = wt_sizes[1];
-    auto Hc = C / Nc;
-    auto Nk = wt_sizes[0];
-    auto Hk = wt_sizes[3];
-    auto K = Nk * Hk;
-
-    auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-    auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
-
-    auto Ncb = Nc;
-    auto BSb = 64L;
-    auto rem = BS % BSb;
-    if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
-
-    auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
-    auto zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
-    auto brgemm_tpp = SCOPEITGEMM(
-        (BrgemmTPP<T, Tout>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-    auto brgemm_tpp_rem = SCOPEITGEMM(
-        (BrgemmTPP<T, Tout>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-
-    {
-      RECORD_SCOPE(qkv_gemm, {t_in, t_wt_V});
-      // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-      auto gemm_loop = ThreadedLoop<3>(
-          {{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
-      gemm_loop(
-          [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-            bool is_rem = (s1 + BSb > BS);
-            if (!is_rem) {
-              if (nc == 0) {
-                zero_tpp(out[s1][nk]);
-              }
-              brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            } else {
-              if (nc == 0) {
-                zero_tpp_rem(out[s1][nk]);
-              }
-              brgemm_tpp_rem(
-                  in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-              brgemm_tpp.config();
-            }
-          },
-          [&]() { brgemm_tpp.config(); },
-          [&]() { brgemm_tpp.release(); });
-    }
-  }
-
-  template <typename T, typename Tv>
-  struct AttnKernels
-  {
-
-    SCOPEIT_DECL(BrgemmTPP<T, float>) a_gemm_tpp;
-    SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
-    SCOPEIT_DECL(AddBiasTPP<T>) add_mask_tpp;
-    SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
-    SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
-    SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
-    SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
-    SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
-    SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
-
-    AttnKernels(long Sqb, long Skb, long H, int pad, int kl_in_vnni, int vl_in_vnni) {
-      //printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb, Skb, H, pad, kl_in_vnni, vl_in_vnni);
-      if (Sqb == 0) Sqb = 1;
-      if (Skb == 0) Skb = 2;
-      // [Sqb, H] * [H, Skb] = [Sqb, Skb]
-      a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-              Sqb, Skb, H, H, H * Skb, H, Skb, Skb, 0.0, 0, 1, kl_in_vnni)));
-      // [Sqb, Skb]
-      scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
-      add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
-      softmax_fwd_tpp =
-        SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
-      softmax_fixup =
-        SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H)), EW_RCP);
-      // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
-      c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-              Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
-      // [Sqb, H] --> [Sqb, H]
-      cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H, H, H)), EW_COPY);
-      auto xform = XformTPP::XFORM_XPOSE_TPP;
-      if (!std::is_same<T, float>::value && kl_in_vnni) {
-        xform = XformTPP::XFORM_XPOSE_N2V_TPP;
-      }
-      // [Skb-pad, H] --> [H, Skb]
-      xform_tpp =
-        SCOPEIT(XformExtTPP<T>(Skb-pad, H, H, Skb, H, Skb, xform, true), XPOSE);
-      if (vl_in_vnni != 0)
-        vnni_tpp =
-          SCOPEIT(XformExtTPP<T>(Skb-pad, H, Skb, H, H, H, XformTPP::XFORM_N2V_TPP, true), VNNI);
-    }
-  };
-
-  template <typename T, typename Tv>
-  inline void attn(
-      at::Tensor t_QL,
-      at::Tensor t_KL,
-      at::Tensor t_AM,
-      at::Tensor t_VL,
-      at::Tensor t_CL) {
-    RECORD_SCOPE(attn1, {t_QL, t_KL});
-    auto sizes = t_QL.sizes();
-    long B = sizes[0];
-    long N = sizes[1];
-    long Sq = sizes[2];
-    long H = sizes[3];
-    auto ksizes = t_KL.sizes();
-    long Sk = ksizes[2];
-    long offset = Sk - Sq;
-    constexpr long Sqb = 64;
-    long qrem = Sq % Sqb;
-    bool inline_trans = ((Sq+Sqb-1) / Sqb == 1);
-
-    int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
-    const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
-    long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-    const long Skb = (!inline_trans ? 512 : SK_BLOCK_SIZE); 
-    long krem = Sk % Skb;
-    int pad = Sk_pad - Sk;
-
-    //long H2 = 256;
-    //long H1 = H / H2;
-    // printf("Offset = %ld  Sq = %ld  Sk = %ld  rem = %ld\n", offset, Sq, Sk, rem);
-    // printf("B=%ld S1=%ld S2=%ld H1=%ld H2=%ld N=%ld\n", B, S1, S2, H1, H2,
-    // N);
-    // printf("B=%ld Sq1=%ld Sq2=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk1=%ld Sk2=%ld
-    // offset=%ld\n", B, Sq1, Sq2, N, H, H1, H2, Sk1, Sk2, offset);
-    // printf("B=%ld Sq=%ld N=%ld H=%ld, H1=%ld H2=%ld Sk=%ld offset=%ld\n", B,
-    // Sq, N, H, H1, H2, Sk, offset);
-    auto t_KL_TV = t_KL.new_empty({B, N, Sk_pad, H});
-    auto t_VL_V = t_VL;
-    if (VBS != 1) {
-      t_VL_V = t_VL.new_empty({B, N, Sk_pad, H});
-    }
-    if (Sk != Sk_pad) {
-      auto t_tmp = t_AM.new_empty({B, pad});
-      t_tmp.fill_(-10000.0);
-      t_AM = at::cat({t_AM.view({B, -1}), t_tmp}, -1);
-    }
-    auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
-    auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
-    auto KL_TV = GetVLAPtr<T>(t_KL_TV, {N, Sk_pad, H});
-    auto VL = GetVLAPtr<Tv>(t_VL, {N, Sk, H});
-    auto VL_V = GetVLAPtr<Tv>(t_VL_V, {N, Sk_pad, H});
-    auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
-    auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
-    int kl_in_vnni = 1;
-
-
-    AttnKernels<T, Tv> attn_kern[4] =  {
-      AttnKernels<T,Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T,Tv>(Sqb, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T,Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T,Tv>(qrem, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
-    };
-
-    if (!inline_trans) {
-      RECORD_SCOPE(k_trans, {t_QL, t_KL});
-#pragma omp parallel for collapse(3)
-      for (int n = 0; n < N; n++) {
-        for (int b = 0; b < B; b++) {
-          for (int sk = 0; sk < Sk; sk += Skb) {
-            int kid = (sk + Skb > Sk) ? 1 : 0;
-            attn_kern[kid].xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
-            if (VBS != 1)
-              attn_kern[kid].vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
-          }
-        }
-      }
-    }
-
-    {
-      RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
-      {
-#pragma omp parallel for collapse(3)
-        for (int b = 0; b < B; b++) {
-          for (int n = 0; n < N; n++) {
-            for (int sq = 0; sq < Sq; sq += Sqb) {
-              long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
-              int qid = (sq + Sqb > Sq) ? 1 : 0;
-              float omax[qbs], osum[qbs], cmax[qbs], csum[qbs];
-              for (int sk = 0; sk < Sk; sk += Skb) {
-                long kbs = (Sk - sk >= Skb ? Skb : Sk_pad - sk);
-                int kid = qid * 2 + ((sk + Skb > Sk) ? 1 : 0);
-                auto &ak = attn_kern[kid];
-                //printf("b: %d n: %d sq: %d  sk: %d  qbs: %ld kbs: %ld qid: %d kid: %d\n", b, n, sq, sk, qbs, kbs, qid, kid);
-                float AS[qbs][kbs];
-                Tv AST[qbs][kbs];
-                T*k_ptr = KL_TV[b][n][sk];
-                T k_tmp[kbs*H];
-                if (inline_trans) {
-                  //ak.xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
-                  ak.xform_tpp(KL[b][n][sk], k_tmp);
-                  k_ptr = k_tmp;
-                }
-                ak.a_gemm_tpp(QL[b][n][sq], k_ptr, AS[0], 1);
-                for (int sq1 = 0; sq1 < qbs; sq1++) {
-                  auto qval = sq + sq1 + offset;
-                  for (int sk1 = qval + 1; sk1 < sk+kbs; sk1++) {
-                    AS[sq1][sk1-sk] = -1e9;
-                  }
-                }
-                ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
-                if (t_AM.numel() != 0)
-                  ak.add_mask_tpp(&AM[b][sk], AS[0]);
-                float *pmax, *psum;
-                if (sk == 0) {
-                  pmax = omax;
-                  psum = osum;
-                } else {
-                  pmax = cmax;
-                  psum = csum;
-                }
-                ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
-#if 0
-                if (b == 0 && n == 0 && Sk == 49 && qbs == 1) {
-                  printf("as[%d-%d]: ", (int)sk, (int)(sk+kbs));
-                  for (int i = 0; i < kbs; i++) {
-                    printf("%10g ", AS[0][i]);
-                  }
-                  printf("\n");
-                }
-#endif
-                Tv tmp[qbs * H];
-                Tv *v_ptr = VL_V[b][n][sk];
-                Tv v_tmp[kbs*H];
-                if (inline_trans && VBS != 1) {
-                  //ak.vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
-                  ak.vnni_tpp(VL[b][n][sk], v_tmp);
-                  v_ptr = v_tmp;
-                }
-                ak.c_gemm_tpp(AST[0], v_ptr, tmp, 1);
-                if (sk == 0) {
-                  ak.cvt_tpp(tmp, CL[b][n][sq]);
-                } else {
-                  ak.softmax_fixup(tmp, CL[b][n][sq], cmax, csum, omax, osum);
-                }
-#if 0
-                if (b == 0 && n == 0 && Sk > 45) {
-                  printf("b: %d n: %d sk: %d  kbs: %ld  Sk: %ld  omax: %g osum: %g val: %g %g\n", b, n, sk, kbs, Sk, omax[0], osum[0], (float)CL[b][n][sq][0], (float)CL[b][n][sq][H-1]);
-                }
-#endif
-              }
-            }
-          }
-        }
-      }
+      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
     }
   }
 
@@ -1009,21 +871,11 @@ struct GPTJBlock : torch::CustomClassHolder {
       at::Tensor t_beam_idx,
       at::Tensor t_am,
       at::Tensor t_pid,
-      at::Tensor t_Out,
       bool use_cache) {
-    typedef T Tv;
-    auto vdtype = torch::CppTypeToScalarType<Tv>::value;
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
-    //auto t_QL = at::empty_like(t_HS);
-    auto t_QL = t_HS.new_empty({B, S, N*H});
-    auto t_KL = at::empty_like(t_QL);
-    auto t_VL = at::empty_like(t_QL, vdtype);
-    auto t_CL = at::empty_like(t_QL);
-    auto t_SO = at::empty_like(t_HS);
-    auto t_I = t_HS.new_empty({B, S, t_Wi.size(0) * t_Wi.size(3)});
-    auto t_HS_qkv = at::empty_like(t_HS);
+
     float scale = 1.0 / mp_size;
 
     if (B*S / 64 > 4)
@@ -1031,62 +883,30 @@ struct GPTJBlock : torch::CustomClassHolder {
     else
       large_cache_opt = false;
 
-    //printf("reached at %s:%d\n", __func__, __LINE__);
-    // std::cout << "HS: " << t_HS.sizes() << std::endl;
-    // std::cout << "use_cche: " << use_cache << " t_key_past.numel: " <<
-    // t_key_past.numel() << std::endl;
-    auto t_null = t_HS.new_empty({0}); // at::Tensor().to(t_HS.dtype());
-    lyr_norm<T, LT>(t_HS, t_G, t_B, t_HS_qkv, eps);
-    // std::cout << "HS_qkv: " << t_HS_qkv.sizes() << std::endl;
-    qkv_gemm<T>(t_HS_qkv, t_Wk, t_KL);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
+    auto t_null = t_HS.new_empty({0});
+    auto t_res = t_HS;
+    t_HS = lyr_norm<T, LT>(t_HS, t_G, t_B, eps);
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
     apply_rotary_pos_emb<T>(t_KL, t_EP, t_pid, N, H);
     t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
-    // std::cout << "t_beam_idx: " << t_beam_idx << std::endl;
     if (t_key_past.numel() > 0) {
-      // if (t_key_past.dim() == 4) {
-      //   std::cout << "0t_key_past: " << t_key_past.sizes() << std::endl;
-      //   t_key_past = t_key_past.view({B, -1, N*H});
-      //   std::cout << "1t_key_past: " << t_key_past.sizes() << std::endl;
-      // }
-      // std::cout << "t_key_past: " << t_key_past.sizes() << std::endl;
-      // std::cout << "t_KL: " << t_KL.sizes() << std::endl;
-      //t_KL = at::cat({t_key_past, t_KL}, -2);
       t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
     }
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    // std::cout << t_KL.sizes() << std::endl;
-    qkv_gemm<T, Tv>(t_HS_qkv, t_Wv, t_VL);
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
     t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    // printf("reached at %s:%d\n", __func__, __LINE__);
     if (t_value_past.numel() > 0) {
-      // if (t_value_past.dim() == 4)
-      //   t_value_past = t_value_past.view({B, -1, N*H});
-      //t_VL = at::cat({t_value_past, t_VL}, -2);
       t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
     }
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    qkv_gemm<T>(t_HS_qkv, t_Wq, t_QL);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
+
+    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
     apply_rotary_pos_emb<T>(t_QL, t_EP, t_pid, N, H);
     t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
 
-    // std::cout << "t_QL: " << t_QL.dtype() << std::endl;
-    // std::cout << "t_KL: " << t_KL.dtype() << std::endl;
-    // std::cout << "t_VL: " << t_VL.dtype() << std::endl;
-    // std::cout << "t_CL: " << t_CL.dtype() << std::endl;
-    // std::cout << "t_am: " << t_am.dtype() << std::endl;
-    attn<T, Tv>(t_QL, t_KL, t_am, t_VL, t_CL);
+    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
     t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    qkv_gemm<T>(t_CL, t_Wp, t_SO);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    fc_in<T>(t_HS_qkv, t_Wi, t_Bi, t_I);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
-    fc_out<T>(t_I, t_SO, t_HS, t_Wo, t_Bo, t_Out, scale);
-    // printf("reached at %s:%d\n", __func__, __LINE__);
+    auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+    auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
+    auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
     if (mp_size > 1) {
       RECORD_SCOPE(allred, {t_Out});
       if (!process_group) {
@@ -1118,7 +938,6 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto dt = this->t_Wq.dtype();
     auto ldt = this->t_G.dtype();
     std::vector<at::Tensor> ret;
-    auto t_Out = at::empty_like(t_HS);
 
     // printf("Layer %d\n", i++);
     if (dt == at::kFloat && ldt == at::kFloat) {
@@ -1129,7 +948,6 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_beam_idx,
           t_AM,
           t_pid,
-          t_Out,
           use_cache);
     } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
       ret = this->_forward<bfloat16, float>(
@@ -1139,7 +957,6 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_beam_idx,
           t_AM,
           t_pid,
-          t_Out,
           use_cache);
     } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
       ret = this->_forward<bfloat16, bfloat16>(
@@ -1149,7 +966,6 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_beam_idx,
           t_AM,
           t_pid,
-          t_Out,
           use_cache);
     } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
       ret = this->_forward<bfloat8, float>(
@@ -1159,7 +975,6 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_beam_idx,
           t_AM,
           t_pid,
-          t_Out,
           use_cache);
     } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
       ret = this->_forward<bfloat8, bfloat16>(
@@ -1169,7 +984,6 @@ struct GPTJBlock : torch::CustomClassHolder {
           t_beam_idx,
           t_AM,
           t_pid,
-          t_Out,
           use_cache);
     } else {
       std::cout << "Types: " << dt << "  " << ldt << std::endl;
@@ -1181,12 +995,145 @@ struct GPTJBlock : torch::CustomClassHolder {
   }
 };
 
-REGISTER_SUBMODULE(_fused_gptj_infer, m) {
+static void apply_rotary_pos_emb_wrap(
+    at::Tensor t_in,
+    at::Tensor t_emb_pos,
+    at::Tensor t_pos,
+    long N,
+    long H) {
+  GlobalPass _gp(FWD);
+
+  auto dt = t_in.dtype();
+  if (dt == at::kFloat) {
+    apply_rotary_pos_emb<float>(t_in, t_emb_pos, t_pos, N, H);
+  } else if (dt == at::kBFloat16) {
+    apply_rotary_pos_emb<bfloat16>(t_in, t_emb_pos, t_pos, N, H);
+  } else if (dt == at::kBFloat8) {
+    apply_rotary_pos_emb<bfloat8>(t_in, t_emb_pos, t_pos, N, H);
+  } else {
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+}
+
+static at::Tensor lyr_norm_wrap(
+    at::Tensor t_in,
+    at::Tensor t_gamma,
+    at::Tensor t_beta,
+    double eps) {
+  GlobalPass _gp(FWD);
+  auto dt = t_in.dtype();
+  auto ldt = t_gamma.dtype();
+  auto t_out = at::empty_like(t_in);
+
+  if (dt == at::kFloat && ldt == at::kFloat) {
+    lyr_norm<float, float>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
+    lyr_norm<bfloat16, float>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
+    lyr_norm<bfloat16, bfloat16>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
+    lyr_norm<bfloat8, float>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kBFloat8 && ldt == at::kBFloat8) {
+    lyr_norm<bfloat8, bfloat8>(t_in, t_gamma, t_beta, t_out, eps);
+  } else {
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+  return t_out;
+}
+
+static at::Tensor fc_plain_wrap(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    long parallel_dim) {
+  GlobalPass _gp(FWD);
+  if (parallel_dim == 1) {
+    t_in = t_in.chunk(my_size, -1)[my_rank].contiguous();
+  }
+	
+  auto sizes = t_in.sizes().vec();
+  auto wt_sizes = t_wt.sizes();
+  sizes[2] = wt_sizes[0] * wt_sizes[3];
+
+  auto t_out = t_in.new_empty(sizes);
+  //std::cout << "YYY " << t_out.dtype() << "  " << t_in.dtype() << std::endl;
+  auto dt = t_wt.dtype();
+  if (dt == at::kFloat) {
+    fc_plain<float>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kBFloat16) {
+    fc_plain<bfloat16>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kBFloat8) {
+    fc_plain<bfloat8>(t_in, t_wt, t_bias, t_out);
+  } else {
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+  if (parallel_dim == 0) {
+    std::vector<std::vector<at::Tensor>> ag_vec(1);
+    for (int i = 0; i < my_size; i++) {
+      c10::InferenceMode guard(false);
+      ag_vec[0].push_back(at::empty_like(t_out));
+    }
+    std::vector<at::Tensor> temp_out_vec = {t_out};
+    process_group->allgather(ag_vec, temp_out_vec)->wait();
+    t_out = at::cat(ag_vec[0], -1);
+  } else if (parallel_dim == 1) {
+    std::vector<at::Tensor> temp_out_vec = {t_out};
+    process_group->allreduce(temp_out_vec)->wait();
+  }
+  return t_out;
+}
+
+static at::Tensor fc_add2_scale_wrap(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_in2,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    double scale) {
+  GlobalPass _gp(FWD);
+  auto t_out = at::empty_like(t_in1);
+  auto dt = t_wt.dtype();
+  if (dt == at::kFloat) {
+    fc_add2_scale<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+  } else if (dt == at::kBFloat16) {
+    fc_add2_scale<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+  } else if (dt == at::kBFloat8) {
+    fc_add2_scale<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+  } else {
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+  return t_out;
+}
+
+static at::Tensor fc_gelu_wrap(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias) {
+  GlobalPass _gp(FWD);
+  auto sizes = t_in.sizes().vec();
+  auto wt_sizes = t_wt.sizes();
+  sizes[2] = wt_sizes[0] * wt_sizes[3];
+
+  auto t_out = t_in.new_empty(sizes);
+
+  auto dt = t_wt.dtype();
+  if (dt == at::kFloat) {
+    fc_gelu<float>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kBFloat16) {
+    fc_gelu<bfloat16>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kBFloat8) {
+    fc_gelu<bfloat8>(t_in, t_wt, t_bias, t_out);
+  } else {
+    TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+  }
+  return t_out;
+}
+
+REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("layer_norm", &lyr_norm_wrap, "TPP layer norm");
-  m.def("fc_in", &fc_in_wrap, "TPP fc_in");
-  m.def("fc_out", &fc_out_wrap, "TPP fc_out");
+  m.def("fc_gelu", &fc_gelu_wrap, "TPP fc_gelu");
+  m.def("fc_add2_scale", &fc_add2_scale_wrap, "TPP fc_add2_scale");
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
-  m.def("reorder_cache", &reorder_cache, "TPP reorder_cache");
   m.def("set_pg", &set_pg);
   m.def(
       "apply_rotary_pos_emb",
@@ -1194,16 +1141,14 @@ REGISTER_SUBMODULE(_fused_gptj_infer, m) {
       "TPP apply_rotary_pos_emb");
   py::class_<GPTJBlock>(m, "GPTJBlock")
       .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
-      //.def("setMasks", &BertEncoder::setMasks)
       .def("forward", &GPTJBlock::forward);
 }
 
-TORCH_LIBRARY(tpp_gptj, m) {
+TORCH_LIBRARY(tpp_llm, m) {
   m.def("layer_norm", &lyr_norm_wrap);
-  m.def("fc_in", &fc_in_wrap);
-  m.def("fc_out", &fc_out_wrap);
+  m.def("fc_gelu", &fc_gelu_wrap);
+  m.def("fc_add2_scale", &fc_add2_scale_wrap);
   m.def("fc_plain", &fc_plain_wrap);
-  m.def("reorder_cache", &reorder_cache);
   m.def("set_pg", &set_pg);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())

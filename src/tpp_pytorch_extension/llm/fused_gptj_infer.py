@@ -18,7 +18,7 @@ from tpp_pytorch_extension.utils.blocked_layout import (
     get_blocking_signature,
 )
 from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
-from tpp_pytorch_extension._C import _fused_gptj_infer as fused_gptj_cpp
+from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
@@ -76,7 +76,7 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         # print("BIas:", bias.shape, bias.dtype)
         input = input.to(self.weight.dtype)
         parallel_dim = self.parallel_dim if self.model_parallel == True else -1
-        ret = torch.ops.tpp_gptj.fc_plain(input, self.weight, bias, parallel_dim)
+        ret = torch.ops.tpp_llm.fc_plain(input, self.weight, bias, parallel_dim)
         # if self.model_parallel == True:
         #     with torch.inference_mode(False):
         #         if self.parallel_dim == 0:
@@ -254,7 +254,7 @@ def all_reduce(t):
 
 def set_pg():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
-        fused_gptj_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
+        fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 
 def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):
@@ -301,7 +301,7 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             pos_embd_dim = self.attn.rotary_dim or self.attn.embed_dim
             embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
         params += [embed_positions]
-        self.cpp_block = torch.classes.tpp_gptj.GPTJBlock(
+        self.cpp_block = torch.classes.tpp_llm.GPTJBlock(
             params,
             self.ln_1.eps,
             self.attn.num_attention_heads // wsize,
@@ -336,7 +336,7 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     """
     return tuple(layer_past + (beam_idx,) for layer_past in past)
 
-    # ret = fused_gptj_cpp.reorder_cache(past, beam_idx)
+    # ret = fused_llm_cpp.reorder_cache(past, beam_idx)
     # return tuple(
     #     tuple(p for p in layer_past) for layer_past in ret
     # )
