@@ -137,7 +137,7 @@ inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Ten
 }
 
 template <typename T>
-inline void apply_rotary_pos_emb(
+inline void apply_rotary_pos_emb_gptj(
     at::Tensor t_in,
     at::Tensor t_emb_pos,
     at::Tensor t_pos,
@@ -180,6 +180,49 @@ inline void apply_rotary_pos_emb(
             //   printf("%d %d %d %d  %d: %g %g    %g %g\n", b, s, n, h, p, in0,
             //   out0, in1, out1);
             // }
+          }
+        }
+      }
+    }
+  }
+}
+
+template <typename T>
+inline void apply_rotary_pos_emb_llama(
+    at::Tensor& t_in,
+    at::Tensor& t_emb_pos,
+    at::Tensor& t_pos,
+    long N,
+    long H) {
+  auto in_sizes = t_in.sizes(); // in[B][S][F]
+  auto MP = t_emb_pos.size(1); // Max Pos
+  auto HR = t_emb_pos.size(2); // rotary_dim
+  auto B = in_sizes[0];
+  auto S = in_sizes[1];
+  auto COFF = HR / 2;
+
+  auto in = GetVLAPtr<T>(t_in, {S, N, H}); // [B][S][N][H]
+  auto emb_pos = GetVLAPtr<float>(t_emb_pos, {MP, HR}); // [MP][HR]
+  auto pos = GetVLAPtr<long>(t_pos, {S}); // [MB][S]
+  //printf("MP=%ld HR=%ld B=%ld S=%ld N=%ld H=%ld\n", MP, HR, B, S, N, H);
+
+  {
+    RECORD_SCOPE(rotary, {t_in, t_emb_pos, t_pos});
+
+    #pragma omp parallel for collapse(3)
+    for (int b = 0; b < B; b++) {
+      for (int s = 0; s < S; s++) {
+        for (int n = 0; n < N; n++) {
+          for (int h2 = 0; h2 < HR/2; h2++) {
+            float in0 = in[b][s][n][h2];
+            float in1 = in[b][s][n][COFF + h2];
+            int p = pos[b][s];
+            float cos = emb_pos[0][p][h2];
+            float sin = emb_pos[1][p][h2];
+            float out0 = in0 * cos - in1 * sin;
+            float out1 = in1 * cos + in0 * sin;
+            in[b][s][n][h2] = out0;
+            in[b][s][n][COFF + h2] = out1;
           }
         }
       }
@@ -377,6 +420,106 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
 
 #endif
   return t_new;
+}
+
+template <typename T>
+inline void fc_mul(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    at::Tensor t_out) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
+  auto C = in_sizes[2];
+
+  auto Nc = wt_sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = wt_sizes[0];
+  auto Hk = wt_sizes[3];
+  auto K = Nk * Hk;
+
+  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+  auto brgemm_tpp = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto brgemm_tpp_rem = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto mul_tpp = SCOPEIT((MulTPP<T, T>(BSb, Hk, K, K)), EW_MUL);
+  auto mul_tpp_rem = SCOPEIT((MulTPP<T, T>(rem, Hk, K, K)), EW_MUL);
+
+  {
+    RECORD_SCOPE(o_gemm, {t_in, t_wt_V});
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto ogemm_loop = ThreadedLoop<3>(
+        {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
+    ogemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
+            }
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              mul_tpp_rem(in1[s1][nk], out[s1][nk], out[s1][nk]);
+            }
+          }
+        },
+        [&]() { brgemm_tpp.config(); },
+        [&]() { brgemm_tpp.release(); });
+  }
+}
+
+template <typename T>
+inline at::Tensor fc_mul(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias) {
+  auto t_out = at::empty_like(t_in1);
+  fc_mul<T>(t_in, t_in1, t_wt, t_bias, t_out);
+  return t_out;
 }
 
 template <typename T>
@@ -1062,7 +1205,7 @@ inline at::Tensor attn(
     t_VL_V = t_VL.new_empty({B, N, Sk_pad, H});
   }
   if (Sk != Sk_pad) {
-    TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
+    //TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
     if (!am_is_2d) {
       auto t_tmp = t_AM.new_empty({B, pad});
       t_tmp.fill_(-10000.0);
@@ -1248,7 +1391,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_res = t_HS;
     t_HS = lyr_norm<T, LT>(t_HS, t_G, t_B, eps);
     auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb<T>(t_KL, t_EP, t_pid, N, H);
+    apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
     t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
     if (t_key_past.numel() > 0) {
       t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
@@ -1260,7 +1403,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     }
 
     auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
-    apply_rotary_pos_emb<T>(t_QL, t_EP, t_pid, N, H);
+    apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
     t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
 
     auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
@@ -1545,7 +1688,187 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
   }
 };
 
-static void apply_rotary_pos_emb_wrap(
+struct LlamaDecoderLayer : torch::CustomClassHolder {
+ public:
+  at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
+  at::Tensor t_Wg, t_Wu, t_Wd;
+  at::Tensor t_Gi, t_Gpa;
+  at::Tensor t_EP; // embed_positions
+  float eps;
+  long N, H;
+  long max_positions, rotary_dim;
+  long mp_size; // model_paralle size
+
+  LlamaDecoderLayer(
+      std::vector<at::Tensor> params,
+      double eps,
+      long N,
+      long H,
+      long max_positions,
+      long rotary_dim)
+      : eps(eps),
+        N(N),
+        H(H),
+        max_positions(max_positions),
+        rotary_dim(rotary_dim) {
+    int i = 0;
+    t_Gi = params[i++]; // input_ln_gamma
+
+    t_Wq = params[i++]; // q_proj
+    t_Wk = params[i++]; // k_proj
+    t_Wv = params[i++]; // v_proj
+    t_Wp = params[i++]; // out_proj
+
+    t_Gpa = params[i++]; // post_attention_ln_gamma
+
+    t_Wg = params[i++]; // fc_gate
+    t_Wu = params[i++]; // fc_up
+    t_Wd = params[i++]; // fc_down
+
+    t_EP = params[i++]; // embed_positions
+
+    mp_size = t_Wp.size(0) / t_Wq.size(0);
+    if (my_rank == 0) {
+      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
+    }
+  }
+
+  template <typename T, typename LT = T>
+  std::vector<at::Tensor> _forward(
+      at::Tensor t_HS,
+      at::Tensor t_key_past,
+      at::Tensor t_value_past,
+      at::Tensor t_beam_idx,
+      at::Tensor t_am,
+      at::Tensor t_pid,
+      bool use_cache) {
+    auto sizes = t_HS.sizes();
+    auto B = sizes[0];
+    auto S = sizes[1];
+
+    float scale = 1.0 / mp_size;
+
+    if (B*S / 64 > 4)
+      large_cache_opt = true;
+    else
+      large_cache_opt = false;
+
+    auto t_null = t_HS.new_empty({0});
+    auto t_res = t_HS;
+    t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, N, H);
+    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    if (t_key_past.numel() > 0) {
+      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
+    }
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    if (t_value_past.numel() > 0) {
+      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
+    }
+
+    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
+    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, N, H);
+    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+
+    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
+    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+    auto t_SO = fc_add_scale<T>(t_CL, t_res, t_Wp, t_null, scale);
+    if (mp_size > 1) {
+      allreduce(t_SO);
+    }
+
+    t_res = t_SO;
+
+    t_HS = llama_rms_norm<T, LT>(t_SO, t_Gpa, eps);
+
+    auto t_I = fc_silu<T>(t_HS, t_Wg, t_null);
+    t_I = fc_mul<T>(t_HS, t_I, t_Wu, t_null);
+    auto t_Out = fc_add_scale<T>(t_I, t_res, t_Wd, t_null, scale);
+    if (mp_size > 1) {
+      allreduce(t_Out);
+    }
+
+    if (use_cache) {
+      return {t_Out, t_KL, t_VL};
+    } else {
+      return {t_Out, t_null, t_null};
+    }
+  }
+
+  std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      bool use_cache) {
+    GlobalPass _gp(FWD);
+    RECORD_FUNCTION("llama_fwd", std::vector<c10::IValue>());
+    auto t_HS = t_inp[0];
+    auto t_key_past = t_inp[1];
+    auto t_value_past = t_inp[2];
+    auto t_beam_idx = t_inp[3];
+    auto t_AM = t_inp[4];
+    auto t_pid = t_inp[5];
+    auto dt = this->t_Wq.dtype();
+    auto ldt = this->t_Gi.dtype();
+    std::vector<at::Tensor> ret;
+
+    // printf("Layer %d\n", i++);
+    if (dt == at::kFloat && ldt == at::kFloat) {
+      ret = this->_forward<float, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          t_pid,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
+      ret = this->_forward<bfloat16, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          t_pid,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
+      ret = this->_forward<bfloat16, bfloat16>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          t_pid,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
+      ret = this->_forward<bfloat8, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          t_pid,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
+      ret = this->_forward<bfloat8, bfloat16>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          t_pid,
+          use_cache);
+    } else {
+      std::cout << "Types: " << dt << "  " << ldt << std::endl;
+      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+    }
+    // printf("Returning Layer \n");
+
+    return ret;
+  }
+};
+
+static void apply_rotary_pos_emb_gptj_wrap(
     at::Tensor t_in,
     at::Tensor t_emb_pos,
     at::Tensor t_pos,
@@ -1555,11 +1878,11 @@ static void apply_rotary_pos_emb_wrap(
 
   auto dt = t_in.dtype();
   if (dt == at::kFloat) {
-    apply_rotary_pos_emb<float>(t_in, t_emb_pos, t_pos, N, H);
+    apply_rotary_pos_emb_gptj<float>(t_in, t_emb_pos, t_pos, N, H);
   } else if (dt == at::kBFloat16) {
-    apply_rotary_pos_emb<bfloat16>(t_in, t_emb_pos, t_pos, N, H);
+    apply_rotary_pos_emb_gptj<bfloat16>(t_in, t_emb_pos, t_pos, N, H);
   } else if (dt == at::kBFloat8) {
-    apply_rotary_pos_emb<bfloat8>(t_in, t_emb_pos, t_pos, N, H);
+    apply_rotary_pos_emb_gptj<bfloat8>(t_in, t_emb_pos, t_pos, N, H);
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -1680,15 +2003,18 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
   m.def(
-      "apply_rotary_pos_emb",
-      &apply_rotary_pos_emb_wrap,
-      "TPP apply_rotary_pos_emb");
+      "apply_rotary_pos_emb_gptj",
+      &apply_rotary_pos_emb_gptj_wrap,
+      "TPP apply_rotary_pos_emb_gptj");
   py::class_<GPTJBlock>(m, "GPTJBlock")
       .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer")
       .def(py::init<std::vector<at::Tensor>, double, double, long, long>())
       .def("forward", &OPTDecoderLayer::forward);
+  py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer")
+      .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def("forward", &LlamaDecoderLayer::forward);
 }
 
 TORCH_LIBRARY(tpp_llm, m) {
@@ -1703,4 +2029,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.class_<OPTDecoderLayer>("OPTDecoderLayer")
       .def(torch::init<std::vector<at::Tensor>, double, double, long, long>())
       .def("forward", &OPTDecoderLayer::forward);
+  m.class_<LlamaDecoderLayer>("LlamaDecoderLayer")
+      .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def("forward", &LlamaDecoderLayer::forward);
 }
