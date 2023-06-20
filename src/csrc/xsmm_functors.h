@@ -858,34 +858,39 @@ class AddBiasTPP {
   BinaryTPP kernel;
 };
 
-template <typename Tin, typename Tout = Tin>
+
+template <typename Tin, typename Tout = Tin, typename Tin2 = Tin>
 class AddTPP {
  public:
   AddTPP() {}
   AddTPP(int N) : AddTPP(1, N) {}
   AddTPP(int rows, int cols) : AddTPP(rows, cols, cols, cols) {}
-  AddTPP(int rows, int cols, int ldi, int ldo)
+  AddTPP(int rows, int cols, int ldi, int ldo) : AddTPP(rows, cols, ldi, ldi, ldo) {}
+  AddTPP(int rows, int cols, int ldi0, int ldi1, int ldo)
       : rows(rows),
         cols(cols),
-        ldi(ldi),
+        ldi0(ldi0),
+        ldi1(ldi1),
         ldo(ldo),
         kernel(
             rows,
             cols,
-            ldi,
+            ldi0,
+            ldi1,
             ldo,
             XsmmDtype<Tin>(),
+            XsmmDtype<Tin2>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_NONE,
             LIBXSMM_MELTW_TYPE_BINARY_ADD) {}
-  void operator()(Tin* in0, Tin* in1, Tout* out) {
+  void operator()(Tin* in0, Tin2* in1, Tout* out) {
     kernel((void*)in0, (void*)in1, (void*)out);
   }
-  void ref(Tin* in0, Tin* in1, Tout* out) {
+  void ref(Tin* in0, Tin2* in1, Tout* out) {
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        out[r * ldo + c] = (float)in0[r * ldi + c] + (float)in1[r * ldi + c];
+        out[r * ldo + c] = (float)in0[r * ldi0 + c] + (float)in1[r * ldi1 + c];
       }
     }
   }
@@ -893,7 +898,8 @@ class AddTPP {
  private:
   int rows = 0;
   int cols = 0;
-  int ldi;
+  int ldi0;
+  int ldi1;
   int ldo;
   BinaryTPP kernel;
 };
@@ -2715,16 +2721,22 @@ class SiLUFwdTPP {
             cols,
             ldi,
             ldo,
+            ldo,
+            XsmmDtype<T>(),
             XsmmDtype<T>(),
             XsmmDtype<T>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_NONE,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-  void operator()(T* in, T* out, T* sigout) {
+  void operator()(T* in, T* out, T* sigout = nullptr) {
+    T tmp[rows*ldo];
+    if (sigout == nullptr) sigout = tmp;
     sigmoid((void*)in, (void*)sigout);
     mul((void*)in, (void*)sigout, (void*)out);
   }
-  void ref(T* in, T* out, T* sigout) {
+  void ref(T* in, T* out, T* sigout = nullptr) {
+    T tmp[rows*ldo];
+    if (sigout == nullptr) sigout = tmp;
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
         sigout[i * ldo + j] = 1. / (1. + exp(-in[i * ldi + j]));

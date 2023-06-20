@@ -58,6 +58,33 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
   printf("Setting PG: my_size = %d  my_rank = %d\n", my_size, my_rank);
 }
 
+inline void allreduce(at::Tensor t_in) {
+  RECORD_SCOPE(allred, {t_in});
+  if (!process_group) {
+    printf("Missing process group when using model parallel, use set_pg()\n");
+    exit(1);
+  }
+  std::vector<at::Tensor> temp_vec = {t_in};
+  process_group->allreduce(temp_vec)->wait();
+}
+
+inline at::Tensor allgather(at::Tensor t_in) {
+  RECORD_SCOPE(allred, {t_in});
+  if (!process_group) {
+    printf("Missing process group when using model parallel, use set_pg()\n");
+    exit(1);
+  }
+  std::vector<std::vector<at::Tensor>> ag_vec(1);
+  for (int i = 0; i < my_size; i++) {
+    c10::InferenceMode guard(false);
+    ag_vec[0].push_back(at::empty_like(t_in));
+  }
+  std::vector<at::Tensor> temp_vec = {t_in};
+  process_group->allgather(ag_vec, temp_vec)->wait();
+  auto t_out = at::cat(ag_vec[0], -1);
+  return t_out;
+}
+
 template <typename T>
 inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Tensor t_beam_idx) {
   auto ndim =  t_in1.dim();
@@ -200,6 +227,21 @@ inline at::Tensor lyr_norm(
   return t_out;
 }
 
+template <typename T, typename LT = T>
+inline at::Tensor llama_rms_norm(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    float eps) {
+
+  auto orig_dt = t_in.dtype();
+  auto t_var = t_in.to(at::kFloat).pow(2).mean(-1, true);
+  auto t_tmp = t_in * at::rsqrt(t_var + eps);
+  auto ret = t_wt * t_tmp;
+  ret = ret.to(orig_dt);
+
+  return ret;
+}
+
 template <typename T>
 inline void fc_plain(
     at::Tensor t_in,
@@ -335,6 +377,108 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
 
 #endif
   return t_new;
+}
+
+template <typename T>
+inline void fc_add_scale(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    at::Tensor t_out,
+    float scale) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
+  auto C = in_sizes[2];
+
+  auto Nc = wt_sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = wt_sizes[0];
+  auto Hk = wt_sizes[3];
+  auto K = Nk * Hk;
+
+  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+  auto brgemm_tpp = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto brgemm_tpp_rem = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
+  auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
+
+  {
+    RECORD_SCOPE(o_gemm, {t_in, t_wt_V});
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto ogemm_loop = ThreadedLoop<3>(
+        {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
+    ogemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              sadd_tpp(in1[s1][nk], out[s1][nk], scale);
+            }
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              sadd_tpp_rem(in1[s1][nk], out[s1][nk], scale);
+            }
+          }
+        },
+        [&]() { brgemm_tpp.config(); },
+        [&]() { brgemm_tpp.release(); });
+  }
+}
+
+template <typename T>
+inline at::Tensor fc_add_scale(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    float scale) {
+  auto t_out = at::empty_like(t_in1);
+  fc_add_scale<T>(t_in, t_in1, t_wt, t_bias, t_out, scale);
+  return t_out;
 }
 
 template <typename T>
@@ -547,6 +691,208 @@ inline at::Tensor fc_gelu(
   return t_out;
 }
 
+template <typename T>
+inline void fc_silu(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    at::Tensor t_out) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
+  auto C = in_sizes[2];
+
+  auto Nc = wt_sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = wt_sizes[0];
+  auto Hk = wt_sizes[3];
+  auto K = Nk * Hk;
+
+  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+  auto brgemm_tpp = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto brgemm_tpp_rem = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto silu_fwd_tpp = SCOPEIT(SiLUFwdTPP<T>(BSb, Hk, K, K), ACT);
+  auto silu_fwd_tpp_rem = SCOPEIT(SiLUFwdTPP<T>(rem, Hk, K, K), ACT);
+
+  {
+    RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto igemm_loop =
+        ThreadedLoop<3>({{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
+    igemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              silu_fwd_tpp(out[s1][nk], out[s1][nk]);
+            }
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              silu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+            }
+          }
+        },
+        [&]() { brgemm_tpp.config(); },
+        [&]() { brgemm_tpp.release(); });
+  }
+}
+
+template <typename T>
+inline at::Tensor fc_silu(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias) {
+  auto sizes = t_in.sizes().vec();
+  auto wt_sizes = t_wt.sizes();
+  sizes[2] = wt_sizes[0] * wt_sizes[3];
+
+  auto t_out = t_in.new_empty(sizes);
+  fc_silu<T>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T>
+inline void fc_relu(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    at::Tensor t_out) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto wt_sizes = t_wt.sizes();
+  auto C = in_sizes[2];
+
+  auto Nc = wt_sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = wt_sizes[0];
+  auto Hk = wt_sizes[3];
+  auto K = Nk * Hk;
+
+  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % 64;
+  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+  auto brgemm_tpp = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto brgemm_tpp_rem = SCOPEITGEMM(
+      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BSb, Hk, K, K, false), ACT);
+  auto relu_fwd_tpp_rem = SCOPEIT(ReLUFwdTPP<T>(rem, Hk, K, K, false), ACT);
+
+  {
+    RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto igemm_loop =
+        ThreadedLoop<3>({{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
+    igemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              relu_fwd_tpp(out[s1][nk], out[s1][nk]);
+            }
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+	    brgemm_tpp.config();
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              relu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+            }
+          }
+        },
+        [&]() { brgemm_tpp.config(); },
+        [&]() { brgemm_tpp.release(); });
+  }
+}
+
+template <typename T>
+inline at::Tensor fc_relu(
+    at::Tensor t_in,
+    at::Tensor t_wt,
+    at::Tensor t_bias) {
+  auto sizes = t_in.sizes().vec();
+  auto wt_sizes = t_wt.sizes();
+  sizes[2] = wt_sizes[0] * wt_sizes[3];
+
+  auto t_out = t_in.new_empty(sizes);
+  fc_relu<T>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
 template <typename T, typename Tout = T>
 inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias, at::Tensor t_out) {
   auto in_sizes = t_in.sizes();
@@ -640,6 +986,7 @@ struct AttnKernels
   SCOPEIT_DECL(BrgemmTPP<T, float>) a_gemm_tpp;
   SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
   SCOPEIT_DECL(AddBiasTPP<T>) add_mask_tpp;
+  SCOPEIT_DECL(AddTPP<T,float,float>) add_2dmask_tpp;
   SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
   SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
   SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
@@ -657,6 +1004,7 @@ struct AttnKernels
     // [Sqb, Skb]
     scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
     add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
+    add_2dmask_tpp = SCOPEIT((AddTPP<T,float,float>(Sqb, Skb)), EW_ADD);
     softmax_fwd_tpp =
       SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
     softmax_fixup =
@@ -699,6 +1047,7 @@ inline at::Tensor attn(
   constexpr long Sqb = 64;
   long qrem = Sq % Sqb;
   bool inline_trans = ((Sq+Sqb-1) / Sqb == 1);
+  bool am_is_2d = t_AM.size(2) != 1;
 
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
@@ -713,9 +1062,16 @@ inline at::Tensor attn(
     t_VL_V = t_VL.new_empty({B, N, Sk_pad, H});
   }
   if (Sk != Sk_pad) {
-    auto t_tmp = t_AM.new_empty({B, pad});
-    t_tmp.fill_(-10000.0);
-    t_AM = at::cat({t_AM.view({B, -1}), t_tmp}, -1);
+    TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
+    if (!am_is_2d) {
+      auto t_tmp = t_AM.new_empty({B, pad});
+      t_tmp.fill_(-10000.0);
+      t_AM = at::cat({t_AM.view({B, -1}), t_tmp}, -1);
+    } else {
+      auto t_tmp = t_AM.new_empty({B, 1, Sq, pad});
+      t_tmp.fill_(-10000.0);
+      t_AM = at::cat({t_AM, t_tmp}, -1);
+    }
   }
   auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
   auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
@@ -724,6 +1080,7 @@ inline at::Tensor attn(
   auto VL_V = GetVLAPtr<Tv>(t_VL_V, {N, Sk_pad, H});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
+  auto AM2 = GetVLAPtr<T>(t_AM, {Sq, Sk_pad});
   int kl_in_vnni = 1;
 
 
@@ -780,8 +1137,12 @@ inline at::Tensor attn(
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
-              if (t_AM.numel() != 0)
-                ak.add_mask_tpp(&AM[b][sk], AS[0]);
+              if (t_AM.numel() != 0) {
+                if (am_is_2d)
+                  ak.add_2dmask_tpp(&AM2[b][sq][sk], AS[0], AS[0]);
+                else
+                  ak.add_mask_tpp(&AM[b][sk], AS[0]);
+              }
               float *pmax, *psum;
               if (sk == 0) {
                 pmax = omax;
@@ -908,13 +1269,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
     if (mp_size > 1) {
-      RECORD_SCOPE(allred, {t_Out});
-      if (!process_group) {
-        printf("Missing process group when using model parallel, use set_pg()\n");
-        exit(1);
-      }
-      std::vector<at::Tensor> temp_out_vec = {t_Out};
-      process_group->allreduce(temp_out_vec)->wait();
+      allreduce(t_Out);
     }
 
     if (use_cache) {
@@ -995,6 +1350,201 @@ struct GPTJBlock : torch::CustomClassHolder {
   }
 };
 
+struct OPTDecoderLayer : torch::CustomClassHolder {
+ public:
+  at::Tensor t_Wq, t_Wk, t_Wv, t_Wp; // wt and bias for attn
+  at::Tensor t_Bq, t_Bk, t_Bv, t_Bp;
+  at::Tensor t_Wi, t_Wo; // wt and bias for fc1 and fc2
+  at::Tensor t_Bi, t_Bo;
+  at::Tensor t_G1, t_B1; // Gamma and Beta for attention layernorm
+  at::Tensor t_G2, t_B2; // Gamma and Beta for MLP layernorm 
+  float eps1, eps2;
+  long N, H;
+  long mp_size; // model_paralle size
+
+  OPTDecoderLayer(
+      std::vector<at::Tensor> params,
+      double eps1,
+      double eps2,
+      long N,
+      long H)
+      : eps1(eps1),
+        eps2(eps2),
+        N(N),
+        H(H) {
+    int i = 0;
+    t_G1 = params[i++]; // ln_gamma, lnorm before attention
+    t_B1 = params[i++]; // ln_beta
+    t_G2 = params[i++]; // ln_gamma, lnorm before mlp
+    t_B2 = params[i++]; // ln_beta
+
+    t_Wq = params[i++]; // q_proj
+    t_Bq = params[i++];
+    t_Wk = params[i++]; // k_proj
+    t_Bk = params[i++];
+    t_Wv = params[i++]; // v_proj
+    t_Bv = params[i++];
+    t_Wp = params[i++]; // out_proj
+    t_Bp = params[i++];
+
+    t_Wi = params[i++]; // fc1
+    t_Bi = params[i++];
+    t_Wo = params[i++]; // fc2
+    t_Bo = params[i++];
+
+    mp_size = t_Wp.size(0) / t_Wq.size(0);
+    if (my_rank == 0) {
+      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
+    }
+  }
+
+  template <typename T, typename LT = T>
+  std::vector<at::Tensor> _forward(
+      at::Tensor& t_HS,
+      at::Tensor& t_key_past,
+      at::Tensor& t_value_past,
+      at::Tensor t_beam_idx,
+      at::Tensor& t_am,
+      bool do_layer_norm_before,
+      bool use_cache) {
+    auto sizes = t_HS.sizes();
+    auto B = sizes[0];
+    auto S = sizes[1];
+
+    float scale = 1.0 / mp_size;
+
+    if (B*S / 64 > 4)
+      large_cache_opt = true;
+    else
+      large_cache_opt = false;
+
+    auto t_null = t_HS.new_empty({0}); // at::Tensor().to(t_HS.dtype());
+
+		auto t_res = t_HS;
+    if (do_layer_norm_before) {
+      t_HS = lyr_norm<T, LT>(t_HS, t_G1, t_B1, eps1);
+    }
+
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_Bk);
+    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    if (t_key_past.numel() > 0) {
+      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
+    }
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_Bv);
+    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    if (t_value_past.numel() > 0) {
+      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
+    }
+
+    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_Bq);
+    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+
+    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
+    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+
+    t_HS = fc_add_scale<T>(t_CL, t_res, t_Wp, t_Bp, scale);
+    if (mp_size > 1) {
+      allreduce(t_HS);
+    }
+
+    if (!do_layer_norm_before) {
+      t_HS = lyr_norm<T, LT>(t_HS, t_G1, t_B1, eps1);
+    }
+
+    t_res = t_HS;
+
+    if (do_layer_norm_before) {
+      t_HS = lyr_norm<T, LT>(t_HS, t_G2, t_B2, eps2);
+    }
+
+    t_HS = fc_relu<T>(t_HS, t_Wi, t_Bi);
+    t_HS = fc_add_scale<T>(t_HS, t_res, t_Wo, t_Bo, scale);
+
+    if (mp_size > 1) {
+      allreduce(t_HS);
+    }
+
+    if (!do_layer_norm_before) {
+      t_HS = lyr_norm<T, LT>(t_HS, t_G2, t_B2, eps2);
+    }
+
+    if (use_cache) {
+      return {t_HS, t_KL, t_VL};
+    } else {
+      return {t_HS, t_null, t_null};
+    }
+  }
+
+  std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      bool do_layer_norm_before,
+      bool use_cache) {
+    GlobalPass _gp(FWD);
+    RECORD_FUNCTION("opt_fwd", std::vector<c10::IValue>());
+    auto t_HS = t_inp[0];
+    auto t_key_past = t_inp[1];
+    auto t_value_past = t_inp[2];
+    auto t_beam_idx = t_inp[3];
+    auto t_AM = t_inp[4];
+    auto dt = this->t_Wq.dtype();
+    auto ldt = this->t_G1.dtype();
+    std::vector<at::Tensor> ret;
+
+    // printf("Layer %d\n", i++);
+    if (dt == at::kFloat && ldt == at::kFloat) {
+      ret = this->_forward<float, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          do_layer_norm_before,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
+      ret = this->_forward<bfloat16, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          do_layer_norm_before,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
+      ret = this->_forward<bfloat16, bfloat16>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          do_layer_norm_before,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
+      ret = this->_forward<bfloat8, float>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          do_layer_norm_before,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
+      ret = this->_forward<bfloat8, bfloat16>(
+          t_HS,
+          t_key_past,
+          t_value_past,
+          t_beam_idx,
+          t_AM,
+          do_layer_norm_before,
+          use_cache);
+    } else {
+      std::cout << "Types: " << dt << "  " << ldt << std::endl;
+      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+    }
+
+    return ret;
+  }
+};
+
 static void apply_rotary_pos_emb_wrap(
     at::Tensor t_in,
     at::Tensor t_emb_pos,
@@ -1067,18 +1617,12 @@ static at::Tensor fc_plain_wrap(
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
-  if (parallel_dim == 0) {
-    std::vector<std::vector<at::Tensor>> ag_vec(1);
-    for (int i = 0; i < my_size; i++) {
-      c10::InferenceMode guard(false);
-      ag_vec[0].push_back(at::empty_like(t_out));
+  if (my_size > 1) {
+    if (parallel_dim == 0) {
+      t_out = allgather(t_out);
+    } else if (parallel_dim == 1) {
+      allreduce(t_out);
     }
-    std::vector<at::Tensor> temp_out_vec = {t_out};
-    process_group->allgather(ag_vec, temp_out_vec)->wait();
-    t_out = at::cat(ag_vec[0], -1);
-  } else if (parallel_dim == 1) {
-    std::vector<at::Tensor> temp_out_vec = {t_out};
-    process_group->allreduce(temp_out_vec)->wait();
   }
   return t_out;
 }
@@ -1142,6 +1686,9 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   py::class_<GPTJBlock>(m, "GPTJBlock")
       .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
+  py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer")
+      .def(py::init<std::vector<at::Tensor>, double, double, long, long>())
+      .def("forward", &OPTDecoderLayer::forward);
 }
 
 TORCH_LIBRARY(tpp_llm, m) {
@@ -1153,4 +1700,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
       .def("forward", &GPTJBlock::forward);
+  m.class_<OPTDecoderLayer>("OPTDecoderLayer")
+      .def(torch::init<std::vector<at::Tensor>, double, double, long, long>())
+      .def("forward", &OPTDecoderLayer::forward);
 }
