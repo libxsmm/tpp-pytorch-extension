@@ -131,12 +131,12 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     rank = get_rank()
     wsize = get_size()
     if wsize > 1:
-        ShardLinear(self.self_attn.q_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.k_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.v_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.out_proj, 1, rank, wsize)
-        ShardLinear(self.fc1, 0, rank, wsize)
-        ShardLinear(self.fc2, 1, rank, wsize)
+        ShardLinear(self.self_attn.q_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.out_proj, 1, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.fc1, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.fc2, 1, rank, wsize, self.self_attn.head_dim)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -168,7 +168,6 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             params,
             self.self_attn_layer_norm.eps,
             self.final_layer_norm.eps,
-            self.self_attn.num_heads // wsize,
             self.self_attn.head_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")

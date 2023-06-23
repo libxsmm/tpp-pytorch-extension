@@ -134,12 +134,12 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     rank = get_rank()
     wsize = get_size()
     if wsize > 1:
-        ShardLinear(self.attn.q_proj, 0, rank, wsize)
-        ShardLinear(self.attn.k_proj, 0, rank, wsize)
-        ShardLinear(self.attn.v_proj, 0, rank, wsize)
-        ShardLinear(self.attn.out_proj, 1, rank, wsize)
-        ShardLinear(self.mlp.fc_in, 0, rank, wsize)
-        ShardLinear(self.mlp.fc_out, 1, rank, wsize)
+        ShardLinear(self.attn.q_proj, 0, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.attn.k_proj, 0, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.attn.v_proj, 0, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.attn.out_proj, 1, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.mlp.fc_in, 0, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.mlp.fc_out, 1, rank, wsize, self.attn.head_dim)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -173,7 +173,6 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.cpp_block = torch.classes.tpp_llm.GPTJBlock(
             params,
             self.ln_1.eps,
-            self.attn.num_attention_heads // wsize,
             self.attn.head_dim,
             self.attn.bias.size(-1),
             self.attn.rotary_dim,

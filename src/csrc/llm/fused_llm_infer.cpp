@@ -68,16 +68,20 @@ inline void allreduce(at::Tensor t_in) {
   process_group->allreduce(temp_vec)->wait();
 }
 
-inline at::Tensor allgather(at::Tensor t_in) {
+inline at::Tensor allgather(at::Tensor t_in, std::vector<long> &split_sizes) {
   RECORD_SCOPE(allred, {t_in});
   if (!process_group) {
     printf("Missing process group when using model parallel, use set_pg()\n");
     exit(1);
   }
   std::vector<std::vector<at::Tensor>> ag_vec(1);
+  auto sz = t_in.sizes().vec();
+  auto dim = t_in.dim() - 1;
+  TPP_ASSERT(split_sizes.size() == my_size, "Length of split vector doesn't match group size");
   for (int i = 0; i < my_size; i++) {
     c10::InferenceMode guard(false);
-    ag_vec[0].push_back(at::empty_like(t_in));
+    sz[dim] = split_sizes[i];
+    ag_vec[0].push_back(t_in.new_empty(sz));
   }
   std::vector<at::Tensor> temp_vec = {t_in};
   process_group->allgather(ag_vec, temp_vec)->wait();
@@ -1328,18 +1332,15 @@ struct GPTJBlock : torch::CustomClassHolder {
   at::Tensor t_EP; // embed_positions
   float eps, one_by_sqrt_H;
   long N, H;
-  long mp_size; // model_paralle size
   long max_positions, rotary_dim;
 
   GPTJBlock(
       std::vector<at::Tensor> params,
       double eps,
-      long N,
       long H,
       long max_positions,
       long rotary_dim)
       : eps(eps),
-        N(N),
         H(H),
         max_positions(max_positions),
         rotary_dim(rotary_dim) {
@@ -1360,10 +1361,9 @@ struct GPTJBlock : torch::CustomClassHolder {
 
     t_EP = params[i++]; // embed_positions
 
-    one_by_sqrt_H = 1.0 / sqrt(H);
-    mp_size = t_Wp.size(0) / t_Wq.size(0);
+    N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
-      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
+      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
     }
   }
 
@@ -1380,7 +1380,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto B = sizes[0];
     auto S = sizes[1];
 
-    float scale = 1.0 / mp_size;
+    float scale = 1.0 / my_size;
 
     if (B*S / 64 > 4)
       large_cache_opt = true;
@@ -1411,7 +1411,7 @@ struct GPTJBlock : torch::CustomClassHolder {
     auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
     auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
-    if (mp_size > 1) {
+    if (my_size > 1) {
       allreduce(t_Out);
     }
 
@@ -1503,17 +1503,14 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
   at::Tensor t_G2, t_B2; // Gamma and Beta for MLP layernorm 
   float eps1, eps2;
   long N, H;
-  long mp_size; // model_paralle size
 
   OPTDecoderLayer(
       std::vector<at::Tensor> params,
       double eps1,
       double eps2,
-      long N,
       long H)
       : eps1(eps1),
         eps2(eps2),
-        N(N),
         H(H) {
     int i = 0;
     t_G1 = params[i++]; // ln_gamma, lnorm before attention
@@ -1535,9 +1532,9 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
     t_Wo = params[i++]; // fc2
     t_Bo = params[i++];
 
-    mp_size = t_Wp.size(0) / t_Wq.size(0);
+    N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
-      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
+      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
     }
   }
 
@@ -1554,7 +1551,7 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
     auto B = sizes[0];
     auto S = sizes[1];
 
-    float scale = 1.0 / mp_size;
+    float scale = 1.0 / my_size;
 
     if (B*S / 64 > 4)
       large_cache_opt = true;
@@ -1586,7 +1583,7 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
     t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
 
     t_HS = fc_add_scale<T>(t_CL, t_res, t_Wp, t_Bp, scale);
-    if (mp_size > 1) {
+    if (my_size > 1) {
       allreduce(t_HS);
     }
 
@@ -1603,7 +1600,7 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
     t_HS = fc_relu<T>(t_HS, t_Wi, t_Bi);
     t_HS = fc_add_scale<T>(t_HS, t_res, t_Wo, t_Bo, scale);
 
-    if (mp_size > 1) {
+    if (my_size > 1) {
       allreduce(t_HS);
     }
 
@@ -1697,17 +1694,14 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
   float eps;
   long N, H;
   long max_positions, rotary_dim;
-  long mp_size; // model_paralle size
 
   LlamaDecoderLayer(
       std::vector<at::Tensor> params,
       double eps,
-      long N,
       long H,
       long max_positions,
       long rotary_dim)
       : eps(eps),
-        N(N),
         H(H),
         max_positions(max_positions),
         rotary_dim(rotary_dim) {
@@ -1727,9 +1721,9 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
 
     t_EP = params[i++]; // embed_positions
 
-    mp_size = t_Wp.size(0) / t_Wq.size(0);
+    N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
-      std::cout << "mp_size=" << mp_size << " N=" << N << " H=" << H << std::endl;
+      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
     }
   }
 
@@ -1746,7 +1740,7 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
     auto B = sizes[0];
     auto S = sizes[1];
 
-    float scale = 1.0 / mp_size;
+    float scale = 1.0 / my_size;
 
     if (B*S / 64 > 4)
       large_cache_opt = true;
@@ -1775,7 +1769,7 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
     auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
     t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
     auto t_SO = fc_add_scale<T>(t_CL, t_res, t_Wp, t_null, scale);
-    if (mp_size > 1) {
+    if (my_size > 1) {
       allreduce(t_SO);
     }
 
@@ -1786,7 +1780,7 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
     auto t_I = fc_silu<T>(t_HS, t_Wg, t_null);
     t_I = fc_mul<T>(t_HS, t_I, t_Wu, t_null);
     auto t_Out = fc_add_scale<T>(t_I, t_res, t_Wd, t_null, scale);
-    if (mp_size > 1) {
+    if (my_size > 1) {
       allreduce(t_Out);
     }
 
@@ -1918,10 +1912,12 @@ static at::Tensor fc_plain_wrap(
     at::Tensor t_in,
     at::Tensor t_wt,
     at::Tensor t_bias,
-    long parallel_dim) {
+    long parallel_dim,
+    std::vector<long> split_sizes) {
   GlobalPass _gp(FWD);
   if (parallel_dim == 1) {
-    t_in = t_in.chunk(my_size, -1)[my_rank].contiguous();
+    // t_in = t_in.chunk(my_size, -1)[my_rank].contiguous();
+    t_in = t_in.split(split_sizes, -1)[my_rank].contiguous();
   }
 	
   auto sizes = t_in.sizes().vec();
@@ -1942,7 +1938,7 @@ static at::Tensor fc_plain_wrap(
   }
   if (my_size > 1) {
     if (parallel_dim == 0) {
-      t_out = allgather(t_out);
+      t_out = allgather(t_out, split_sizes);
     } else if (parallel_dim == 1) {
       allreduce(t_out);
     }
@@ -2007,13 +2003,13 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
       &apply_rotary_pos_emb_gptj_wrap,
       "TPP apply_rotary_pos_emb_gptj");
   py::class_<GPTJBlock>(m, "GPTJBlock")
-      .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer")
-      .def(py::init<std::vector<at::Tensor>, double, double, long, long>())
+      .def(py::init<std::vector<at::Tensor>, double, double, long>())
       .def("forward", &OPTDecoderLayer::forward);
   py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer")
-      .def(py::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
 }
 
@@ -2024,12 +2020,12 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
   m.class_<GPTJBlock>("GPTJBlock")
-      .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   m.class_<OPTDecoderLayer>("OPTDecoderLayer")
-      .def(torch::init<std::vector<at::Tensor>, double, double, long, long>())
+      .def(torch::init<std::vector<at::Tensor>, double, double, long>())
       .def("forward", &OPTDecoderLayer::forward);
   m.class_<LlamaDecoderLayer>("LlamaDecoderLayer")
-      .def(torch::init<std::vector<at::Tensor>, double, long, long, long, long>())
+      .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
 }
