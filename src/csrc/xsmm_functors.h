@@ -3857,6 +3857,157 @@ class SoftMaxFixUpTPP {
 };
 
 template <typename T, typename LT = T>
+class RMSNormFwdTPP {
+ public:
+  RMSNormFwdTPP() {}
+  RMSNormFwdTPP(int S1, int S2, int S3, float eps)
+      : S1(S1),
+        S2(S2),
+        S3(S3),
+        eps(eps),
+        reduce_cols_kernel(
+            S1,
+            S3,
+            S2 * S3,
+            S3,
+            XsmmDtype<T>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_REDUCE_COLS,
+            LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X2_OP_ADD),
+        reduce_rows_kernel(
+            1,
+            S3,
+            S3,
+            1,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_REDUCE_ROWS,
+            LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_ADD),
+        eqn(S1, S2, S3) {}
+  void operator()(
+      T* inp,
+      LT* gamma,
+      float* var,
+      T* out) {
+    LIBXSMM_ALIGNED(float tmp[S3], 64);
+    const float c = 1.0 / ((float)S1 * S3);
+    float v, s;
+    libxsmm_matrix_eqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[3];
+    eqn_param.inputs = arg_array;
+    arg_array[1].primary = &s;
+    arg_array[2].primary = (void*)gamma;
+    for (int s2 = 0; s2 < S2; s2++) {
+      reduce_cols_kernel((void*)&inp[s2 * S3], (void*)tmp);
+      reduce_rows_kernel((void*)tmp, (void*)&v);
+      v = v * c;
+      // v = LIBXSMM_MAX(v, 0.0f);
+      v = 1.0f / ((float)sqrt(v + eps));
+      if (var)
+        var[s2] = v;
+      s = v;
+      arg_array[0].primary = (void*)&inp[s2 * S3];
+      eqn_param.output.primary = (void*)&out[s2 * S3];
+      eqn(&eqn_param);
+    }
+  }
+  void ref(T* pinp, 
+          LT* pgamma, 
+          float* var, 
+          T* pout) {
+    int s1, s2, s3;
+    LIBXSMM_VLA_DECL(3, T, inp, pinp, S2, S3);
+    LIBXSMM_VLA_DECL(3, T, out, pout, S2, S3);
+    LIBXSMM_VLA_DECL(2, LT, gamma, pgamma, S3);
+    for (s2 = 0; s2 < S2; s2++) {
+      float v = 0;
+      float c = 1.0 / (S1 * S3);
+      for (s1 = 0; s1 < S1; s1++) {
+        for (s3 = 0; s3 < S3; s3++) {
+          v += LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3) *
+              LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3);
+        }
+      }
+      v = v * c;
+      // v = LIBXSMM_MAX(v, 0.0f);
+      v = 1.0f / ((float)sqrt(v + eps));
+      float s = v;
+      for (s1 = 0; s1 < S1; s1++) {
+        for (s3 = 0; s3 < S3; s3++) {
+          LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) =
+              (LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3) * s) *
+                  LIBXSMM_VLA_ACCESS(2, gamma, s1, s3, S3);
+        }
+      }
+    }
+  }
+  class Eqn : BaseTPP {
+   public:
+    Eqn() {}
+    Eqn(int S1, int S2, int S3) : S1(S1), S2(S2), S3(S3) {
+      kernel = (libxsmm_matrix_eqn_function)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_matrix_eqn_param* eqn_param) {
+      if (!initialized)
+        return;
+      kernel(eqn_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "rmsnorm_fwd_eqn_t1%d_t2%d_S1%d_S2%d_S3%d",
+          XsmmDtype<T>(),
+          XsmmDtype<LT>(),
+          S1,
+          S2,
+          S3);
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      auto in_dt = XsmmDtype<T>();
+      auto bg_dt = XsmmDtype<LT>();
+      auto out_dt = XsmmDtype<T>();
+      libxsmm_blasint tmp_ld = 1;
+      libxsmm_blasint tmp_ld2 = S3;
+      libxsmm_blasint ld = S2 * S3;
+      libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1 |
+              LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_arg(my_eqn0, S3, S1, ld, 0, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+      meqn_push_arg(my_eqn0, S3, S1, tmp_ld2, 2, 0, bg_dt);
+      debug_print_eqn_tree(my_eqn0); // printf
+      return (void*)meqn_dispatch(S3, S1, &ld, out_dt, my_eqn0);
+    }
+
+   private:
+    int S1, S2, S3;
+    libxsmm_matrix_eqn_function kernel = NULL;
+  };
+
+ private:
+  int S1, S2, S3;
+  float eps;
+  UnaryTPP reduce_cols_kernel;
+  UnaryTPP reduce_rows_kernel;
+  Eqn eqn;
+};
+
+template <typename T, typename LT = T>
 class LayerNormFwdTPP {
  public:
   LayerNormFwdTPP() {}

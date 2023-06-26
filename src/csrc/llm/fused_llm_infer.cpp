@@ -270,19 +270,50 @@ inline at::Tensor lyr_norm(
   return t_out;
 }
 
+
+template <typename T, typename LT = T>
+inline void rms_norm(
+    at::Tensor t_in,
+    at::Tensor t_gamma,
+    at::Tensor t_out,
+    float eps) {
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  auto K = in_sizes[2];
+
+  auto in = GetVLAPtr<T>(t_in, {K});
+  auto gamma = GetVLAPtr<LT>(t_gamma);
+  auto out = GetVLAPtr<T>(t_out, {K});
+
+  auto rms_norm_fwd_tpp =
+      SCOPEIT((RMSNormFwdTPP<T, LT>(1, 1, K, eps)), LAYER_NORM);
+
+  {
+    RECORD_SCOPE(lnorm, {t_in, t_gamma});
+
+  #pragma omp parallel for
+    for (int b = 0; b < BS; b++) {
+      rms_norm_fwd_tpp(in[b], gamma, nullptr, out[b]);
+    }
+  }
+}
+
 template <typename T, typename LT = T>
 inline at::Tensor llama_rms_norm(
     at::Tensor t_in,
     at::Tensor t_wt,
     float eps) {
 
-  auto orig_dt = t_in.dtype();
-  auto t_var = t_in.to(at::kFloat).pow(2).mean(-1, true);
-  auto t_tmp = t_in * at::rsqrt(t_var + eps);
-  auto ret = t_wt * t_tmp;
-  ret = ret.to(orig_dt);
+  // auto orig_dt = t_in.dtype();
+  // auto t_var = t_in.to(at::kFloat).pow(2).mean(-1, true);
+  // auto t_tmp = t_in * at::rsqrt(t_var + eps);
+  // auto ret = t_wt * t_tmp;
+  // ret = ret.to(orig_dt);
+  // return ret;
 
-  return ret;
+  auto t_out = at::empty_like(t_in);
+  rms_norm<T, LT>(t_in, t_wt, t_out, eps);
+  return t_out;
 }
 
 template <typename T>
