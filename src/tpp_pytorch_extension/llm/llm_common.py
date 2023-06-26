@@ -71,7 +71,8 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         # print("BIas:", bias.shape, bias.dtype)
         input = input.to(self.weight.dtype)
         parallel_dim = self.parallel_dim if self.model_parallel == True else -1
-        ret = torch.ops.tpp_llm.fc_plain(input, self.weight, bias, parallel_dim)
+        split_sizes = self.split_sizes if hasattr(self, "split_sizes") else []
+        ret = torch.ops.tpp_llm.fc_plain(input, self.weight, bias, parallel_dim, split_sizes)
         # if self.model_parallel == True:
         #     with torch.inference_mode(False):
         #         if self.parallel_dim == 0:
@@ -127,15 +128,25 @@ def FixLinear(self, bk=None, bc=None, layer_dtype=global_layer_dtype, parallel_d
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
     
-def ShardLinear(m, dim, rank, size):
+def ShardLinear(m, dim, rank, size, block_size=1):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
-    m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
+    dim_size = m.weight.shape[dim]
+    assert(dim_size % block_size == 0, f"dim_size ({dim_size}) is not multiple of block_size ({block_size})")
+    num_blocks = dim_size // block_size
+    split_size = ((num_blocks + size - 1) // size) * block_size
+    m.split_sizes = [split_size] * size
+    m.split_sizes[-1] -= (split_size * size - dim_size)
+    # print(m.split_sizes)
+    assert(sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size")
+    # m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
+    m.weight.data = torch.split(m.weight.data, split_size, dim)[rank].contiguous()
     if m.weight.is_meta:
         m.weight = torch.nn.Parameter(torch.empty_like(m.weight.data, device='cpu'))
     if m.bias is not None:
         if dim == 0:
-            m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
+            # m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
+            m.bias.data = torch.split(m.bias.data, split_size, dim)[rank].contiguous()
         else:
             m.bias.data = m.bias.data / size
         if m.bias.is_meta:

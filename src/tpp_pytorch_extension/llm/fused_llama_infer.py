@@ -164,13 +164,13 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
     rank = get_rank()
     wsize = get_size()
     if wsize > 1:
-        ShardLinear(self.self_attn.q_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.k_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.v_proj, 0, rank, wsize)
-        ShardLinear(self.self_attn.o_proj, 1, rank, wsize)
-        ShardLinear(self.mlp.gate_proj, 0, rank, wsize)
-        ShardLinear(self.mlp.up_proj, 0, rank, wsize)
-        ShardLinear(self.mlp.down_proj, 1, rank, wsize)
+        ShardLinear(self.self_attn.q_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.o_proj, 1, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.mlp.gate_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.mlp.up_proj, 0, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.mlp.down_proj, 1, rank, wsize, self.self_attn.head_dim)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -209,7 +209,6 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
         self.cpp_block = torch.classes.tpp_llm.LlamaDecoderLayer(
             params,
             self.input_layernorm.variance_epsilon,
-            self.self_attn.num_heads // wsize,
             self.self_attn.head_dim,
             self.self_attn.max_position_embeddings,
             self.self_attn.head_dim,
