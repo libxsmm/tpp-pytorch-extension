@@ -36,6 +36,7 @@ from .llm_common import (
     block,
     compare,
     global_layer_dtype,
+    get_layer_past_and_offset,
 )
 
 
@@ -84,25 +85,11 @@ class GPTJBlock(BlockedModule):
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        if layer_past is not None:
-            #print("KP: ", layer_past[0].shape)
-            #print("VP: ", layer_past[1].shape)
-            add_tensor_or_empty(layer_past[0])
-            add_tensor_or_empty(layer_past[1])
-            if len(layer_past) > 2:
-                add_tensor_or_empty(layer_past[2].to(torch.long))
-            else:
-                inputs.append(dummy_tensor_int)
-        else:
-            inputs += [dummy_tensor, dummy_tensor, dummy_tensor_int]
         add_tensor_or_empty(attention_mask)
+        layer_past, offset = get_layer_past_and_offset(layer_past, 1)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
-            offset = 0
-            if layer_past is not None:
-                offset = layer_past[0].shape[1]
             position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
-
         add_tensor_or_empty(position_ids)
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
@@ -110,7 +97,11 @@ class GPTJBlock(BlockedModule):
         #print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
         # print("PHS:", hidden_states.shape)
-        hs, k, v = self.cpp_block.forward(inputs, use_cache)
+        layer_past = [
+            i.to(self.layer_dtype) if i.is_floating_point() else i for i in layer_past
+        ]
+
+        hs, k, v = self.cpp_block.forward(inputs, layer_past, use_cache)
         #print("K: ", k.shape)
         #print("V: ", v.shape)
 

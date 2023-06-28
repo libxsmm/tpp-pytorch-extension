@@ -36,6 +36,7 @@ from .llm_common import (
     block,
     compare,
     global_layer_dtype,
+    get_layer_past_and_offset,
 )
 
 class OPTDecoderLayer(BlockedModule):
@@ -83,22 +84,11 @@ class OPTDecoderLayer(BlockedModule):
         hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
-        dummy_tensor_int = torch.Tensor().to(torch.long)
 
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        if past_key_value is not None:
-            #print("KP: ", layer_past[0].shape)
-            #print("VP: ", layer_past[1].shape)
-            add_tensor_or_empty(past_key_value[0])
-            add_tensor_or_empty(past_key_value[1])
-            if len(past_key_value) > 2:
-                add_tensor_or_empty(past_key_value[2].to(torch.long))
-            else:
-                inputs.append(dummy_tensor_int)
-        else:
-            inputs += [dummy_tensor, dummy_tensor, dummy_tensor_int]
+        past_key_value, offset = get_layer_past_and_offset(past_key_value, -2)
         add_tensor_or_empty(attention_mask)
 
         inputs = [
@@ -107,7 +97,11 @@ class OPTDecoderLayer(BlockedModule):
         #print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
         # print("PHS:", hidden_states.shape)
-        hs, k, v = self.cpp_block.forward(inputs, self.do_layer_norm_before, use_cache)
+        past_key_value = [
+            i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
+        ]
+
+        hs, k, v = self.cpp_block.forward(inputs, past_key_value, use_cache)
         #print("K: ", k.shape)
         #print("V: ", v.shape)
 
@@ -169,6 +163,7 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             self.self_attn_layer_norm.eps,
             self.final_layer_norm.eps,
             self.self_attn.head_dim,
+            self.do_layer_norm_before,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 

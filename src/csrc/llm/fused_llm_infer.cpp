@@ -1205,6 +1205,83 @@ struct AttnKernels
   }
 };
 
+template <typename T>
+inline at::Tensor attn(
+    at::Tensor t_QL,
+    at::Tensor t_KL,
+    at::Tensor t_QL_cache,
+    at::Tensor t_KL_cache,
+    long offset,
+    std::vector<std::vector<long>> beam_idx,
+    at::Tensor t_AM,
+    at::Tensor t_VL) {
+  RECORD_SCOPE(attn1, {t_QL, t_KL});
+  auto t_CL = at::empty_like(t_QL);
+  auto sizes = t_QL.sizes();
+  long B = sizes[0];
+  long N = sizes[1];
+  long Sq = sizes[2];
+  long H = sizes[3];
+  float one_by_sqrt_H = 1.0 / sqrtf(H);
+  auto ksizes = t_KL.sizes();
+  long Sk = ksizes[2];
+  TPP_ASSERT(Sq == 1 && Sk == 1, "Sq and Sk must be 1");
+  auto FSk = offset + Sk;
+  const bool am_valid = (t_AM.numel() > 0);
+
+  auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
+  auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
+  auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
+  auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
+  auto AM = GetVLAPtr<T>(t_AM, {FSk});
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+  auto VL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+
+  auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
+  auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
+  auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
+  auto softmax_fwd_tpp =
+    SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
+  {
+    RECORD_SCOPE(ac_gemm, {t_QL, t_KL});
+    {
+#pragma omp parallel for collapse(2)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          float AS[Sk];
+          for (int sk = 0; sk < FSk; sk++) {
+            AS[sk] = 0.0f;
+            if (sk < offset) {
+              int bid = beam_idx[sk][b];
+              dot_tpp(QL[b][n][0], KL_C[sk][bid][n], &AS[sk]);
+            } else {
+              dot_tpp(QL[b][n][0], KL[b][n][0], &AS[sk]);
+              cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+            }
+            AS[sk] *= one_by_sqrt_H;
+            if (am_valid) {
+              AS[sk] += AM[b][sk];
+            }
+          }
+          softmax_fwd_tpp(1, AS, AS);
+          zero_tpp(CL[b][n][0]);
+          for (int sk = 0; sk < FSk; sk++) {
+            if (sk < offset) {
+              int bid = beam_idx[sk][b];
+              scale_add_tpp(VL_C[sk][bid][n], CL[b][n][0], AS[sk]);
+            } else {
+              scale_add_tpp(VL[b][n][0], CL[b][n][0], AS[sk]);
+              cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+            }
+          }
+        }
+      }
+    }
+  } 
+}
+
+
 template <typename T, typename Tv>
 inline at::Tensor attn(
     at::Tensor t_QL,
@@ -1353,15 +1430,69 @@ inline at::Tensor attn(
   return t_CL;
 }
 
+template<typename T>
+struct LLMBlock : torch::CustomClassHolder {
+ public:
+   std::string name;
+   at::Tensor t_dummy;
+   at::Tensor t_dummy_int;
+   caffe2::TypeMeta dt;
+   caffe2::TypeMeta ldt;
 
-struct GPTJBlock : torch::CustomClassHolder {
+   LLMBlock(std::string name, at::Tensor& t, at::Tensor& lt) : name(name), t_dummy(t.new_empty({0})), t_dummy_int(t.new_empty({0}, at::kLong)), dt(t.dtype()), ldt(lt.dtype()) { }
+  std::vector<at::Tensor> forward_common(
+      std::vector<at::Tensor> &t_inp,
+      std::vector<at::Tensor> &t_cache,
+      bool use_cache) {
+    GlobalPass _gp(FWD);
+    RECORD_FUNCTION(name, std::vector<c10::IValue>());
+    std::vector<at::Tensor> ret;
+    auto self = static_cast<T*>(this);
+
+    if (dt == at::kFloat && ldt == at::kFloat) {
+      ret = self->template _forward<float, float>(
+          t_inp,
+          t_cache,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
+      ret = self->template _forward<bfloat16, float>(
+          t_inp,
+          t_cache,
+          use_cache);
+    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
+      ret = self->template _forward<bfloat16, bfloat16>(
+          t_inp,
+          t_cache,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
+      ret = self->template _forward<bfloat8, float>(
+          t_inp,
+          t_cache,
+          use_cache);
+    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
+      ret = self->template _forward<bfloat8, bfloat16>(
+          t_inp,
+          t_cache,
+          use_cache);
+    } else {
+      std::cout << "Types: " << dt << "  " << ldt << std::endl;
+      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
+    }
+    // printf("Returning Layer \n");
+
+    return ret;
+  }
+
+};
+
+struct GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
-  float eps, one_by_sqrt_H;
+  float eps;
   long N, H;
   long max_positions, rotary_dim;
 
@@ -1371,7 +1502,8 @@ struct GPTJBlock : torch::CustomClassHolder {
       long H,
       long max_positions,
       long rotary_dim)
-      : eps(eps),
+      : LLMBlock("gptj_fwd", params[2], params[0]),
+        eps(eps),
         H(H),
         max_positions(max_positions),
         rotary_dim(rotary_dim) {
@@ -1398,15 +1530,28 @@ struct GPTJBlock : torch::CustomClassHolder {
     }
   }
 
+  std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      std::vector<at::Tensor> t_cache,
+      bool use_cache) {
+    return this->forward_common(t_inp, t_cache, use_cache);
+  }
+
   template <typename T, typename LT = T>
   std::vector<at::Tensor> _forward(
-      at::Tensor t_HS,
-      at::Tensor t_key_past,
-      at::Tensor t_value_past,
-      at::Tensor t_beam_idx,
-      at::Tensor t_am,
-      at::Tensor t_pid,
+      std::vector<at::Tensor>& t_inp,
+      std::vector<at::Tensor>& t_cache,
       bool use_cache) {
+    auto t_HS = t_inp[0];
+    auto t_am = t_inp[1];
+    auto t_pid = t_inp[2];
+    auto t_key_past = this->t_dummy;
+    auto t_value_past = this->t_dummy;
+    auto t_beam_idx = this->t_dummy_int;
+    int csz = t_cache.size();
+    if (csz > 0) t_key_past = t_cache[0];
+    if (csz > 1) t_value_past = t_cache[1];
+    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1452,79 +1597,9 @@ struct GPTJBlock : torch::CustomClassHolder {
       return {t_Out, t_null, t_null};
     }
   }
-
-  std::vector<at::Tensor> forward(
-      std::vector<at::Tensor> t_inp,
-      bool use_cache) {
-    GlobalPass _gp(FWD);
-    RECORD_FUNCTION("gptj_fwd", std::vector<c10::IValue>());
-    auto t_HS = t_inp[0];
-    auto t_key_past = t_inp[1];
-    auto t_value_past = t_inp[2];
-    auto t_beam_idx = t_inp[3];
-    auto t_AM = t_inp[4];
-    auto t_pid = t_inp[5];
-    auto dt = this->t_Wq.dtype();
-    auto ldt = this->t_G.dtype();
-    std::vector<at::Tensor> ret;
-
-    // printf("Layer %d\n", i++);
-    if (dt == at::kFloat && ldt == at::kFloat) {
-      ret = this->_forward<float, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat16, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat16, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat8, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat8, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else {
-      std::cout << "Types: " << dt << "  " << ldt << std::endl;
-      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-    }
-    // printf("Returning Layer \n");
-
-    return ret;
-  }
 };
 
-struct OPTDecoderLayer : torch::CustomClassHolder {
+struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp; // wt and bias for attn
   at::Tensor t_Bq, t_Bk, t_Bv, t_Bp;
@@ -1534,15 +1609,19 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
   at::Tensor t_G2, t_B2; // Gamma and Beta for MLP layernorm 
   float eps1, eps2;
   long N, H;
+  bool do_layer_norm_before;
 
   OPTDecoderLayer(
       std::vector<at::Tensor> params,
       double eps1,
       double eps2,
-      long H)
-      : eps1(eps1),
+      long H,
+      bool do_layer_norm_before)
+      : LLMBlock("opt_fwd", params[4], params[0]),
+        eps1(eps1),
         eps2(eps2),
-        H(H) {
+        H(H),
+        do_layer_norm_before(do_layer_norm_before) {
     int i = 0;
     t_G1 = params[i++]; // ln_gamma, lnorm before attention
     t_B1 = params[i++]; // ln_beta
@@ -1569,15 +1648,27 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
     }
   }
 
+  std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      std::vector<at::Tensor> t_cache,
+      bool use_cache) {
+    return this->forward_common(t_inp, t_cache, use_cache);
+  }
+
   template <typename T, typename LT = T>
   std::vector<at::Tensor> _forward(
-      at::Tensor& t_HS,
-      at::Tensor& t_key_past,
-      at::Tensor& t_value_past,
-      at::Tensor t_beam_idx,
-      at::Tensor& t_am,
-      bool do_layer_norm_before,
+      std::vector<at::Tensor>& t_inp,
+      std::vector<at::Tensor>& t_cache,
       bool use_cache) {
+    auto t_HS = t_inp[0];
+    auto t_am = t_inp[1];
+    auto t_key_past = this->t_dummy;
+    auto t_value_past = this->t_dummy;
+    auto t_beam_idx = this->t_dummy_int;
+    int csz = t_cache.size();
+    if (csz > 0) t_key_past = t_cache[0];
+    if (csz > 1) t_value_past = t_cache[1];
+    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1645,78 +1736,9 @@ struct OPTDecoderLayer : torch::CustomClassHolder {
       return {t_HS, t_null, t_null};
     }
   }
-
-  std::vector<at::Tensor> forward(
-      std::vector<at::Tensor> t_inp,
-      bool do_layer_norm_before,
-      bool use_cache) {
-    GlobalPass _gp(FWD);
-    RECORD_FUNCTION("opt_fwd", std::vector<c10::IValue>());
-    auto t_HS = t_inp[0];
-    auto t_key_past = t_inp[1];
-    auto t_value_past = t_inp[2];
-    auto t_beam_idx = t_inp[3];
-    auto t_AM = t_inp[4];
-    auto dt = this->t_Wq.dtype();
-    auto ldt = this->t_G1.dtype();
-    std::vector<at::Tensor> ret;
-
-    // printf("Layer %d\n", i++);
-    if (dt == at::kFloat && ldt == at::kFloat) {
-      ret = this->_forward<float, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          do_layer_norm_before,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat16, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          do_layer_norm_before,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat16, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          do_layer_norm_before,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat8, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          do_layer_norm_before,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat8, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          do_layer_norm_before,
-          use_cache);
-    } else {
-      std::cout << "Types: " << dt << "  " << ldt << std::endl;
-      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-    }
-
-    return ret;
-  }
 };
 
-struct LlamaDecoderLayer : torch::CustomClassHolder {
+struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wg, t_Wu, t_Wd;
@@ -1732,7 +1754,8 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
       long H,
       long max_positions,
       long rotary_dim)
-      : eps(eps),
+      : LLMBlock("llama_fwd", params[1], params[0]),
+        eps(eps),
         H(H),
         max_positions(max_positions),
         rotary_dim(rotary_dim) {
@@ -1758,15 +1781,28 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
     }
   }
 
+  std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      std::vector<at::Tensor> t_cache,
+      bool use_cache) {
+    return this->forward_common(t_inp, t_cache, use_cache);
+  }
+
   template <typename T, typename LT = T>
   std::vector<at::Tensor> _forward(
-      at::Tensor t_HS,
-      at::Tensor t_key_past,
-      at::Tensor t_value_past,
-      at::Tensor t_beam_idx,
-      at::Tensor t_am,
-      at::Tensor t_pid,
+      std::vector<at::Tensor>& t_inp,
+      std::vector<at::Tensor>& t_cache,
       bool use_cache) {
+    auto t_HS = t_inp[0];
+    auto t_am = t_inp[1];
+    auto t_pid = t_inp[2];
+    auto t_key_past = this->t_dummy;
+    auto t_value_past = this->t_dummy;
+    auto t_beam_idx = this->t_dummy_int;
+    int csz = t_cache.size();
+    if (csz > 0) t_key_past = t_cache[0];
+    if (csz > 1) t_value_past = t_cache[1];
+    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1820,76 +1856,6 @@ struct LlamaDecoderLayer : torch::CustomClassHolder {
     } else {
       return {t_Out, t_null, t_null};
     }
-  }
-
-  std::vector<at::Tensor> forward(
-      std::vector<at::Tensor> t_inp,
-      bool use_cache) {
-    GlobalPass _gp(FWD);
-    RECORD_FUNCTION("llama_fwd", std::vector<c10::IValue>());
-    auto t_HS = t_inp[0];
-    auto t_key_past = t_inp[1];
-    auto t_value_past = t_inp[2];
-    auto t_beam_idx = t_inp[3];
-    auto t_AM = t_inp[4];
-    auto t_pid = t_inp[5];
-    auto dt = this->t_Wq.dtype();
-    auto ldt = this->t_Gi.dtype();
-    std::vector<at::Tensor> ret;
-
-    // printf("Layer %d\n", i++);
-    if (dt == at::kFloat && ldt == at::kFloat) {
-      ret = this->_forward<float, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat16, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat16, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
-      ret = this->_forward<bfloat8, float>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
-      ret = this->_forward<bfloat8, bfloat16>(
-          t_HS,
-          t_key_past,
-          t_value_past,
-          t_beam_idx,
-          t_AM,
-          t_pid,
-          use_cache);
-    } else {
-      std::cout << "Types: " << dt << "  " << ldt << std::endl;
-      TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
-    }
-    // printf("Returning Layer \n");
-
-    return ret;
   }
 };
 
@@ -2037,7 +2003,7 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
       .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer")
-      .def(py::init<std::vector<at::Tensor>, double, double, long>())
+      .def(py::init<std::vector<at::Tensor>, double, double, long, bool>())
       .def("forward", &OPTDecoderLayer::forward);
   py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer")
       .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
@@ -2054,7 +2020,7 @@ TORCH_LIBRARY(tpp_llm, m) {
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   m.class_<OPTDecoderLayer>("OPTDecoderLayer")
-      .def(torch::init<std::vector<at::Tensor>, double, double, long>())
+      .def(torch::init<std::vector<at::Tensor>, double, double, long, bool>())
       .def("forward", &OPTDecoderLayer::forward);
   m.class_<LlamaDecoderLayer>("LlamaDecoderLayer")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())

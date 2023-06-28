@@ -36,6 +36,7 @@ from .llm_common import (
     block,
     compare,
     global_layer_dtype,
+    get_layer_past_and_offset,
 )
 
 class LlamaDecoderLayer(BlockedModule):
@@ -82,27 +83,15 @@ class LlamaDecoderLayer(BlockedModule):
         hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
-        dummy_tensor_int = torch.Tensor().to(torch.long)
 
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        if past_key_value is not None:
-            add_tensor_or_empty(past_key_value[0])
-            add_tensor_or_empty(past_key_value[1])
-            if len(past_key_value) > 2:
-                add_tensor_or_empty(past_key_value[2].to(torch.long))
-            else:
-                inputs.append(dummy_tensor_int)
-        else:
-            inputs += [dummy_tensor, dummy_tensor, dummy_tensor_int]
+        past_key_value, offset = get_layer_past_and_offset(past_key_value, -2)
         
         add_tensor_or_empty(attention_mask)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
-            offset = 0
-            if past_key_value is not None:
-                offset = past_key_value[0].shape[-2]
             position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
 
         add_tensor_or_empty(position_ids)
@@ -110,7 +99,11 @@ class LlamaDecoderLayer(BlockedModule):
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
         
-        hs, present_key, present_value = self.cpp_block.forward(inputs, use_cache)
+        past_key_value = [
+            i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
+        ]
+
+        hs, present_key, present_value = self.cpp_block.forward(inputs, past_key_value, use_cache)
         # hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
 
         present_key_value = (present_key, present_value)

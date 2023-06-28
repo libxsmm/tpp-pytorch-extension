@@ -174,6 +174,14 @@ def set_pg():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 
+def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], seq_dim: int):
+    if layer_past is None:
+        return ([], 0)
+    elif len(layer_past) < 4:
+        return (layer_past, layer_past[0].shape[seq_dim])
+    else:
+        return (layer_past, layer_past[3])
+
 
 def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
     """
