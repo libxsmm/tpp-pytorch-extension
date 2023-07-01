@@ -87,7 +87,8 @@ class LlamaDecoderLayer(BlockedModule):
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        past_key_value, offset = get_layer_past_and_offset(past_key_value, -2)
+        discrete_kv = getattr(self, "discrete_kv", True)
+        past_key_value, offset = get_layer_past_and_offset(past_key_value, discrete_kv)
         
         add_tensor_or_empty(attention_mask)
         if position_ids is None:
@@ -103,10 +104,11 @@ class LlamaDecoderLayer(BlockedModule):
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
         ]
 
-        hs, present_key, present_value = self.cpp_block.forward(inputs, past_key_value, use_cache)
+        outputs = self.cpp_block.forward(inputs, past_key_value, use_cache)
+        hs = outputs[0]
         # hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
 
-        present_key_value = (present_key, present_value)
+        present_key_value = tuple(outputs[1:])
         outputs = (hs,)
         if output_attentions:
             print("This feature is not available yet")

@@ -86,7 +86,8 @@ class GPTJBlock(BlockedModule):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
         add_tensor_or_empty(attention_mask)
-        layer_past, offset = get_layer_past_and_offset(layer_past, 1)
+        discrete_kv = getattr(self, "discrete_kv", True)
+        layer_past, offset = get_layer_past_and_offset(layer_past, discrete_kv)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
             position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
@@ -101,7 +102,12 @@ class GPTJBlock(BlockedModule):
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in layer_past
         ]
 
-        hs, k, v = self.cpp_block.forward(inputs, layer_past, use_cache)
+        #print(f"attention_mask: {attention_mask.shape} {attention_mask}")
+        outputs = self.cpp_block.forward(inputs, layer_past, use_cache)
+        hs = outputs[0]
+        # print("hs: ", hs.sum().item(), hs.shape)
+        # print("HS: ", hs[:2,:2,:2])
+        present = tuple(outputs[1:])
         #print("K: ", k.shape)
         #print("V: ", v.shape)
 
@@ -110,7 +116,7 @@ class GPTJBlock(BlockedModule):
         # v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
 
         if use_cache:
-            outputs = (hs, (k, v))
+            outputs = (hs, present)
         else:
             outputs = (hs,)
 

@@ -32,6 +32,7 @@ static int large_cache_opt = false;
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
+static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
@@ -1209,12 +1210,12 @@ template <typename T>
 inline at::Tensor attn(
     at::Tensor t_QL,
     at::Tensor t_KL,
-    at::Tensor t_QL_cache,
-    at::Tensor t_KL_cache,
-    long offset,
-    std::vector<std::vector<long>> beam_idx,
     at::Tensor t_AM,
-    at::Tensor t_VL) {
+    at::Tensor t_VL,
+    at::Tensor t_KL_cache,
+    at::Tensor t_VL_cache,
+    std::vector<std::vector<long>>& beam_idx,
+    long offset) {
   RECORD_SCOPE(attn1, {t_QL, t_KL});
   auto t_CL = at::empty_like(t_QL);
   auto sizes = t_QL.sizes();
@@ -1225,7 +1226,10 @@ inline at::Tensor attn(
   float one_by_sqrt_H = 1.0 / sqrtf(H);
   auto ksizes = t_KL.sizes();
   long Sk = ksizes[2];
-  TPP_ASSERT(Sq == 1 && Sk == 1, "Sq and Sk must be 1");
+  // printf("Sq = %ld, Sk = %ld\n", Sq, Sk);
+  // std::cout << "QL: " << t_QL.sizes() << std::endl;
+  // std::cout << "KL: " << t_KL.sizes() << std::endl;
+  TPP_ASSERT(Sq == 1 && Sk == 1, "Sq and Sk must be 1\n");
   auto FSk = offset + Sk;
   const bool am_valid = (t_AM.numel() > 0);
 
@@ -1235,7 +1239,7 @@ inline at::Tensor attn(
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
   auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  auto VL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
 
   auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
   auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
@@ -1249,13 +1253,15 @@ inline at::Tensor attn(
 #pragma omp parallel for collapse(2)
       for (int b = 0; b < B; b++) {
         for (int n = 0; n < N; n++) {
-          float AS[Sk];
+          float AS[FSk];
           for (int sk = 0; sk < FSk; sk++) {
             AS[sk] = 0.0f;
             if (sk < offset) {
-              int bid = beam_idx[sk][b];
+              int bid = beam_idx[b][sk];
+              //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
               dot_tpp(QL[b][n][0], KL_C[sk][bid][n], &AS[sk]);
             } else {
+              //printf("b: %d n: %d sk: %d \n", b, n, sk);
               dot_tpp(QL[b][n][0], KL[b][n][0], &AS[sk]);
               cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
             }
@@ -1264,21 +1270,25 @@ inline at::Tensor attn(
               AS[sk] += AM[b][sk];
             }
           }
-          softmax_fwd_tpp(1, AS, AS);
+          softmax_fwd_tpp(AS, AS);
           zero_tpp(CL[b][n][0]);
+          //printf("post softmax b: %d n: %d\n", b, n);
           for (int sk = 0; sk < FSk; sk++) {
+            //printf("bmm2: b: %d n: %d sk: %d \n", b, n, sk);
+	    //if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]); 
             if (sk < offset) {
-              int bid = beam_idx[sk][b];
+              int bid = beam_idx[b][sk];
               scale_add_tpp(VL_C[sk][bid][n], CL[b][n][0], AS[sk]);
             } else {
               scale_add_tpp(VL[b][n][0], CL[b][n][0], AS[sk]);
-              cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+              cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
             }
           }
         }
       }
     }
   } 
+  return t_CL;
 }
 
 
@@ -1407,6 +1417,8 @@ inline at::Tensor attn(
                 psum = csum;
               }
               ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
+	      //for (int xx=0;xx<kbs;xx++)
+	      //if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n", sk+xx, (float)AST[0][xx]); 
               Tv tmp[qbs * H];
               Tv *v_ptr = VL_V[b][n][sk];
               Tv v_tmp[kbs*H];
@@ -1430,7 +1442,7 @@ inline at::Tensor attn(
   return t_CL;
 }
 
-template<typename T>
+template<typename cls>
 struct LLMBlock : torch::CustomClassHolder {
  public:
    std::string name;
@@ -1439,7 +1451,8 @@ struct LLMBlock : torch::CustomClassHolder {
    caffe2::TypeMeta dt;
    caffe2::TypeMeta ldt;
 
-   LLMBlock(std::string name, at::Tensor& t, at::Tensor& lt) : name(name), t_dummy(t.new_empty({0})), t_dummy_int(t.new_empty({0}, at::kLong)), dt(t.dtype()), ldt(lt.dtype()) { }
+  LLMBlock(std::string name, at::Tensor& t, at::Tensor& lt) : name(name), t_dummy(t.new_empty({0})), t_dummy_int(t.new_empty({0}, at::kLong)), dt(t.dtype()), ldt(lt.dtype()) { }
+
   std::vector<at::Tensor> forward_common(
       std::vector<at::Tensor> &t_inp,
       std::vector<at::Tensor> &t_cache,
@@ -1447,7 +1460,7 @@ struct LLMBlock : torch::CustomClassHolder {
     GlobalPass _gp(FWD);
     RECORD_FUNCTION(name, std::vector<c10::IValue>());
     std::vector<at::Tensor> ret;
-    auto self = static_cast<T*>(this);
+    auto self = static_cast<cls*>(this);
 
     if (dt == at::kFloat && ldt == at::kFloat) {
       ret = self->template _forward<float, float>(
@@ -1483,6 +1496,92 @@ struct LLMBlock : torch::CustomClassHolder {
     return ret;
   }
 
+  template<typename T>
+  std::vector<at::Tensor> self_mha(at::Tensor t_QL, at::Tensor t_KL, at::Tensor t_VL, at::Tensor t_am, std::vector<at::Tensor>& t_cache) {
+    auto self = static_cast<cls*>(this);
+    auto t_key_past = this->t_dummy;
+    auto t_value_past = this->t_dummy;
+    auto t_beam_idx = this->t_dummy_int;
+    auto t_offset = this->t_dummy_int;
+    auto B = t_QL.size(0);
+    auto S = t_QL.size(1);
+    auto N = self->N;
+    auto H = self->H;
+    at::Tensor t_CL;
+    auto offset = 0;
+    int csz = t_cache.size();
+    if (csz > 0) t_key_past = t_cache[0];
+    if (csz > 1) t_value_past = t_cache[1];
+    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
+    if (csz > 3) {
+      t_offset = t_cache[3];
+      offset = t_offset.item<long>();
+    } else if (csz > 0) {
+      offset = t_key_past.size(2);
+    }
+
+    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+
+    if (csz < 4) {
+      if (t_key_past.numel() > 0) {
+        t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
+      }
+      if (t_value_past.numel() > 0) {
+        t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
+      }
+
+      t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
+      t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+
+      return {t_CL, t_KL, t_VL};
+
+    } else if (offset == 0) {
+      t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
+      auto capacity = S + KV_CACHE_INC_SIZE;
+      t_key_past = t_KL.new_zeros({capacity, B, N, H});
+      t_value_past = t_VL.new_zeros({capacity, B, N, H});
+      t_beam_idx = t_beam_idx.new_zeros({capacity, B});
+      t_offset = t_offset + S;
+      for (int i = 0; i < S; i++) {
+        //std::cout << "t_key_past.shape:" << t_key_past.select(0, i).sizes() << std::endl;
+        //std::cout << "t_KL.shape:" << t_KL.select(2, i).sizes() << std::endl;
+        t_key_past.select(0, i) = t_KL.select(2, i);
+        t_value_past.select(0, i) = t_VL.select(2, i);
+      }
+      t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+      // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
+    } else {
+      auto capacity = t_key_past.size(0);
+      if (capacity <= offset) {
+        auto new_capacity = offset + KV_CACHE_INC_SIZE;
+        t_key_past.resize_({new_capacity, -1, -1, -1});
+        t_value_past.resize_({new_capacity, -1, -1, -1});
+        t_beam_idx.resize_({new_capacity, -1});
+      }
+
+      // std::cout << "t_key_past.shape:" << t_key_past.sizes() << std::endl;
+      // std::cout << "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl;
+      // std::cout << "t_offset:" << t_offset << std::endl;
+      // std::cout << "B: " << B << " offset:" << offset << std::endl;
+      std::vector<std::vector<long>> beam_idx(B, std::vector<long>(offset+1, 0));
+      auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
+      for(auto i = 0; i < B; i++) {
+        beam_idx[i][offset-1] = b_ptr[offset-1][i];
+        for(auto j = offset-2; j >= 0; j--) { //for the token of input, the target beam is alwarys 0
+          beam_idx[i][j] = b_ptr[j][beam_idx[i][j+1]];
+        }
+        //std::cout << "idx[" << i << "] = " << beam_idx[i] << std::endl;
+      }
+      t_CL = attn<T>(t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
+      t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+      t_offset = t_offset + 1;
+      // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
+      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+    }
+  }
 };
 
 struct GPTJBlock : LLMBlock<GPTJBlock> {
@@ -1545,13 +1644,6 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_HS = t_inp[0];
     auto t_am = t_inp[1];
     auto t_pid = t_inp[2];
-    auto t_key_past = this->t_dummy;
-    auto t_value_past = this->t_dummy;
-    auto t_beam_idx = this->t_dummy_int;
-    int csz = t_cache.size();
-    if (csz > 0) t_key_past = t_cache[0];
-    if (csz > 1) t_value_past = t_cache[1];
-    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1566,24 +1658,18 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
     t_HS = lyr_norm<T, LT>(t_HS, t_G, t_B, eps);
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
-    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_key_past.numel() > 0) {
-      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
-    }
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
-    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_value_past.numel() > 0) {
-      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
-    }
 
     auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
     apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
-    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
 
-    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+    apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
+
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+
+    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+    auto t_CL = outputs[0];
     auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
     auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
@@ -1591,10 +1677,12 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
       allreduce(t_Out);
     }
 
+    outputs[0] = t_Out;
+
     if (use_cache) {
-      return {t_Out, t_KL, t_VL};
+      return outputs;
     } else {
-      return {t_Out, t_null, t_null};
+      return {t_Out};
     }
   }
 };

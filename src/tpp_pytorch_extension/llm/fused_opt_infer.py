@@ -88,7 +88,8 @@ class OPTDecoderLayer(BlockedModule):
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        past_key_value, offset = get_layer_past_and_offset(past_key_value, -2)
+        discrete_kv = getattr(self, "discrete_kv", True)
+        past_key_value, offset = get_layer_past_and_offset(past_key_value, discrete_kv)
         add_tensor_or_empty(attention_mask)
 
         inputs = [
@@ -101,16 +102,16 @@ class OPTDecoderLayer(BlockedModule):
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
         ]
 
-        hs, k, v = self.cpp_block.forward(inputs, past_key_value, use_cache)
-        #print("K: ", k.shape)
-        #print("V: ", v.shape)
+        outputs = self.cpp_block.forward(inputs, past_key_value, use_cache)
+        hs = outputs[0]
+        present = tuple(outputs[1:])
 
         hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
         # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
         # v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
 
         if use_cache:
-            outputs = (hs, (k, v))
+            outputs = (hs, present)
         else:
             outputs = (hs,)
 
