@@ -1229,7 +1229,7 @@ inline at::Tensor attn(
   // printf("Sq = %ld, Sk = %ld\n", Sq, Sk);
   // std::cout << "QL: " << t_QL.sizes() << std::endl;
   // std::cout << "KL: " << t_KL.sizes() << std::endl;
-  TPP_ASSERT(Sq == 1 && Sk == 1, "Sq and Sk must be 1\n");
+  TPP_ASSERT(Sq == 1 && Sk == 1, "Sq (%ld) and Sk (%ld) must be 1, offset (%ld)\n", Sq, Sk, offset);
   auto FSk = offset + Sk;
   const bool am_valid = (t_AM.numel() > 0);
 
@@ -1557,9 +1557,9 @@ struct LLMBlock : torch::CustomClassHolder {
       auto capacity = t_key_past.size(0);
       if (capacity <= offset) {
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
-        t_key_past.resize_({new_capacity, -1, -1, -1});
-        t_value_past.resize_({new_capacity, -1, -1, -1});
-        t_beam_idx.resize_({new_capacity, -1});
+        t_key_past.resize_({new_capacity, B, N, H});
+        t_value_past.resize_({new_capacity, B, N, H});
+        t_beam_idx.resize_({new_capacity, B});
       }
 
       // std::cout << "t_key_past.shape:" << t_key_past.sizes() << std::endl;
@@ -1750,13 +1750,6 @@ struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
       bool use_cache) {
     auto t_HS = t_inp[0];
     auto t_am = t_inp[1];
-    auto t_key_past = this->t_dummy;
-    auto t_value_past = this->t_dummy;
-    auto t_beam_idx = this->t_dummy_int;
-    int csz = t_cache.size();
-    if (csz > 0) t_key_past = t_cache[0];
-    if (csz > 1) t_value_past = t_cache[1];
-    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1770,27 +1763,18 @@ struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
 
     auto t_null = t_HS.new_empty({0}); // at::Tensor().to(t_HS.dtype());
 
-		auto t_res = t_HS;
+    auto t_res = t_HS;
     if (do_layer_norm_before) {
       t_HS = lyr_norm<T, LT>(t_HS, t_G1, t_B1, eps1);
     }
 
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_Bk);
-    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_key_past.numel() > 0) {
-      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
-    }
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_Bv);
-    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_value_past.numel() > 0) {
-      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
-    }
-
     auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_Bq);
-    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_Bk);
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_Bv);
 
-    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+    auto t_CL = outputs[0];
 
     t_HS = fc_add_scale<T>(t_CL, t_res, t_Wp, t_Bp, scale);
     if (my_size > 1) {
@@ -1818,10 +1802,12 @@ struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
       t_HS = lyr_norm<T, LT>(t_HS, t_G2, t_B2, eps2);
     }
 
+    outputs[0] = t_HS;
+
     if (use_cache) {
-      return {t_HS, t_KL, t_VL};
+      return outputs;
     } else {
-      return {t_HS, t_null, t_null};
+      return {t_HS};
     }
   }
 };
@@ -1884,13 +1870,6 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
     auto t_HS = t_inp[0];
     auto t_am = t_inp[1];
     auto t_pid = t_inp[2];
-    auto t_key_past = this->t_dummy;
-    auto t_value_past = this->t_dummy;
-    auto t_beam_idx = this->t_dummy_int;
-    int csz = t_cache.size();
-    if (csz > 0) t_key_past = t_cache[0];
-    if (csz > 1) t_value_past = t_cache[1];
-    if (csz > 2) t_beam_idx = t_cache[2].to(at::kLong);
     auto sizes = t_HS.sizes();
     auto B = sizes[0];
     auto S = sizes[1];
@@ -1905,24 +1884,19 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
     t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, N, H);
-    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_key_past.numel() > 0) {
-      t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
-    }
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
-    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    if (t_value_past.numel() > 0) {
-      t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
-    }
 
     auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
     apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, N, H);
-    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
 
-    auto t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-    t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
+    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, N, H);
+
+    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+
+    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+    auto t_CL = outputs[0];
+
     auto t_SO = fc_add_scale<T>(t_CL, t_res, t_Wp, t_null, scale);
     if (my_size > 1) {
       allreduce(t_SO);
@@ -1939,10 +1913,12 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
       allreduce(t_Out);
     }
 
+    outputs[0] = t_Out;
+
     if (use_cache) {
-      return {t_Out, t_KL, t_VL};
+      return outputs;
     } else {
-      return {t_Out, t_null, t_null};
+      return {t_Out};
     }
   }
 };
