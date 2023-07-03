@@ -1241,10 +1241,15 @@ inline at::Tensor attn(
   auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
   auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
 
-  auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
-  auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
-  auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
+  // Removing SCOPEIT due to very high overhead of timing these
+  // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
+  // auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
+  // auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
+  // auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
+  auto dot_tpp = MulReduceTPP<T,T,float>(1, H);
+  auto scale_add_tpp = ScaleAddTPP<T, T>(H);
+  auto cpy_tpp = CpyTPP<T>(H);
+  auto zero_tpp = SetZeroTPP<T>(H);
   auto softmax_fwd_tpp =
     SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
   {
