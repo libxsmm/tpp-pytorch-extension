@@ -88,7 +88,7 @@ class OPTDecoderLayer(BlockedModule):
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        discrete_kv = getattr(self, "discrete_kv", True)
+        discrete_kv = getattr(self, "discrete_kv", False)
         past_key_value, offset = get_layer_past_and_offset(past_key_value, discrete_kv)
         add_tensor_or_empty(attention_mask)
 
