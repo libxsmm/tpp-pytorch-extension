@@ -50,6 +50,34 @@ REGISTER_LOCAL_SCOPE(fftkn, "fftkn");
 REGISTER_LOCAL_SCOPE(k_trans, "k_trans");
 REGISTER_LOCAL_SCOPE(attn1, "attn");
 
+template <typename T>
+void trans_output_block( long S, long H, T* input, T* output) {
+  auto xform = XformTPP::XFORM_XPOSE_TPP;
+  if (sizeof(T) != 4) {
+    xform = XformTPP::XFORM_XPOSE_N2V_TPP;
+  } 
+  auto xform_tpp = SCOPEIT(XformExtTPP<T>(H, S, xform, true), (sizeof(T) == 4) ? XPOSE : VNNI);
+  xform_tpp(input, output);
+}
+
+double measure_sparsity_in_blocked_nkkn_weight(at::Tensor& t_W) {
+  double res = 0.0;
+  if (t_W.dtype() == at::kFloat) {
+    res = measure_sparsity_from_blocked_weight_tensor( GetVLAPtr<float>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()));
+  } else {
+    res = measure_sparsity_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()));
+  }
+  return res;
+}
+
+void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bcsc, int bcsc_bk, int bcsc_bn) {
+  if (t_W.dtype() == at::kFloat) {
+    create_bcsc_from_blocked_weight_tensor( GetVLAPtr<float>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), t_W_bcsc);
+  } else {
+    create_bcsc_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), bcsc_bk, bcsc_bn, omp_get_max_threads(), t_W_bcsc);
+  }
+}
+
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
 void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
@@ -772,27 +800,32 @@ inline at::Tensor fc_add2_scale(
 template <typename T>
 inline void fc_gelu(
     at::Tensor t_in,
-    at::Tensor t_wt,
+    tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     at::Tensor t_out) {
   auto in_sizes = t_in.sizes();
   auto BS = in_sizes[0] * in_sizes[1];
+#if 0
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
+#endif
   auto C = in_sizes[2];
 
-  auto Nc = wt_sizes[1];
+  auto Nc = t_wt.sizes[1];
   auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
+  auto Nk = t_wt.sizes[0];
+  auto Hk = t_wt.sizes[3];
   auto K = Nk * Hk;
 
+#if 0
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
+#endif
 
   auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+#if 0
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+#endif
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
 
@@ -806,10 +839,24 @@ inline void fc_gelu(
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
   auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
   auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+  
   auto brgemm_tpp = SCOPEITGEMM(
       (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto brgemm_tpp_rem = SCOPEITGEMM(
       (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  
+  auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
+      S2,
+      Hk,
+      Nc*Hc,
+      t_wt_bcsc.bcsc_bk,
+      t_wt_bcsc.bcsc_bn,
+      Nc*Hc,
+      Hk,
+      1.0)));
+
+
+
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
 
@@ -859,11 +906,10 @@ inline void fc_gelu(
 template <typename T>
 inline at::Tensor fc_gelu(
     at::Tensor t_in,
-    at::Tensor t_wt,
+    tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
   auto sizes = t_in.sizes().vec();
-  auto wt_sizes = t_wt.sizes();
-  sizes[2] = wt_sizes[0] * wt_sizes[3];
+  sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
   fc_gelu<T>(t_in, t_wt, t_bias, t_out);
@@ -1593,6 +1639,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
+  tensor_bcsc_t t_Wi_bcsc;
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
@@ -1627,6 +1674,20 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     t_Bo = params[i++];
 
     t_EP = params[i++]; // embed_positions
+
+    auto bcsc_bk = env2int("BK", 4);
+    auto bcsc_bn = env2int("BN", 4);
+    double sparsity = 0.0;
+    int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1 : 0;
+    int bcsc_bk_use, bcsc_bn_use;
+    double sparse_threshold = 1.0*env2int("SPTHRES", 40);
+
+    /* Create BCSC sparse tensors */
+    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wi);
+    //printf("Wi in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity );
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk_use, bcsc_bn_use);
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
@@ -1676,7 +1737,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
 
     auto t_CL = outputs[0];
     auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
-    auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
+    auto t_I = fc_gelu<T>(t_HS, t_Wi_bcsc, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
     if (my_size > 1) {
       allreduce(t_Out);
@@ -2036,12 +2097,11 @@ static at::Tensor fc_add2_scale_wrap(
 
 static at::Tensor fc_gelu_wrap(
     at::Tensor t_in,
-    at::Tensor t_wt,
+    tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
   GlobalPass _gp(FWD);
   auto sizes = t_in.sizes().vec();
-  auto wt_sizes = t_wt.sizes();
-  sizes[2] = wt_sizes[0] * wt_sizes[3];
+  sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
 
