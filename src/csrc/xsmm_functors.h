@@ -36,6 +36,7 @@
   } while (0)
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
+extern long long hsh_key, hsh_ret;
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -317,10 +318,12 @@ inline int meqn_push_ternary_op(
 class BaseTPP {
  public:
   void* get_kernel() {
+    auto t0 = __rdtsc();
     auto& kernel_cache = get_kernel_cache();
     void* kernel = NULL;
     if (hash == "")
       hash = hash_str();
+    auto t1 = __rdtsc();
     auto search = kernel_cache.find(hash);
     if (search != kernel_cache.end())
       kernel = search->second;
@@ -332,7 +335,12 @@ class BaseTPP {
       }
       // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
       kernel_cache[hash] = kernel;
+      //printf("Hash size = %ld\n", (long)kernel_cache.size());
     }
+    auto t2 = __rdtsc();
+    hsh_key += t1-t0;
+    hsh_ret += t2-t1;
+    //printf("%6lld  %6lld %6lld  get_kernel[%s]\n", t2-t0, (t1-t0), (t2-t1), hash.c_str());
     return kernel;
   }
   // We should make hash_str() public
@@ -341,10 +349,17 @@ class BaseTPP {
   }
 
  protected:
+#if 0
   std::unordered_map<std::string, void*>& get_kernel_cache() {
     static std::unordered_map<std::string, void*> kernel_cache;
     return kernel_cache;
   }
+#else
+  ska::flat_hash_map<std::string, void*>& get_kernel_cache() {
+    static ska::flat_hash_map<std::string, void*> kernel_cache;
+    return kernel_cache;
+  }
+#endif
   virtual std::string hash_str() = 0;
   virtual void* build_kernel() = 0;
   std::string hash = "";

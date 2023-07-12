@@ -49,7 +49,7 @@ enum PassType { OTH, FWD, BWD, UPD };
 
 extern PassType globalPass;
 extern int globalScope;
-constexpr int NUM_TIMERS = ((LAST_TIMER + 7) / 8) * 8;
+constexpr int NUM_TIMERS = ((LAST_TIMER + 8) / 8) * 8;
 extern double pass_timers[MAX_THREADS][3][NUM_TIMERS];
 extern double master_pass_timers[3];
 struct Scope {
@@ -57,6 +57,7 @@ struct Scope {
       : name(name), master_timer(0.0), detailed_timers{0.0}, flops{0.0}, count(0) {}
   const std::string name;
   double master_timer;
+  double omp_timer;
   double detailed_timers[MAX_THREADS][NUM_TIMERS];
   double flops[MAX_THREADS][8];
   long count;
@@ -84,6 +85,24 @@ inline int register_scope(std::string name) {
 #define REGISTER_LOCAL_SCOPE(id, name) static int sc_##id = register_scope(name)
 #define REGISTER_SCOPE(id, name) int sc_##id = register_scope(name)
 #define USING_SCOPE(id) extern int sc_##id
+
+inline void TimerStart() {
+  int tid = omp_get_thread_num();
+  auto time = getTime();
+  auto& scope = get_scope_list()[globalScope];
+  scope.detailed_timers[tid][LAST_TIMER] -= time;
+  auto& pass = get_pass_list()[globalPass];
+  pass.detailed_timers[tid][LAST_TIMER] -= time;
+}
+
+inline void TimerEnd() {
+  int tid = omp_get_thread_num();
+  auto time = getTime();
+  auto& scope = get_scope_list()[globalScope];
+  scope.detailed_timers[tid][LAST_TIMER] += time;
+  auto& pass = get_pass_list()[globalPass];
+  pass.detailed_timers[tid][LAST_TIMER] += time;
+}
 
 class ScopedTimer {
  public:
@@ -129,6 +148,19 @@ class GlobalScope {
     globalScope = oldScope;
   }
   int oldScope;
+  double start;
+};
+
+class OMPScope {
+ public:
+  OMPScope() : start(getTime()) {}
+  ~OMPScope() {
+    auto time = getTime() - start;
+    auto& scope = get_scope_list()[globalScope];
+    scope.omp_timer += time;
+    auto& pass = get_pass_list()[globalPass];
+    pass.omp_timer += time;
+  }
   double start;
 };
 
@@ -198,9 +230,11 @@ class ScopedTPP {
 #define SCOPEIT_DECL(t, ...) ScopedTPP<t, ##__VA_ARGS__, 0>
 #else
 #define SCOPEIT(f, ...) f
+#define SCOPEIT_DECL(t, ...) t, ##__VA_ARGS__
 #endif
 
 #define RECORD_SCOPE(scope, ...) \
   GlobalScope gs_(sc_##scope);   \
   RECORD_FUNCTION(#scope, std::vector<c10::IValue>(__VA_ARGS__))
+#define RECORD_OMP_TIME() OMPScope os_
 #endif //_BERT_TIMING_H_
