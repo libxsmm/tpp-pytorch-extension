@@ -145,7 +145,7 @@ class ScopedTPP<tpp::SpmmTPP<Tin, Tout>, impl> {
   ScopedTPP(tpp::SpmmTPP<Tin, Tout> func) : func(std::move(func)) {}
   void operator()(
       Tin* A,
-      tensor_bcsc_t& B,
+      const tensor_bcsc_t& B,
       unsigned long long B_n_cols,    
       unsigned long long B_col_offs,
       Tout* C,

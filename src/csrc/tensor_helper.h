@@ -127,7 +127,7 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   double sparse_frac = (double) (1.0*sparse_pct/100.0);
 
   if (bn % bcsc_bn != 0) {
-    printf("WARNING: end up with assymetric logical blocks...\n");
+    printf("WARNING: end up with assymetric logical blocks because bn is %d and bcsc_bn is %d...\n", bn, bcsc_bn);
   }
   
   /* Sparsify tensors for benchmarking purposes */
@@ -796,6 +796,31 @@ inline at::Tensor get_padded_activation_for_vnni(at::Tensor& input) {
   std::vector<int64_t> new_sizes(sizes.begin(), sizes.end());
   new_sizes[ndims - 1] = align - pad;
   auto output = at::cat({input, input.new_zeros(new_sizes)}, ndims - 1);
+  return output;
+}
+
+inline at::Tensor act_tensor_trans_n2v_flat(
+    long N,
+    long C,
+    long bc,
+    at::Tensor& input) {
+  RECORD_SCOPE(a_vnni, {input});
+  const int BS = get_vnni_block_size(input.dtype());
+  TPP_ASSERT(bc % BS == 0, "Uneven number for S2\n");
+
+  auto output = input.new_empty({C/bc, bc/BS, N, BS});
+
+  auto out = GetVLAPtr<bfloat16>(output, {N * bc});
+  auto in = GetVLAPtr<bfloat16>(input, {bc});
+  auto xpose_n2v_tpp = SCOPEIT(
+      XformExtTPP<bfloat16>(N, bc, bc, N, C, N, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+  {
+    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+    for (int nc = 0; nc < C/bc; nc++) {
+      xpose_n2v_tpp(in[nc], out[nc]);
+    }
+  }
   return output;
 }
 

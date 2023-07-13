@@ -800,17 +800,17 @@ inline at::Tensor fc_add2_scale(
 template <typename T>
 inline void fc_gelu(
     at::Tensor t_in,
-    tensor_bcsc_t& t_wt,
+    const tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     at::Tensor t_out) {
   auto in_sizes = t_in.sizes();
-  auto BS = in_sizes[0] * in_sizes[1];
+  auto BS = in_sizes[2];
 #if 0
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
 #endif
-  auto C = in_sizes[2];
+  auto C = in_sizes[0] * in_sizes[1] * in_sizes[3];
 
   auto Nc = t_wt.sizes[1];
   auto Hc = C / Nc;
@@ -818,11 +818,12 @@ inline void fc_gelu(
   auto Hk = t_wt.sizes[3];
   auto K = Nk * Hk;
 
+  //printf("DERIVED VALS ARE: C %d Nc %d Hc %d Nk %d Hk %d K %d\n", C,  Nc, Hc, Nk, Hk, K );
 #if 0
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
 #endif
 
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto in = GetVLAPtr<T>(t_in, {BS*Hc});
 #if 0
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
 #endif
@@ -835,6 +836,8 @@ inline void fc_gelu(
   if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
 
   bool with_bias = (t_bias.numel() > 0);
+  
+#if 0
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
   auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
@@ -844,23 +847,59 @@ inline void fc_gelu(
       (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
   auto brgemm_tpp_rem = SCOPEITGEMM(
       (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  
-  auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
-      S2,
-      Hk,
-      Nc*Hc,
-      t_wt_bcsc.bcsc_bk,
-      t_wt_bcsc.bcsc_bn,
-      Nc*Hc,
-      Hk,
-      1.0)));
-
-
 
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
+#endif
+  
+  auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BS, BS), BIAS);
+  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BS, BS, Hk, BS, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(Hk, BS, BS), EW_ZERO);
+  auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BS, Hk, K, K), ACT);
+  auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
+      BS,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      Nc*Hc,
+      Hk,
+      1.0,
+      0)));
 
+  //printf("Have %d blocks in bcsc (%d iters)\n",  t_wt.bcsc_blocks_in_bn, t_wt.n_blocks);
   {
+
+    RECORD_SCOPE(i_gemm, {t_in});
+    auto loop_scheme = large_cache_opt ? "BA" : "Ba";
+    auto igemm_loop =
+        ThreadedLoop<2>({{1}, {t_wt.n_blocks}}, loop_scheme);
+    igemm_loop(
+        [&](int* ind) {
+          int s1 = ind[0], i_n = ind[1];
+          T tmp_block[BS*Hk];
+          int cur_n_blocks = (t_wt.Nblocks_offsets[i_n+1] - t_wt.Nblocks_offsets[i_n])/t_wt.bcsc_bn;
+          //printf("Cur n blocks is %d with %d blocks in bcsc\n", cur_n_blocks, t_wt.bcsc_blocks_in_bn);
+
+          for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt.bcsc_blocks_in_bn) {
+            int nk = (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/Hk;
+            T *dst = tmp_block;
+            if (with_bias) {
+              copy_bias_tpp(bias[nk], dst);
+            } else {
+              zero_tpp(dst);
+            }
+            spmm_tpp(in[s1], 
+                     t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                     dst, true);
+            trans_out_tpp( dst, out[s1][nk] );
+            gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
+          }
+        },
+        [&]() { spmm_tpp.config(); },
+        [&]() { spmm_tpp.release(); });
+
+#if 0
     RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
     // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
     auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
@@ -900,6 +939,7 @@ inline void fc_gelu(
         },
         [&]() { brgemm_tpp.config(); },
         [&]() { brgemm_tpp.release(); });
+#endif
   }
 }
 
@@ -909,10 +949,20 @@ inline at::Tensor fc_gelu(
     tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
   auto sizes = t_in.sizes().vec();
+  auto in_sizes = t_in.sizes();
+
+  /* Transpose t_HS for BCSC execution */
+  auto N = sizes[0] * sizes[1];
+  auto C = sizes[2];
+  auto bc = C/ t_wt.sizes[1];
+
+  //printf("Reformat values N is %d (%d x %d), C %d, bc %d\n", N, sizes[0], sizes[1], C, bc );
+  auto t_new_in = act_tensor_trans_n2v_flat(N, C, bc, t_in);
+
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
-  fc_gelu<T>(t_in, t_wt, t_bias, t_out);
+  fc_gelu<T>(t_new_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1678,7 +1728,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto bcsc_bk = env2int("BK", 4);
     auto bcsc_bn = env2int("BN", 4);
     double sparsity = 0.0;
-    int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1 : 0;
+    int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1*0 : 0;
     int bcsc_bk_use, bcsc_bn_use;
     double sparse_threshold = 1.0*env2int("SPTHRES", 40);
 
@@ -1737,6 +1787,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
 
     auto t_CL = outputs[0];
     auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+
     auto t_I = fc_gelu<T>(t_HS, t_Wi_bcsc, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
     if (my_size > 1) {
@@ -2097,21 +2148,20 @@ static at::Tensor fc_add2_scale_wrap(
 
 static at::Tensor fc_gelu_wrap(
     at::Tensor t_in,
-    tensor_bcsc_t& t_wt,
+    const tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
   GlobalPass _gp(FWD);
   auto sizes = t_in.sizes().vec();
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
-
   auto t_out = t_in.new_empty(sizes);
 
-  auto dt = t_wt.dtype();
+  auto dt = t_in.dtype();
   if (dt == at::kFloat) {
     fc_gelu<float>(t_in, t_wt, t_bias, t_out);
   } else if (dt == at::kBFloat16) {
     fc_gelu<bfloat16>(t_in, t_wt, t_bias, t_out);
   } else if (dt == at::kBFloat8) {
-    fc_gelu<bfloat8>(t_in, t_wt, t_bias, t_out);
+    //fc_gelu<bfloat8>(t_in, t_wt, t_bias, t_out);
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -2141,8 +2191,8 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
 
 TORCH_LIBRARY(tpp_llm, m) {
   m.def("layer_norm", &lyr_norm_wrap);
-  m.def("fc_gelu", &fc_gelu_wrap);
-  m.def("fc_add2_scale", &fc_add2_scale_wrap);
+  //m.def("fc_gelu", &fc_gelu_wrap);
+  //m.def("fc_add2_scale", &fc_add2_scale_wrap);
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
   m.class_<GPTJBlock>("GPTJBlock")

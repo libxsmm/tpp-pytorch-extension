@@ -2025,7 +2025,7 @@ class SpmmTPP {
   }
   void operator()(
       Tin* A,
-      tensor_bcsc_t& B,
+      const tensor_bcsc_t& B,
       unsigned long long B_n_cols,    
       unsigned long long B_col_offs,
       Tout* C,
@@ -2103,7 +2103,7 @@ class SpmmTPP {
           p->bcsc_bn,
           p->bcsc_bk,
           (long)spmm_flags,
-          (long)transa);
+          (long)p->transa);
       return std::string(hash);
     }
     void* build_kernel() override {
