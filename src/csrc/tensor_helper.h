@@ -163,6 +163,11 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   l_rowidx  = (unsigned int*) libxsmm_aligned_malloc( nnz/(bcsc_bk*bcsc_bn)*sizeof(unsigned int),   64 );
   l_data    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );
 
+  # pragma omp parallel for
+  for (l_i = 0; l_i < nnz; l_i++) {
+    l_data[l_i] = (DType)1;
+  }
+
   /* Second pass to create BCSC */
   l_nz_block_id = 0;
   l_colptr[N/bcsc_bn] = nnz/(bcsc_bk*bcsc_bn);

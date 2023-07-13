@@ -920,7 +920,7 @@ inline void fc_gelu(
                 zero_tpp(dst);
               }
             }
-            if (rem == BSb || s1 < BS_blocks-1) {
+            if (spmm_use_flat_acts == 0 || rem == BSb || s1 < BS_blocks-1) {
               spmm_tpp(in[s1], 
                        t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
                        dst, true);
