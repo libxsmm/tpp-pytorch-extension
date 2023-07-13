@@ -34,7 +34,7 @@ static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
 static int SPMM_PACKED_BLOCK_SIZE = env2int("SPMM_PACKED_BLOCK_SIZE", 64);
-static int spmm_use_trans_ac = false;
+int spmm_use_trans_ac = env2int("SPMM_FLAT_ACTIVATIONS", 0);
 
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
@@ -921,7 +921,7 @@ inline at::Tensor fc_gelu(
   auto C = sizes[2];
   auto bc = C/ t_wt.sizes[1];
   auto bn = (N <= SPMM_PACKED_BLOCK_SIZE) ? N : SPMM_PACKED_BLOCK_SIZE;
-  auto t_new_in = act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
+  auto t_new_in = (spmm_use_trans_ac > 0) ? t_in : act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
 
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
