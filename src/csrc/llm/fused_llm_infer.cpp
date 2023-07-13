@@ -5,7 +5,7 @@
  * Further information: https://github.com/libxsmm/tpp-pytorch-extension/     *
  * SPDX-License-Identifier: BSD-3-Clause                                      *
  ******************************************************************************/
-/* Author: Dhiraj Kalamkar (Intel Corp.)
+/* Author: Evangelos Georganas, Dhiraj Kalamkar (Intel Corp.)
  ******************************************************************************/
 
 #include <ATen/record_function.h>
@@ -33,6 +33,9 @@ static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
+static int SPMM_PACKED_BLOCK_SIZE = env2int("SPMM_PACKED_BLOCK_SIZE", 64);
+static int spmm_use_trans_ac = false;
+
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
@@ -828,60 +831,35 @@ inline void fc_gelu(
     at::Tensor t_out) {
   RECORD_SCOPE(i_gemm, {t_in});
   auto in_sizes = t_in.sizes();
-  auto BS = in_sizes[2];
-#if 0
-  if (BS > FT_OPT_SIZE) { // first token compute
-    t_wt = wt_tensor_for_first_token<T>(t_wt);
-  }
-#endif
-  auto C = in_sizes[0] * in_sizes[1] * in_sizes[3];
-
+  auto out_sizes = t_out.sizes();
+  auto BS = out_sizes[0] * out_sizes[1];
+  auto C = in_sizes[1] * in_sizes[2] * in_sizes[4];
   auto Nc = t_wt.sizes[1];
   auto Hc = C / Nc;
   auto Nk = t_wt.sizes[0];
   auto Hk = t_wt.sizes[3];
   auto K = Nk * Hk;
-
-  //printf("DERIVED VALS ARE: C %d Nc %d Hc %d Nk %d Hk %d K %d\n", C,  Nc, Hc, Nk, Hk, K );
-#if 0
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-#endif
-
-  auto in = GetVLAPtr<T>(t_in, {BS*Hc});
-#if 0
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-#endif
+  auto BS_blocks = in_sizes[0];
+  auto BSb = in_sizes[3];
+  auto in = GetVLAPtr<T>(t_in, {BSb*C});
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
 
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
-
+  auto rem = (BS % BSb == 0) ? BSb : (BS % BSb);
   bool with_bias = (t_bias.numel() > 0);
-  
-#if 0
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+
+  auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BSb, BSb), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasRowTPP<T>(Hk, rem, BSb), BIAS);
+
+  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BSb, BSb, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto trans_out_tpp_rem = SCOPEIT(XformExtTPP<T>(Hk, rem, rem, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
 
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
-#endif
-  
-  auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BS, BS), BIAS);
-  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BS, BS, Hk, BS, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(Hk, BS, BS), EW_ZERO);
-  auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BS, Hk, K, K), ACT);
+
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
   auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
-      BS,
+      BSb,
       Hk,
       Nc*Hc,
       t_wt.bcsc_bk,
@@ -891,78 +869,42 @@ inline void fc_gelu(
       1.0,
       0)));
 
-  //printf("Have %d blocks in bcsc (%d iters)\n",  t_wt.bcsc_blocks_in_bn, t_wt.n_blocks);
   {
     RECORD_OMP_TIME();
     auto loop_scheme = large_cache_opt ? "BA" : "Ba";
     auto igemm_loop =
-        ThreadedLoop<2>({{1}, {t_wt.n_blocks}}, loop_scheme);
+        ThreadedLoop<2>({{BS_blocks}, {t_wt.n_blocks}}, loop_scheme);
     igemm_loop(
         [&](int* ind) {
           int s1 = ind[0], i_n = ind[1];
-          T tmp_block[BS*Hk];
+          T tmp_block[BSb*Hk];
           int cur_n_blocks = (t_wt.Nblocks_offsets[i_n+1] - t_wt.Nblocks_offsets[i_n])/t_wt.bcsc_bn;
-          //printf("Cur n blocks is %d with %d blocks in bcsc\n", cur_n_blocks, t_wt.bcsc_blocks_in_bn);
-
           for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt.bcsc_blocks_in_bn) {
             int nk = (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/Hk;
             T *dst = tmp_block;
             if (with_bias) {
-              copy_bias_tpp(bias[nk], dst);
+              if (s1 == BS_blocks-1) {
+                copy_bias_tpp_rem(bias[nk], dst);     
+              } else {
+                copy_bias_tpp(bias[nk], dst);
+              }
             } else {
               zero_tpp(dst);
             }
             spmm_tpp(in[s1], 
                      t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
                      dst, true);
-            trans_out_tpp( dst, out[s1][nk] );
-            gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
+            if (s1 == BS_blocks-1) {
+              trans_out_tpp_rem( dst, out[s1*BSb][nk] );
+              gelu_fwd_tpp_rem(out[s1*BSb][nk], out[s1*BSb][nk]);
+            } else {
+              trans_out_tpp( dst, out[s1*BSb][nk] );
+              gelu_fwd_tpp(out[s1*BSb][nk], out[s1*BSb][nk]);
+            }
           }
         },
         [&]() {TimerStart();spmm_tpp.config(); },
         [&]() { spmm_tpp.release();TimerEnd(); });
-
-#if 0
-    RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto igemm_loop =
-        ThreadedLoop<3>({{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
-    igemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-	    brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-            }
-          }
-        },
-        [&]() { brgemm_tpp.config(); },
-        [&]() { brgemm_tpp.release(); });
-#endif
   }
 }
 
@@ -978,9 +920,8 @@ inline at::Tensor fc_gelu(
   auto N = sizes[0] * sizes[1];
   auto C = sizes[2];
   auto bc = C/ t_wt.sizes[1];
-
-  //printf("Reformat values N is %d (%d x %d), C %d, bc %d\n", N, sizes[0], sizes[1], C, bc );
-  auto t_new_in = act_tensor_trans_n2v_flat(N, C, bc, t_in);
+  auto bn = (N <= SPMM_PACKED_BLOCK_SIZE) ? N : SPMM_PACKED_BLOCK_SIZE;
+  auto t_new_in = act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
 
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
@@ -1781,7 +1722,6 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
 
     /* Create BCSC sparse tensors */
     sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wi);
-    //printf("Wi in layer %d has sparsity %.3g\n", cur_packing_layer_id, sparsity );
     bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
     bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
     create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk_use, bcsc_bn_use);

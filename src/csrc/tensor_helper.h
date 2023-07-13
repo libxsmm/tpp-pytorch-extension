@@ -802,23 +802,36 @@ inline at::Tensor get_padded_activation_for_vnni(at::Tensor& input) {
 inline at::Tensor act_tensor_trans_n2v_flat(
     long N,
     long C,
+    long bn,
     long bc,
     at::Tensor& input) {
   RECORD_SCOPE(a_vnni, {input});
   const int BS = get_vnni_block_size(input.dtype());
   TPP_ASSERT(bc % BS == 0, "Uneven number for S2\n");
+  long Nup = ((N+bn-1)/bn)*bn;
+  long Nblocks = Nup/bn;
+  auto output = input.new_empty({Nblocks, C/bc, bc/BS, bn, BS});
+  auto rem = (N % bn == 0) ? bn : (N % bn);
 
-  auto output = input.new_empty({C/bc, bc/BS, N, BS});
+  auto out = GetVLAPtr<bfloat16>(output, {C/bc, bn*bc});
+  auto in = GetVLAPtr<bfloat16>(input, {C/bc, bc});
 
-  auto out = GetVLAPtr<bfloat16>(output, {N * bc});
-  auto in = GetVLAPtr<bfloat16>(input, {bc});
   auto xpose_n2v_tpp = SCOPEIT(
-      XformExtTPP<bfloat16>(N, bc, bc, N, C, N, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+      XformExtTPP<bfloat16>(bn, bc, bc, bn, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+  auto xpose_n2v_tpp_rem = SCOPEIT(
+      XformExtTPP<bfloat16>(rem, bc, bc, rem, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
     for (int nc = 0; nc < C/bc; nc++) {
-      xpose_n2v_tpp(in[nc], out[nc]);
+      for (int nb = 0; nb < Nblocks; nb++) {
+        if (nb == Nblocks-1) {
+          xpose_n2v_tpp_rem(in[nb*bn][nc], out[nb][nc]);
+        } else {
+          xpose_n2v_tpp(in[nb*bn][nc], out[nb][nc]);
+        }
+      }
     }
   }
   return output;
