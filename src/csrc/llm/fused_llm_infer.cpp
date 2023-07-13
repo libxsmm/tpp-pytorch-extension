@@ -1768,6 +1768,13 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     }
   }
 
+  ~GPTJBlock() {
+    libxsmm_free( t_Wi_bcsc.data);
+    libxsmm_free( t_Wi_bcsc.rowidx);
+    libxsmm_free( t_Wi_bcsc.colptr);
+    libxsmm_free( t_Wi_bcsc.Nblocks_offsets);
+  }
+
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
       std::vector<at::Tensor> t_cache,
