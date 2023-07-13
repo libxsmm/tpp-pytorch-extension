@@ -34,7 +34,7 @@ static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
 static int SPMM_PACKED_BLOCK_SIZE = env2int("SPMM_PACKED_BLOCK_SIZE", 64);
-int spmm_use_trans_ac = env2int("SPMM_FLAT_ACTIVATIONS", 0);
+int spmm_use_flat_acts = env2int("SPMM_FLAT_ACTIVATIONS", 0);
 
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
@@ -833,14 +833,14 @@ inline void fc_gelu(
   auto in_sizes = t_in.sizes();
   auto out_sizes = t_out.sizes();
   auto BS = out_sizes[0] * out_sizes[1];
-  auto C = in_sizes[1] * in_sizes[2] * in_sizes[4];
+  auto C = (spmm_use_flat_acts > 0) ? in_sizes[2] : in_sizes[1] * in_sizes[2] * in_sizes[4];
   auto Nc = t_wt.sizes[1];
   auto Hc = C / Nc;
   auto Nk = t_wt.sizes[0];
   auto Hk = t_wt.sizes[3];
   auto K = Nk * Hk;
-  auto BS_blocks = in_sizes[0];
-  auto BSb = in_sizes[3];
+  auto BSb = (spmm_use_flat_acts > 0) ? LIBXSMM_MIN(BS, SPMM_PACKED_BLOCK_SIZE) : in_sizes[3];
+  auto BS_blocks = (spmm_use_flat_acts > 0) ? (BS+BSb-1)/BSb : in_sizes[0];
   auto in = GetVLAPtr<T>(t_in, {BSb*C});
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
@@ -848,27 +848,44 @@ inline void fc_gelu(
   auto rem = (BS % BSb == 0) ? BSb : (BS % BSb);
   bool with_bias = (t_bias.numel() > 0);
 
-  auto copy_bias_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BSb, BSb), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasRowTPP<T>(Hk, rem, BSb), BIAS);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
 
-  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BSb, BSb, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
-  auto trans_out_tpp_rem = SCOPEIT(XformExtTPP<T>(Hk, rem, rem, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto copy_bias_row_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BSb, BSb), BIAS);
+  auto copy_bias_row_tpp_rem =  SCOPEIT(CpyBiasRowTPP<T>(Hk, rem, BSb), BIAS);
+
+  auto zero_tpp = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO)
+                                           : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+  auto zero_tpp_rem = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO)                                               
+                                               : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
 
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
 
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BSb, BSb, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto trans_out_tpp_rem = SCOPEIT(XformExtTPP<T>(Hk, rem, rem, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+
   auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
       BSb,
       Hk,
       Nc*Hc,
       t_wt.bcsc_bk,
       t_wt.bcsc_bn,
-      Nc*Hc,
-      Hk,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
       1.0,
-      0)));
+      spmm_use_flat_acts)));
 
+  auto spmm_tpp_rem = SCOPEITGEMM((SpmmTPP<T, T>(
+      rem,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
+      1.0,
+      spmm_use_flat_acts)));
   {
     RECORD_OMP_TIME();
     auto loop_scheme = large_cache_opt ? "BA" : "Ba";
@@ -881,24 +898,43 @@ inline void fc_gelu(
           int cur_n_blocks = (t_wt.Nblocks_offsets[i_n+1] - t_wt.Nblocks_offsets[i_n])/t_wt.bcsc_bn;
           for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt.bcsc_blocks_in_bn) {
             int nk = (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/Hk;
-            T *dst = tmp_block;
+            T *dst = (spmm_use_flat_acts > 0) ? out[s1*BSb][nk] : tmp_block;
             if (with_bias) {
-              if (s1 == BS_blocks-1) {
-                copy_bias_tpp_rem(bias[nk], dst);     
-              } else {
-                copy_bias_tpp(bias[nk], dst);
+              if (spmm_use_flat_acts > 0) {
+                if (s1 == BS_blocks-1) {
+                  copy_bias_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_tpp(bias[nk], dst);
+                }
+              } else { 
+                if (s1 == BS_blocks-1) {
+                  copy_bias_row_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_row_tpp(bias[nk], dst);
+                }
               }
             } else {
-              zero_tpp(dst);
+              if (s1 == BS_blocks-1) {
+                zero_tpp_rem(dst);
+              } else {
+                zero_tpp(dst);
+              }
             }
-            spmm_tpp(in[s1], 
-                     t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
-                     dst, true);
+            if (rem == BSb || s1 < BS_blocks-1) {
+              spmm_tpp(in[s1], 
+                       t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                       dst, true);
+            } else {
+              spmm_tpp_rem(in[s1], 
+                           t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                           dst, false);
+              spmm_tpp.config();       
+            }
             if (s1 == BS_blocks-1) {
-              trans_out_tpp_rem( dst, out[s1*BSb][nk] );
+              if (spmm_use_flat_acts == 0) trans_out_tpp_rem( dst, out[s1*BSb][nk] );
               gelu_fwd_tpp_rem(out[s1*BSb][nk], out[s1*BSb][nk]);
             } else {
-              trans_out_tpp( dst, out[s1*BSb][nk] );
+              if (spmm_use_flat_acts == 0) trans_out_tpp( dst, out[s1*BSb][nk] );
               gelu_fwd_tpp(out[s1*BSb][nk], out[s1*BSb][nk]);
             }
           }
@@ -921,7 +957,7 @@ inline at::Tensor fc_gelu(
   auto C = sizes[2];
   auto bc = C/ t_wt.sizes[1];
   auto bn = (N <= SPMM_PACKED_BLOCK_SIZE) ? N : SPMM_PACKED_BLOCK_SIZE;
-  auto t_new_in = (spmm_use_trans_ac > 0) ? t_in : act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
+  auto t_new_in = (spmm_use_flat_acts > 0) ? t_in : act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
 
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
 
