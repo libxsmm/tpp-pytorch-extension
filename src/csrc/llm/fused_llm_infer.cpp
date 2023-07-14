@@ -1862,7 +1862,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
-  tensor_bcsc_t t_Wi_bcsc, t_Wo_bcsc, t_Wq_bcsc, t_Wk_bcsc, t_Wv_bcsc, t_Wp_bcsc;
+  tensor_bcsc_t t_Wi_bcsc = {0}, t_Wo_bcsc = {0}, t_Wq_bcsc = {0}, t_Wk_bcsc = {0}, t_Wv_bcsc = {0}, t_Wp_bcsc = {0};
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
@@ -1898,6 +1898,42 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
 
     t_EP = params[i++]; // embed_positions
 
+    update_bcsc_copy();
+
+    N = t_Wq.size(0) * t_Wq.size(3) / H;
+    if (my_rank == 0) {
+      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
+    }
+  }
+
+  ~GPTJBlock() {
+    libxsmm_free( t_Wi_bcsc.data);
+    libxsmm_free( t_Wi_bcsc.rowidx);
+    libxsmm_free( t_Wi_bcsc.colptr);
+    libxsmm_free( t_Wi_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wq_bcsc.data);
+    libxsmm_free( t_Wq_bcsc.rowidx);
+    libxsmm_free( t_Wq_bcsc.colptr);
+    libxsmm_free( t_Wq_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wk_bcsc.data);
+    libxsmm_free( t_Wk_bcsc.rowidx);
+    libxsmm_free( t_Wk_bcsc.colptr);
+    libxsmm_free( t_Wk_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wv_bcsc.data);
+    libxsmm_free( t_Wv_bcsc.rowidx);
+    libxsmm_free( t_Wv_bcsc.colptr);
+    libxsmm_free( t_Wv_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wp_bcsc.data);
+    libxsmm_free( t_Wp_bcsc.rowidx);
+    libxsmm_free( t_Wp_bcsc.colptr);
+    libxsmm_free( t_Wp_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wo_bcsc.data);
+    libxsmm_free( t_Wo_bcsc.rowidx);
+    libxsmm_free( t_Wo_bcsc.colptr);
+    libxsmm_free( t_Wo_bcsc.Nblocks_offsets);
+  }
+
+  void update_bcsc_copy( ) {
     auto bcsc_bk = env2int("BK", 4);
     auto bcsc_bn = env2int("BN", 4);
     double sparsity = 0.0;
@@ -1936,37 +1972,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
     create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk_use, bcsc_bn_use);
 
-    N = t_Wq.size(0) * t_Wq.size(3) / H;
-    if (my_rank == 0) {
-      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
-    }
-  }
-
-  ~GPTJBlock() {
-    libxsmm_free( t_Wi_bcsc.data);
-    libxsmm_free( t_Wi_bcsc.rowidx);
-    libxsmm_free( t_Wi_bcsc.colptr);
-    libxsmm_free( t_Wi_bcsc.Nblocks_offsets);
-    libxsmm_free( t_Wq_bcsc.data);
-    libxsmm_free( t_Wq_bcsc.rowidx);
-    libxsmm_free( t_Wq_bcsc.colptr);
-    libxsmm_free( t_Wq_bcsc.Nblocks_offsets);
-    libxsmm_free( t_Wk_bcsc.data);
-    libxsmm_free( t_Wk_bcsc.rowidx);
-    libxsmm_free( t_Wk_bcsc.colptr);
-    libxsmm_free( t_Wk_bcsc.Nblocks_offsets);
-    libxsmm_free( t_Wv_bcsc.data);
-    libxsmm_free( t_Wv_bcsc.rowidx);
-    libxsmm_free( t_Wv_bcsc.colptr);
-    libxsmm_free( t_Wv_bcsc.Nblocks_offsets);
-    libxsmm_free( t_Wp_bcsc.data);
-    libxsmm_free( t_Wp_bcsc.rowidx);
-    libxsmm_free( t_Wp_bcsc.colptr);
-    libxsmm_free( t_Wp_bcsc.Nblocks_offsets);
-    libxsmm_free( t_Wo_bcsc.data);
-    libxsmm_free( t_Wo_bcsc.rowidx);
-    libxsmm_free( t_Wo_bcsc.colptr);
-    libxsmm_free( t_Wo_bcsc.Nblocks_offsets);
+    //printf("Model updated!\n");
   }
 
   std::vector<at::Tensor> forward(
@@ -2445,7 +2451,8 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("set_pg", &set_pg);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
-      .def("forward", &GPTJBlock::forward);
+      .def("forward", &GPTJBlock::forward)
+      .def("update_bcsc_copy", &GPTJBlock::update_bcsc_copy);
   m.class_<OPTDecoderLayer>("OPTDecoderLayer")
       .def(torch::init<std::vector<at::Tensor>, double, double, long, bool>())
       .def("forward", &OPTDecoderLayer::forward);

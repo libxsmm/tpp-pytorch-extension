@@ -159,6 +159,11 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   }
 
   /* Allocate BCSC structures */
+  if (sparse_wt->data) libxsmm_free(sparse_wt->data);
+  if (sparse_wt->colptr) libxsmm_free(sparse_wt->colptr);
+  if (sparse_wt->rowidx) libxsmm_free(sparse_wt->rowidx);
+  if (sparse_wt->Nblocks_offsets) libxsmm_free(sparse_wt->Nblocks_offsets);
+
   l_colptr  = (unsigned int*) libxsmm_aligned_malloc( (N/bcsc_bn+1)*sizeof(unsigned int), 64 );
   l_rowidx  = (unsigned int*) libxsmm_aligned_malloc( nnz/(bcsc_bk*bcsc_bn)*sizeof(unsigned int),   64 );
   l_data    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );

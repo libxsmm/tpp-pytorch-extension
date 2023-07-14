@@ -192,6 +192,11 @@ def OptimizeModelForGPTJ(model, dtype, device='cpu'):
             kwargs = m._parameters[name].__dict__
             m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
 
+def UpdateGPTJModel(model):
+    for m in model.modules():
+        if isinstance(m, GPTJBlock):
+            m.cpp_block.update_bcsc_copy()
+
 
 transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 
