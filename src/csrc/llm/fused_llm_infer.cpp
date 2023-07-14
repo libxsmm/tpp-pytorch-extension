@@ -45,7 +45,9 @@ REGISTER_LOCAL_SCOPE(qkv_gemm_sparse, "qkv_spmm");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
+REGISTER_LOCAL_SCOPE(o_spmm, "o_spmm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
+REGISTER_LOCAL_SCOPE(i_spmm, "i_spmm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
 REGISTER_LOCAL_SCOPE(rotary, "rotary");
 REGISTER_LOCAL_SCOPE(reorder, "rorder");
@@ -719,95 +721,132 @@ inline void fc_add2_scale(
     at::Tensor t_in,
     at::Tensor t_in1,
     at::Tensor t_in2,
-    at::Tensor t_wt,
+    const tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     at::Tensor t_out,
     float scale) {
-  RECORD_SCOPE(o_gemm, {t_in, t_wt});
+  RECORD_SCOPE(o_spmm, {t_in});
   auto in_sizes = t_in.sizes();
-  auto BS = in_sizes[0] * in_sizes[1];
-  if (BS > FT_OPT_SIZE) { // first token compute
-    t_wt = wt_tensor_for_first_token<T>(t_wt);
-  }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
+  auto out_sizes = t_out.sizes();
+  auto BS = out_sizes[0] * out_sizes[1];
+  auto C = (spmm_use_flat_acts > 0) ? in_sizes[2] : in_sizes[1] * in_sizes[2] * in_sizes[4];
+  auto Nc = t_wt.sizes[1];
   auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
+  auto Nk = t_wt.sizes[0];
+  auto Hk = t_wt.sizes[3];
   auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto BSb = (spmm_use_flat_acts > 0) ? LIBXSMM_MIN(BS, SPMM_PACKED_BLOCK_SIZE) : in_sizes[3];
+  auto BS_blocks = (spmm_use_flat_acts > 0) ? (BS+BSb-1)/BSb : in_sizes[0];
+  auto in = GetVLAPtr<T>(t_in, {BSb*C});
   auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
   auto in2 = GetVLAPtr<T>(t_in2, {Nk, Hk});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
   auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt) Ncb = NCB_BLOCK_SIZE;
-
+  auto rem = (BS % BSb == 0) ? BSb : (BS % BSb);
   bool with_bias = (t_bias.numel() > 0);
+
+
   auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
   auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+
+  auto copy_bias_row_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BSb, BSb), BIAS);
+  auto copy_bias_row_tpp_rem =  SCOPEIT(CpyBiasRowTPP<T>(Hk, rem, BSb), BIAS);
+
+  auto zero_tpp = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO)
+                                           : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+  auto zero_tpp_rem = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO)                                               
+                                               : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+
+  auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
+  auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
+
+  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BSb, BSb, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto trans_out_tpp_rem = SCOPEIT(XformExtTPP<T>(Hk, rem, rem, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+
   auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
   auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
 
+  auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
+      BSb,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
+      1.0,
+      spmm_use_flat_acts)));
+
+  auto spmm_tpp_rem = SCOPEITGEMM((SpmmTPP<T, T>(
+      rem,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
+      1.0,
+      spmm_use_flat_acts)));
+
   {
     RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto ogemm_loop = ThreadedLoop<3>(
-        {{0, Nc, Ncb, false}, {0L, BS, BSb}, {Nk}}, loop_scheme);
+    auto loop_scheme = large_cache_opt ? "BA" : "Ba";
+    auto ogemm_loop =
+        ThreadedLoop<2>({{BS_blocks}, {t_wt.n_blocks}}, loop_scheme);
     ogemm_loop(
         [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
+          int s1 = ind[0], i_n = ind[1];
+          T tmp_block[BSb*Hk];
+          int cur_n_blocks = (t_wt.Nblocks_offsets[i_n+1] - t_wt.Nblocks_offsets[i_n])/t_wt.bcsc_bn;
+          for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt.bcsc_blocks_in_bn) {
+            int nk = (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/Hk;
+            T *dst = (spmm_use_flat_acts > 0) ? out[s1*BSb][nk] : tmp_block;
+            if (with_bias) {
+              if (spmm_use_flat_acts > 0) {
+                if (s1 == BS_blocks-1) {
+                  copy_bias_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_tpp(bias[nk], dst);
+                }
+              } else { 
+                if (s1 == BS_blocks-1) {
+                  copy_bias_row_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_row_tpp(bias[nk], dst);
+                }
+              }
+            } else {
+              if (s1 == BS_blocks-1) {
+                zero_tpp_rem(dst);
               } else {
-                zero_tpp(out[s1][nk]);
+                zero_tpp(dst);
               }
             }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              sadd_tpp(in2[s1][nk], out[s1][nk], scale);
+            if (spmm_use_flat_acts == 0 || rem == BSb || s1 < BS_blocks-1) {
+              spmm_tpp(in[s1], 
+                       t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                       dst, true);
+            } else {
+              spmm_tpp_rem(in[s1], 
+                           t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                           dst, false);
+              spmm_tpp.config();       
             }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-	    brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
+            if (s1 == BS_blocks-1) {
+              if (spmm_use_flat_acts == 0) trans_out_tpp_rem( dst, out[s1*BSb][nk] );
+              add_tpp_rem(out[s1*BSb][nk], in1[s1*BSb][nk], out[s1*BSb][nk]);
+              sadd_tpp_rem(in2[s1*BSb][nk], out[s1*BSb][nk], scale);         
+            } else {
+              if (spmm_use_flat_acts == 0) trans_out_tpp( dst, out[s1*BSb][nk] );
+              add_tpp(out[s1*BSb][nk], in1[s1*BSb][nk], out[s1*BSb][nk]);
+              sadd_tpp(in2[s1*BSb][nk], out[s1*BSb][nk], scale);
             }
           }
         },
-        [&]() { TimerStart();brgemm_tpp.config(); },
-        [&]() { brgemm_tpp.release(); TimerEnd(); });
+        [&]() {TimerStart();spmm_tpp.config(); },
+        [&]() { spmm_tpp.release();TimerEnd(); });
   }
 }
 
@@ -816,7 +855,7 @@ inline at::Tensor fc_add2_scale(
     at::Tensor t_in,
     at::Tensor t_in1,
     at::Tensor t_in2,
-    at::Tensor t_wt,
+    const tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     float scale) {
   auto t_out = at::empty_like(t_in1);
@@ -830,7 +869,7 @@ inline void fc_gelu(
     const tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     at::Tensor t_out) {
-  RECORD_SCOPE(i_gemm, {t_in});
+  RECORD_SCOPE(i_spmm, {t_in});
   auto in_sizes = t_in.sizes();
   auto out_sizes = t_out.sizes();
   auto BS = out_sizes[0] * out_sizes[1];
@@ -1824,7 +1863,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
-  tensor_bcsc_t t_Wi_bcsc, t_Wq_bcsc, t_Wk_bcsc, t_Wv_bcsc, t_Wp_bcsc;
+  tensor_bcsc_t t_Wi_bcsc, t_Wo_bcsc, t_Wq_bcsc, t_Wk_bcsc, t_Wv_bcsc, t_Wp_bcsc;
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
@@ -1893,6 +1932,11 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
     create_bcsc_from_blocked_nkkn_weight(t_Wp, &t_Wp_bcsc, bcsc_bk_use, bcsc_bn_use);
 
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wo);
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wo, &t_Wo_bcsc, bcsc_bk_use, bcsc_bn_use);
+
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
       std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
@@ -1920,6 +1964,10 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     libxsmm_free( t_Wp_bcsc.rowidx);
     libxsmm_free( t_Wp_bcsc.colptr);
     libxsmm_free( t_Wp_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wo_bcsc.data);
+    libxsmm_free( t_Wo_bcsc.rowidx);
+    libxsmm_free( t_Wo_bcsc.colptr);
+    libxsmm_free( t_Wo_bcsc.Nblocks_offsets);
   }
 
   std::vector<at::Tensor> forward(
@@ -1960,15 +2008,12 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_HS_new = (spmm_use_flat_acts > 0) ? t_HS : act_tensor_trans_n2v_flat(N_HS, C_HS, bn_HS, bc_HS, t_HS);
 
     auto t_QL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wq_bcsc, t_null);
-    //auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);  
     apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
     auto t_KL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wk_bcsc, t_null);
-    //auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null); 
     apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
 
     auto t_VL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wv_bcsc, t_null);
-    //auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
   
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
     auto t_CL = outputs[0];
@@ -1981,10 +2026,17 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_CL_new = (spmm_use_flat_acts > 0) ? t_CL : act_tensor_trans_n2v_flat(N_CL, C_CL, bn_CL, bc_CL, t_CL);
 
     auto t_SO = qkv_gemm_sparse<T>(t_CL, t_CL_new, t_Wp_bcsc, t_null);
-    //auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
 
     auto t_I = fc_gelu<T>(t_HS, t_HS_new, t_Wi_bcsc, t_Bi);
-    auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
+
+    auto sizesI = t_I.sizes();
+    auto N_I = sizesI[0] * sizesI[1];
+    auto C_I = sizesI[2];
+    auto bc_I = C_I/t_Wo_bcsc.sizes[1];
+    auto bn_I = (N_I <= SPMM_PACKED_BLOCK_SIZE) ? N_I : SPMM_PACKED_BLOCK_SIZE;
+    auto t_I_new = (spmm_use_flat_acts > 0) ? t_I : act_tensor_trans_n2v_flat(N_I, C_I, bn_I, bc_I, t_I);
+
+    auto t_Out = fc_add2_scale<T>(t_I_new, t_SO, t_res, t_Wo_bcsc, t_Bo, scale);
     if (my_size > 1) {
       allreduce(t_Out);
     }
@@ -2325,18 +2377,18 @@ static at::Tensor fc_add2_scale_wrap(
     at::Tensor t_in,
     at::Tensor t_in1,
     at::Tensor t_in2,
-    at::Tensor t_wt,
+    const tensor_bcsc_t& t_wt,
     at::Tensor t_bias,
     double scale) {
   GlobalPass _gp(FWD);
   auto t_out = at::empty_like(t_in1);
-  auto dt = t_wt.dtype();
+  auto dt = t_in.dtype();
   if (dt == at::kFloat) {
     fc_add2_scale<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else if (dt == at::kBFloat16) {
     fc_add2_scale<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else if (dt == at::kBFloat8) {
-    fc_add2_scale<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+    //fc_add2_scale<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
