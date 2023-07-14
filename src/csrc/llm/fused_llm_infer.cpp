@@ -986,15 +986,14 @@ inline void fc_gelu(
 
 template <typename T>
 inline at::Tensor fc_gelu(
+    at::IntArrayRef t_in_sizes,
     at::Tensor t_in,
-    at::Tensor t_in_new,
     tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
-  auto sizes = t_in.sizes().vec();
-  auto t_in_use = (spmm_use_flat_acts > 0) ? t_in : t_in_new;
+  auto sizes = t_in_sizes.vec();
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
   auto t_out = t_in.new_empty(sizes);
-  fc_gelu<T>(t_in_use, t_wt, t_bias, t_out);
+  fc_gelu<T>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1399,11 +1398,11 @@ inline at::Tensor qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) 
 }
 
 template <typename T, typename Tout = T>
-inline at::Tensor qkv_gemm_sparse(at::Tensor t_in, at::Tensor t_in_new, tensor_bcsc_t& t_wt, at::Tensor t_bias) {
-  auto sizes = t_in.sizes().vec();
+inline at::Tensor qkv_gemm_sparse(at::IntArrayRef t_in_sizes, at::Tensor t_in, tensor_bcsc_t& t_wt, at::Tensor t_bias) {
+  auto sizes = t_in_sizes.vec();
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
   auto t_out = t_in.new_empty(sizes);
-  qkv_gemm_sparse<T, Tout>(t_in_new, t_wt, t_bias, t_out);
+  qkv_gemm_sparse<T, Tout>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -2005,15 +2004,15 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto C_HS = sizes[2];
     auto bc_HS = C_HS/t_Wi_bcsc.sizes[1];
     auto bn_HS = (N_HS <= SPMM_PACKED_BLOCK_SIZE) ? N_HS : SPMM_PACKED_BLOCK_SIZE;
-    auto t_HS_new = (spmm_use_flat_acts > 0) ? t_HS : act_tensor_trans_n2v_flat(N_HS, C_HS, bn_HS, bc_HS, t_HS);
+    auto t_HS_use = (spmm_use_flat_acts > 0) ? t_HS : act_tensor_trans_n2v_flat(N_HS, C_HS, bn_HS, bc_HS, t_HS);
 
-    auto t_QL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wq_bcsc, t_null);
+    auto t_QL = qkv_gemm_sparse<T>(t_HS.sizes(), t_HS_use, t_Wq_bcsc, t_null);
     apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
-    auto t_KL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wk_bcsc, t_null);
+    auto t_KL = qkv_gemm_sparse<T>(t_HS.sizes(), t_HS_use, t_Wk_bcsc, t_null);
     apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
 
-    auto t_VL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wv_bcsc, t_null);
+    auto t_VL = qkv_gemm_sparse<T>(t_HS.sizes(), t_HS_use, t_Wv_bcsc, t_null);
   
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
     auto t_CL = outputs[0];
@@ -2023,20 +2022,20 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto C_CL = sizesCL[2];
     auto bc_CL = C_CL/t_Wp_bcsc.sizes[1];
     auto bn_CL = (N_CL <= SPMM_PACKED_BLOCK_SIZE) ? N_CL : SPMM_PACKED_BLOCK_SIZE;
-    auto t_CL_new = (spmm_use_flat_acts > 0) ? t_CL : act_tensor_trans_n2v_flat(N_CL, C_CL, bn_CL, bc_CL, t_CL);
+    auto t_CL_use = (spmm_use_flat_acts > 0) ? t_CL : act_tensor_trans_n2v_flat(N_CL, C_CL, bn_CL, bc_CL, t_CL);
 
-    auto t_SO = qkv_gemm_sparse<T>(t_CL, t_CL_new, t_Wp_bcsc, t_null);
+    auto t_SO = qkv_gemm_sparse<T>(t_CL.sizes(), t_CL_use, t_Wp_bcsc, t_null);
 
-    auto t_I = fc_gelu<T>(t_HS, t_HS_new, t_Wi_bcsc, t_Bi);
+    auto t_I = fc_gelu<T>(t_HS.sizes(), t_HS_use, t_Wi_bcsc, t_Bi);
 
     auto sizesI = t_I.sizes();
     auto N_I = sizesI[0] * sizesI[1];
     auto C_I = sizesI[2];
     auto bc_I = C_I/t_Wo_bcsc.sizes[1];
     auto bn_I = (N_I <= SPMM_PACKED_BLOCK_SIZE) ? N_I : SPMM_PACKED_BLOCK_SIZE;
-    auto t_I_new = (spmm_use_flat_acts > 0) ? t_I : act_tensor_trans_n2v_flat(N_I, C_I, bn_I, bc_I, t_I);
+    auto t_I_use = (spmm_use_flat_acts > 0) ? t_I : act_tensor_trans_n2v_flat(N_I, C_I, bn_I, bc_I, t_I);
 
-    auto t_Out = fc_add2_scale<T>(t_I_new, t_SO, t_res, t_Wo_bcsc, t_Bo, scale);
+    auto t_Out = fc_add2_scale<T>(t_I_use, t_SO, t_res, t_Wo_bcsc, t_Bo, scale);
     if (my_size > 1) {
       allreduce(t_Out);
     }
