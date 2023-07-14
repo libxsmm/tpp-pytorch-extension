@@ -41,6 +41,7 @@ static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
+REGISTER_LOCAL_SCOPE(qkv_gemm_sparse, "qkv_spmm");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
@@ -947,22 +948,14 @@ inline void fc_gelu(
 template <typename T>
 inline at::Tensor fc_gelu(
     at::Tensor t_in,
+    at::Tensor t_in_new,
     tensor_bcsc_t& t_wt,
     at::Tensor t_bias) {
   auto sizes = t_in.sizes().vec();
-  auto in_sizes = t_in.sizes();
-
-  /* Transpose t_HS for BCSC execution */
-  auto N = sizes[0] * sizes[1];
-  auto C = sizes[2];
-  auto bc = C/ t_wt.sizes[1];
-  auto bn = (N <= SPMM_PACKED_BLOCK_SIZE) ? N : SPMM_PACKED_BLOCK_SIZE;
-  auto t_new_in = (spmm_use_flat_acts > 0) ? t_in : act_tensor_trans_n2v_flat(N, C, bn, bc, t_in);
-
+  auto t_in_use = (spmm_use_flat_acts > 0) ? t_in : t_in_new;
   sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
-
   auto t_out = t_in.new_empty(sizes);
-  fc_gelu<T>(t_new_in, t_wt, t_bias, t_out);
+  fc_gelu<T>(t_in_use, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1171,6 +1164,115 @@ inline at::Tensor fc_relu(
 }
 
 template <typename T, typename Tout = T>
+inline void qkv_gemm_sparse(at::Tensor t_in, const tensor_bcsc_t& t_wt, at::Tensor t_bias, at::Tensor t_out) {
+  RECORD_SCOPE( qkv_gemm_sparse, {t_in} );
+  auto in_sizes = t_in.sizes();
+  auto out_sizes = t_out.sizes();
+  auto BS = out_sizes[0] * out_sizes[1];
+  auto C = (spmm_use_flat_acts > 0) ? in_sizes[2] : in_sizes[1] * in_sizes[2] * in_sizes[4];
+  auto Nc = t_wt.sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = t_wt.sizes[0];
+  auto Hk = t_wt.sizes[3];
+  auto K = Nk * Hk;
+  auto BSb = (spmm_use_flat_acts > 0) ? LIBXSMM_MIN(BS, SPMM_PACKED_BLOCK_SIZE) : in_sizes[3];
+  auto BS_blocks = (spmm_use_flat_acts > 0) ? (BS+BSb-1)/BSb : in_sizes[0];
+  auto in = GetVLAPtr<T>(t_in, {BSb*C});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+  auto rem = (BS % BSb == 0) ? BSb : (BS % BSb);
+  bool with_bias = (t_bias.numel() > 0);
+  
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto copy_bias_row_tpp = SCOPEIT(CpyBiasRowTPP<T>(Hk, BSb, BSb), BIAS);
+  auto copy_bias_row_tpp_rem =  SCOPEIT(CpyBiasRowTPP<T>(Hk, rem, BSb), BIAS);
+  auto zero_tpp = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO)
+                                           : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+  auto zero_tpp_rem = (spmm_use_flat_acts > 0) ? SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO)                                               
+                                               : SCOPEIT(SetZeroTPP<T>(Hk, BSb, BSb), EW_ZERO);
+  auto trans_out_tpp = SCOPEIT(XformExtTPP<T>(Hk, BSb, BSb, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+  auto trans_out_tpp_rem = SCOPEIT(XformExtTPP<T>(Hk, rem, rem, Hk, BSb, K, XformTPP::XFORM_XPOSE_TPP, true), XPOSE);
+
+  auto spmm_tpp = SCOPEITGEMM((SpmmTPP<T, T>(
+      BSb,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
+      1.0,
+      spmm_use_flat_acts)));
+
+  auto spmm_tpp_rem = SCOPEITGEMM((SpmmTPP<T, T>(
+      rem,
+      Hk,
+      Nc*Hc,
+      t_wt.bcsc_bk,
+      t_wt.bcsc_bn,
+      (spmm_use_flat_acts > 0) ? C : Nc*Hc,
+      (spmm_use_flat_acts > 0) ? K : Hk,
+      1.0,
+      spmm_use_flat_acts)));
+
+  {
+    RECORD_OMP_TIME();
+    auto loop_scheme = large_cache_opt ? "BA" : "Ba";
+    auto gemm_loop =
+        ThreadedLoop<2>({{BS_blocks}, {t_wt.n_blocks}}, loop_scheme);
+    gemm_loop(
+        [&](int* ind) {
+          int s1 = ind[0], i_n = ind[1];
+          T tmp_block[BSb*Hk];
+          int cur_n_blocks = (t_wt.Nblocks_offsets[i_n+1] - t_wt.Nblocks_offsets[i_n])/t_wt.bcsc_bn;
+          for (int l_block = 0; l_block < cur_n_blocks; l_block += t_wt.bcsc_blocks_in_bn) {
+            int nk = (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/Hk;
+            T *dst = (spmm_use_flat_acts > 0) ? out[s1*BSb][nk] : tmp_block;
+            if (with_bias) {
+              if (spmm_use_flat_acts > 0) {
+                if (s1 == BS_blocks-1) {
+                  copy_bias_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_tpp(bias[nk], dst);
+                }
+              } else { 
+                if (s1 == BS_blocks-1) {
+                  copy_bias_row_tpp_rem(bias[nk], dst);     
+                } else {
+                  copy_bias_row_tpp(bias[nk], dst);
+                }
+              }
+            } else {
+              if (s1 == BS_blocks-1) {
+                zero_tpp_rem(dst);
+              } else {
+                zero_tpp(dst);
+              }
+            }
+            if (spmm_use_flat_acts == 0 || rem == BSb || s1 < BS_blocks-1) {
+              spmm_tpp(in[s1], 
+                       t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                       dst, true);
+            } else {
+              spmm_tpp_rem(in[s1], 
+                           t_wt, t_wt.bcsc_blocks_in_bn, (t_wt.Nblocks_offsets[i_n] + l_block * t_wt.bcsc_bn)/t_wt.bcsc_bn, 
+                           dst, false);
+              spmm_tpp.config();       
+            }
+            if (s1 == BS_blocks-1) {
+              if (spmm_use_flat_acts == 0) trans_out_tpp_rem( dst, out[s1*BSb][nk] );
+            } else {
+              if (spmm_use_flat_acts == 0) trans_out_tpp( dst, out[s1*BSb][nk] );
+            }
+          }
+        },
+        [&]() {TimerStart();spmm_tpp.config(); },
+        [&]() { spmm_tpp.release();TimerEnd(); });
+  }
+}
+
+template <typename T, typename Tout = T>
 inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias, at::Tensor t_out) {
   RECORD_SCOPE(qkv_gemm, {t_in, t_wt});
   auto in_sizes = t_in.sizes();
@@ -1254,6 +1356,15 @@ inline at::Tensor qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) 
   sizes[2] = wt_sizes[0] * wt_sizes[3];
   auto t_out = t_in.new_empty(sizes);
   qkv_gemm<T, Tout>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T, typename Tout = T>
+inline at::Tensor qkv_gemm_sparse(at::Tensor t_in, at::Tensor t_in_new, tensor_bcsc_t& t_wt, at::Tensor t_bias) {
+  auto sizes = t_in.sizes().vec();
+  sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
+  auto t_out = t_in.new_empty(sizes);
+  qkv_gemm_sparse<T, Tout>(t_in_new, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1713,7 +1824,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
-  tensor_bcsc_t t_Wi_bcsc;
+  tensor_bcsc_t t_Wi_bcsc, t_Wq_bcsc, t_Wk_bcsc, t_Wv_bcsc, t_Wp_bcsc;
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
@@ -1757,10 +1868,30 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     double sparse_threshold = 1.0*env2int("SPTHRES", 40);
 
     /* Create BCSC sparse tensors */
-    sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wi);
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wi);
     bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
     bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
     create_bcsc_from_blocked_nkkn_weight(t_Wi, &t_Wi_bcsc, bcsc_bk_use, bcsc_bn_use);
+
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wq);
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk_use, bcsc_bn_use);
+
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wk);
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wk, &t_Wk_bcsc, bcsc_bk_use, bcsc_bn_use);
+
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wv);
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wv, &t_Wv_bcsc, bcsc_bk_use, bcsc_bn_use);
+
+    //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wp);
+    bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
+    bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
+    create_bcsc_from_blocked_nkkn_weight(t_Wp, &t_Wp_bcsc, bcsc_bk_use, bcsc_bn_use);
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
@@ -1773,6 +1904,22 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     libxsmm_free( t_Wi_bcsc.rowidx);
     libxsmm_free( t_Wi_bcsc.colptr);
     libxsmm_free( t_Wi_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wq_bcsc.data);
+    libxsmm_free( t_Wq_bcsc.rowidx);
+    libxsmm_free( t_Wq_bcsc.colptr);
+    libxsmm_free( t_Wq_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wk_bcsc.data);
+    libxsmm_free( t_Wk_bcsc.rowidx);
+    libxsmm_free( t_Wk_bcsc.colptr);
+    libxsmm_free( t_Wk_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wv_bcsc.data);
+    libxsmm_free( t_Wv_bcsc.rowidx);
+    libxsmm_free( t_Wv_bcsc.colptr);
+    libxsmm_free( t_Wv_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wp_bcsc.data);
+    libxsmm_free( t_Wp_bcsc.rowidx);
+    libxsmm_free( t_Wp_bcsc.colptr);
+    libxsmm_free( t_Wp_bcsc.Nblocks_offsets);
   }
 
   std::vector<at::Tensor> forward(
@@ -1806,20 +1953,37 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_res = t_HS;
     t_HS = lyr_norm<T, LT>(t_HS, t_G, t_B, eps);
 
-    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
+    auto N_HS = sizes[0] * sizes[1];
+    auto C_HS = sizes[2];
+    auto bc_HS = C_HS/t_Wi_bcsc.sizes[1];
+    auto bn_HS = (N_HS <= SPMM_PACKED_BLOCK_SIZE) ? N_HS : SPMM_PACKED_BLOCK_SIZE;
+    auto t_HS_new = (spmm_use_flat_acts > 0) ? t_HS : act_tensor_trans_n2v_flat(N_HS, C_HS, bn_HS, bc_HS, t_HS);
+
+    auto t_QL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wq_bcsc, t_null);
+    //auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);  
     apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+    auto t_KL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wk_bcsc, t_null);
+    //auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null); 
     apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
 
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
-
+    auto t_VL = qkv_gemm_sparse<T>(t_HS, t_HS_new, t_Wv_bcsc, t_null);
+    //auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+  
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
-
     auto t_CL = outputs[0];
-    auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
 
-    auto t_I = fc_gelu<T>(t_HS, t_Wi_bcsc, t_Bi);
+    auto sizesCL = t_CL.sizes();
+    auto N_CL = sizesCL[0] * sizesCL[1];
+    auto C_CL = sizesCL[2];
+    auto bc_CL = C_CL/t_Wp_bcsc.sizes[1];
+    auto bn_CL = (N_CL <= SPMM_PACKED_BLOCK_SIZE) ? N_CL : SPMM_PACKED_BLOCK_SIZE;
+    auto t_CL_new = (spmm_use_flat_acts > 0) ? t_CL : act_tensor_trans_n2v_flat(N_CL, C_CL, bn_CL, bc_CL, t_CL);
+
+    auto t_SO = qkv_gemm_sparse<T>(t_CL, t_CL_new, t_Wp_bcsc, t_null);
+    //auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+
+    auto t_I = fc_gelu<T>(t_HS, t_HS_new, t_Wi_bcsc, t_Bi);
     auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
     if (my_size > 1) {
       allreduce(t_Out);
