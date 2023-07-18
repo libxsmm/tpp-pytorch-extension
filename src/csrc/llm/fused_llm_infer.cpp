@@ -1273,10 +1273,12 @@ inline at::Tensor attn(
   // auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
   // auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
   // auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
-  auto dot_tpp = MulReduceTPP<T,T,float>(1, H);
-  auto scale_add_tpp = ScaleAddTPP<T, T>(H);
+  auto dot_tpp = MulReduceTPP<float,T,float>(1, H);
+  auto scale_add_tpp = ScaleAddTPP<T, float>(H);
   auto cpy_tpp = CpyTPP<T>(H);
-  auto zero_tpp = SetZeroTPP<T>(H);
+  auto cvt_f2b_tpp = ConvertTPP<float,T>(H);
+  auto cvt_b2f_tpp = ConvertTPP<T,float>(H);
+  auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
     SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
   {
@@ -1296,15 +1298,17 @@ inline at::Tensor attn(
             //auto t0 = getTime();
             {
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
+	      float tmp_QL[H];
+	      cvt_b2f_tpp(QL[b][n][0], tmp_QL);
               for (int sk = 0; sk < FSk; sk++) {
                 AS[sk] = 0.0f;
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
                   //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-                  dot_tpp(QL[b][n][0], KL_C[sk][bid][n], &AS[sk]);
+                  dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
                 } else {
                   //printf("b: %d n: %d sk: %d \n", b, n, sk);
-                  dot_tpp(QL[b][n][0], KL[b][n][0], &AS[sk]);
+                  dot_tpp(tmp_QL, KL[b][n][0], &AS[sk]);
                   cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
                 }
                 AS[sk] *= one_by_sqrt_H;
@@ -1315,22 +1319,24 @@ inline at::Tensor attn(
             }
             //auto t1 = getTime();
             softmax_fwd_tpp(AS, AS);
-            zero_tpp(CL[b][n][0]);
             //auto t2 = getTime();
             //printf("post softmax b: %d n: %d\n", b, n);
             {
+	      float tmp_CL[H];
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
+              zero_tpp(tmp_CL);
               for (int sk = 0; sk < FSk; sk++) {
                 //printf("bmm2: b: %d n: %d sk: %d \n", b, n, sk);
                 //if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]); 
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
-                  scale_add_tpp(VL_C[sk][bid][n], CL[b][n][0], AS[sk]);
+                  scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
                 } else {
-                  scale_add_tpp(VL[b][n][0], CL[b][n][0], AS[sk]);
+                  scale_add_tpp(VL[b][n][0], tmp_CL, AS[sk]);
                   cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
                 }
               }
+	      cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
             }
             //auto t3 = getTime();
             //if (tid == 0) printf("MHA: bns= %d %d %ld  %10g %10g %10g    %10g\n", b, n, FSk, (t1-t0)*1e6, (t2-t1)*1e6, (t3-t2)*1e6, (t3-t0)*1e6);
