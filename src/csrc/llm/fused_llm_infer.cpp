@@ -38,6 +38,7 @@ static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
+REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
@@ -1258,6 +1259,8 @@ inline at::Tensor attn(
   // std::cout << "KL: " << t_KL.sizes() << std::endl;
   TPP_ASSERT(Sq == 1 && Sk == 1, "Sq (%ld) and Sk (%ld) must be 1, offset (%ld)\n", Sq, Sk, offset);
   auto FSk = offset + Sk;
+  auto CSk = t_KL_cache.size(2);
+  //printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
 
   auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
@@ -1265,8 +1268,10 @@ inline at::Tensor attn(
   auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
-  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+  // auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+  // auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {N, CSk, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {N, CSk, H});
 
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
@@ -1305,11 +1310,13 @@ inline at::Tensor attn(
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
                   //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-                  dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+                  //dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+                  dot_tpp(tmp_QL, KL_C[bid][n][sk], &AS[sk]);
                 } else {
                   //printf("b: %d n: %d sk: %d \n", b, n, sk);
                   dot_tpp(tmp_QL, KL[b][n][0], &AS[sk]);
-                  cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+                  //cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+                  cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
                 }
                 AS[sk] *= one_by_sqrt_H;
                 if (am_valid) {
@@ -1330,10 +1337,12 @@ inline at::Tensor attn(
                 //if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]); 
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
-                  scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
+                  //scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
+                  scale_add_tpp(VL_C[bid][n][sk], tmp_CL, AS[sk]);
                 } else {
                   scale_add_tpp(VL[b][n][0], tmp_CL, AS[sk]);
-                  cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+                  //cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+                  cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
                 }
               }
 	      cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
@@ -1557,6 +1566,7 @@ struct LLMBlock : torch::CustomClassHolder {
 
   template<typename T>
   std::vector<at::Tensor> self_mha(at::Tensor t_QL, at::Tensor t_KL, at::Tensor t_VL, at::Tensor t_am, std::vector<at::Tensor>& t_cache) {
+    RECORD_SCOPE(mha, {t_QL, t_KL});
     auto self = static_cast<cls*>(this);
     auto t_key_past = this->t_dummy;
     auto t_value_past = this->t_dummy;
@@ -1599,6 +1609,7 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (offset == 0) {
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
       auto capacity = S + KV_CACHE_INC_SIZE;
+#if 0
       t_key_past = t_KL.new_zeros({capacity, B, N, H});
       t_value_past = t_VL.new_zeros({capacity, B, N, H});
       t_beam_idx = t_beam_idx.new_zeros({capacity, B});
@@ -1609,11 +1620,27 @@ struct LLMBlock : torch::CustomClassHolder {
         t_key_past.select(0, i) = t_KL.select(2, i);
         t_value_past.select(0, i) = t_VL.select(2, i);
       }
+#else
+      t_key_past = t_KL.new_zeros({B, N, capacity, H});
+      t_value_past = t_VL.new_zeros({B, N, capacity, H});
+      //t_beam_idx = t_beam_idx.new_zeros({capacity, B});
+      t_beam_idx = at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
+      // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() << std::endl;
+      t_offset = t_offset + S;
+      for (int i = 0; i < S; i++) {
+        //std::cout << "t_key_past.shape:" << t_key_past.select(0, i).sizes() << std::endl;
+        //std::cout << "t_KL.shape:" << t_KL.select(2, i).sizes() << std::endl;
+        t_key_past.select(2, i) = t_KL.select(2, i);
+        t_value_past.select(2, i) = t_VL.select(2, i);
+      }
+      // t_key_past = t_key_past.view({capacity, B, N, H});
+      // t_value_past = t_value_past.view({capacity, B, N, H});
+#endif
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
       return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
     } else {
-      auto capacity = t_key_past.size(0);
+      auto capacity = t_key_past.size(2);
       if (capacity <= offset) {
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
         t_key_past.resize_({new_capacity, B, N, H});
@@ -1621,6 +1648,7 @@ struct LLMBlock : torch::CustomClassHolder {
         t_beam_idx.resize_({new_capacity, B});
       }
 
+      // if (my_rank == 0) std::cout << "t_beam_idx2: " << t_beam_idx.sizes() << std::endl;
       // std::cout << "t_key_past.shape:" << t_key_past.sizes() << std::endl;
       // std::cout << "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl;
       // std::cout << "t_offset:" << t_offset << std::endl;

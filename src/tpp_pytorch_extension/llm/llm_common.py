@@ -23,6 +23,7 @@ import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import numpy as np
+import os
 
 USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
@@ -176,18 +177,29 @@ def set_pg():
 
 def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discrete_kv: bool, max_positions=2048):
     if layer_past is None:
+        #print(f"len(layer_past) = 0")
         return ([], 0)
     n = len(layer_past)
-    if n == 3: # cache with beam_idx
+    #print(f"len(layer_past) = {n}")
+    if n < 4: # cache with beam_idx
         if discrete_kv == True:
             B1, N, S, H = layer_past[0].shape
-            B2 = layer_past[2].shape[0]
-            new_key = layer_past[0].new_zeros([max_positions, B2, N, H])
-            new_key[:S].copy_(layer_past[0].permute([2, 0, 1, 3]))
-            new_value = layer_past[1].new_zeros([max_positions, B2, N, H])
-            new_value[:S].copy_(layer_past[1].permute([2, 0, 1, 3]))
-            new_beam_idx = layer_past[2].new_zeros([max_positions, B2])
-            new_beam_idx[S-1] = layer_past[2]
+            if n == 3:
+                B2 = layer_past[2].shape[0]
+            else:
+                B2 = B1
+            inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "64"))
+            capacity = S + inc_size
+            assert B1 == B2
+            new_key = layer_past[0].new_zeros([B2, N, capacity, H])
+            new_key[:,:,:S,:].copy_(layer_past[0])
+            new_value = layer_past[1].new_zeros([B2, N, capacity, H])
+            new_value[:,:,:S,:].copy_(layer_past[1])
+            new_beam_idx = torch.arange(B2).unsqueeze(0).expand([capacity, B2]).contiguous()
+            #print(f"new_beam_idx = {new_beam_idx}")
+            if n == 3:
+                new_beam_idx[S-1] = layer_past[2]
+            #print(f"new_beam_idx[{S-1}] = {new_beam_idx[S-1]}")
             offset = torch.tensor(S)
             layer_past = (new_key, new_value, new_beam_idx, offset,)
             return (layer_past, offset)
@@ -209,18 +221,27 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     beam_idx at every generation step.
     """
     if len(past[0]) == 4: #discrete kv_cache
-        B1 = past[0][0].shape[1]
+        B1 = past[0][0].shape[0]
         B2 = beam_idx.shape[0]
-        #print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
-        #assert(B1 == B2)
+        # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
+        # print(f"B1 = {B1}, B2 = {B2}")
+        assert(B1 == B2)
+        xyz = True
         if B1 != B2:
             new_past = []
+            print(f"past[2]: {past[0][2]}")
+            print(f"beam_idx: {beam_idx}")
             for layer_past in past:
-                layer_past_0 = layer_past[0].repeat_interleave(B2//B1, dim=1).contiguous()
-                layer_past_1 = layer_past[1].repeat_interleave(B2//B1, dim=1).contiguous()
+                layer_past_0 = layer_past[0].repeat_interleave(B2//B1, dim=0).contiguous()
+                layer_past_1 = layer_past[1].repeat_interleave(B2//B1, dim=0).contiguous()
                 layer_past_2 = layer_past[2].repeat_interleave(B2//B1, dim=1).contiguous()
+                if xyz == True:
+                    print(f"layer_past[2]: {layer_past[2]}")
+                    print(f"layer_past_2: {layer_past_2}")
+                    xyz = False
                 layer_past_2[layer_past[3]-1]=beam_idx
                 new_past.append((layer_past_0, layer_past_1, layer_past_2, layer_past[3],))
+            print(f"new_past[0][2]: {new_past[0][2]}")
 
             return tuple(new_past)
         else:

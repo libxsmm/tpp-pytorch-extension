@@ -88,6 +88,7 @@ class GPTJBlock(BlockedModule):
         add_tensor_or_empty(attention_mask)
         discrete_kv = getattr(self, "discrete_kv", True)
         layer_past, offset = get_layer_past_and_offset(layer_past, discrete_kv)
+        # print("position_ids:", position_ids)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
             position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
