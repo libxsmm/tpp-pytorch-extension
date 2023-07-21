@@ -108,21 +108,23 @@ inline at::Tensor allgather(at::Tensor t_in, std::vector<long> &split_sizes) {
 template <typename T>
 inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Tensor t_beam_idx) {
   RECORD_SCOPE(concat, {t_in1, t_in2});
+  bool indirect = t_beam_idx.numel() > 0;
   auto ndim =  t_in1.dim();
   dim = dim >= 0 ? dim : dim+ndim;
 
   auto out_sizes = t_in1.sizes().vec();
   out_sizes[dim] += t_in2.size(dim);
+  if (indirect) out_sizes[0] = t_beam_idx.size(0);
   auto t_out = t_in1.new_empty(out_sizes);
 
   auto B = out_sizes[0];
   auto N = out_sizes[1];
   auto S = out_sizes[2];
   auto F = out_sizes[3];
+  TPP_ASSERT(B == t_in2.size(0), "Batch size mismatch\n");
   auto BNS = B * N * S;
   auto S1 = t_in1.size(dim);
   auto S2 = t_in2.size(dim);
-  bool indirect = t_beam_idx.numel() > 0;
 
   //auto cpy_tpp = SCOPEIT(CpyTPP<T>(F), EW_COPY);
   auto cpy_tpp = CpyTPP<T>(F);

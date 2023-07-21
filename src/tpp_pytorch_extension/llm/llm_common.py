@@ -175,12 +175,10 @@ def set_pg():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 
-def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discrete_kv: bool, max_positions=2048):
+def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discrete_kv: bool):
     if layer_past is None:
-        #print(f"len(layer_past) = 0")
         return ([], 0)
     n = len(layer_past)
-    #print(f"len(layer_past) = {n}")
     if n < 4: # cache with beam_idx
         if discrete_kv == True:
             B1, N, S, H = layer_past[0].shape
@@ -190,16 +188,23 @@ def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discret
                 B2 = B1
             inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "64"))
             capacity = S + inc_size
-            assert B1 == B2
             new_key = layer_past[0].new_zeros([B2, N, capacity, H])
-            new_key[:,:,:S,:].copy_(layer_past[0])
             new_value = layer_past[1].new_zeros([B2, N, capacity, H])
-            new_value[:,:,:S,:].copy_(layer_past[1])
-            new_beam_idx = torch.arange(B2).unsqueeze(0).expand([capacity, B2]).contiguous()
-            #print(f"new_beam_idx = {new_beam_idx}")
-            if n == 3:
-                new_beam_idx[S-1] = layer_past[2]
-            #print(f"new_beam_idx[{S-1}] = {new_beam_idx[S-1]}")
+            if B1 == B2:
+                new_key[:,:,:S,:].copy_(layer_past[0])
+                new_value[:,:,:S,:].copy_(layer_past[1])
+                new_beam_idx = torch.arange(B2).unsqueeze(0).expand([capacity, B2]).contiguous()
+                if n == 3:
+                    new_beam_idx[S-1] = layer_past[2]
+            else:
+                assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
+                assert n == 3, f"Must use lazy kv cache reorder but n = {n}"
+                num_beams = B2 // B1
+                beam_idx = layer_past[2] // num_beams
+                new_key[::num_beams,:,:S,:] = layer_past[0]
+                new_value[::num_beams,:,:S,:] = layer_past[1]
+                new_beam_idx = layer_past[2].new_zeros([capacity, B2]).contiguous()
+                new_beam_idx[:S] = layer_past[2]
             offset = torch.tensor(S)
             layer_past = (new_key, new_value, new_beam_idx, offset,)
             return (layer_past, offset)
@@ -220,21 +225,23 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
     beam_idx at every generation step.
     """
+    print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
     if len(past[0]) == 4: #discrete kv_cache
         B1 = past[0][0].shape[0]
         B2 = beam_idx.shape[0]
         # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
         # print(f"B1 = {B1}, B2 = {B2}")
-        assert(B1 == B2)
         xyz = True
         if B1 != B2:
+            assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
+            num_beams = B2 // B1
             new_past = []
             print(f"past[2]: {past[0][2]}")
             print(f"beam_idx: {beam_idx}")
             for layer_past in past:
-                layer_past_0 = layer_past[0].repeat_interleave(B2//B1, dim=0).contiguous()
-                layer_past_1 = layer_past[1].repeat_interleave(B2//B1, dim=0).contiguous()
-                layer_past_2 = layer_past[2].repeat_interleave(B2//B1, dim=1).contiguous()
+                layer_past_0 = layer_past[0].repeat_interleave(num_beams, dim=0).contiguous()
+                layer_past_1 = layer_past[1].repeat_interleave(num_beams, dim=0).contiguous()
+                layer_past_2 = layer_past[2].repeat_interleave(num_beams, dim=1).mul(num_beams).contiguous()
                 if xyz == True:
                     print(f"layer_past[2]: {layer_past[2]}")
                     print(f"layer_past_2: {layer_past_2}")
@@ -249,6 +256,13 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
                 layer_past[2][layer_past[3]-1]=beam_idx
             return past
     else:
+        B1 = past[0][0].shape[0]
+        B2 = beam_idx.shape[0]
+        if B1 != B2:
+            assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
+            num_beams = B2 // B1
+            beam_idx = beam_idx // num_beams
+            print(f"B1 = {B1}, B2 = {B2}, beam_idx: {beam_idx}")
         return tuple(tuple(layer_past) + (beam_idx,) for layer_past in past)
 
     # ret = fused_llm_cpp.reorder_cache(past, beam_idx)
