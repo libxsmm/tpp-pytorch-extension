@@ -200,11 +200,11 @@ def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discret
                 assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
                 assert n == 3, f"Must use lazy kv cache reorder but n = {n}"
                 num_beams = B2 // B1
-                beam_idx = layer_past[2] // num_beams
                 new_key[::num_beams,:,:S,:] = layer_past[0]
                 new_value[::num_beams,:,:S,:] = layer_past[1]
                 new_beam_idx = layer_past[2].new_zeros([capacity, B2]).contiguous()
-                new_beam_idx[:S] = layer_past[2]
+                # beam_idx was adjusted in reorder_cache by num_beams, so fit it back
+                new_beam_idx[:S] = layer_past[2] * num_beams
             offset = torch.tensor(S)
             layer_past = (new_key, new_value, new_beam_idx, offset,)
             return (layer_past, offset)
@@ -225,7 +225,7 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
     beam_idx at every generation step.
     """
-    print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
+    # print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
     if len(past[0]) == 4: #discrete kv_cache
         B1 = past[0][0].shape[0]
         B2 = beam_idx.shape[0]
@@ -262,7 +262,7 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
             assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
             num_beams = B2 // B1
             beam_idx = beam_idx // num_beams
-            print(f"B1 = {B1}, B2 = {B2}, beam_idx: {beam_idx}")
+            # print(f"B1 = {B1}, B2 = {B2}, beam_idx: {beam_idx}")
         return tuple(tuple(layer_past) + (beam_idx,) for layer_past in past)
 
     # ret = fused_llm_cpp.reorder_cache(past, beam_idx)

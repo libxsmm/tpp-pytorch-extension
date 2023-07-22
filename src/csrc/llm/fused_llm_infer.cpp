@@ -1644,10 +1644,19 @@ struct LLMBlock : torch::CustomClassHolder {
     } else {
       auto capacity = t_key_past.size(2);
       if (capacity <= offset) {
+        printf("Warning: Reallocating kv cache, consider increasing KV_CACHE_INC_SIZE (%d)\n", KV_CACHE_INC_SIZE);
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
-        t_key_past.resize_({new_capacity, B, N, H});
-        t_value_past.resize_({new_capacity, B, N, H});
-        t_beam_idx.resize_({new_capacity, B});
+        auto t_key_past_new = t_key_past.new_empty({B, N, new_capacity, H});
+        t_key_past_new.slice(2, 0, offset, 1).copy_(t_key_past);
+	t_key_past = t_key_past_new;
+
+        auto t_value_past_new = t_value_past.new_empty({B, N, new_capacity, H});
+        t_value_past_new.slice(2, 0, offset, 1).copy_(t_value_past);
+	t_value_past = t_value_past_new;
+
+        auto t_beam_idx_new = at::arange(B).unsqueeze(0).expand({new_capacity, B}).contiguous();
+        t_beam_idx_new.slice(0, 0, offset, 1).copy_(t_beam_idx);
+	t_beam_idx = t_beam_idx_new;
       }
 
       // if (my_rank == 0) std::cout << "t_beam_idx2: " << t_beam_idx.sizes() << std::endl;
