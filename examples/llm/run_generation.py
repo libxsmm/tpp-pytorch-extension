@@ -70,8 +70,8 @@ parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
 parser.add_argument("--jit", action="store_true")
-parser.add_argument("--num-iter", default=100, type=int, help="num iter")
-parser.add_argument("--num-warmup", default=10, type=int, help="num warmup")
+parser.add_argument("--num-iter", default=10, type=int, help="num iter")
+parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
 parser.add_argument("--batch-size", default=1, type=int, help="batch size")
 parser.add_argument("--token-latency", action="store_true", help="get token latency")
 parser.add_argument("--profile", action="store_true")
@@ -225,6 +225,8 @@ total_time = 0.0
 num_iter = args.num_iter
 num_warmup = args.num_warmup
 prompt = [prompt] * args.batch_size
+tokenizer.pad_token = tokenizer.eos_token
+tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
 
@@ -251,9 +253,12 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.use_tpp:
             tpx.reset_debug_timers()
         tic = time.time()
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
+        #input_ids = inputs.input_ids.to(device)
+        #print(type(inputs))
+
         output = model.generate(
-            input_ids, max_new_tokens=args.max_new_tokens, **generate_kwargs
+            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
@@ -267,7 +272,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.profile:
             prof.step()
         if args.use_tpp:
-            tpx.print_debug_timers()
+            tpx.print_debug_timers(detailed=False)
         print(gen_text, len(gen_ids), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
