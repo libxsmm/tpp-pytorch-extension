@@ -43,7 +43,7 @@ if ! test -f Miniconda3-latest-Linux-${ARCH}.sh ; then
 fi
 if ! test -d ${CONDA_INSTALL_DIR} ; then 
 bash ./Miniconda3-latest-Linux-${ARCH}.sh -b -p ${CONDA_INSTALL_DIR}
-${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.8
+${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.9
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
 conda install -n base conda-libmamba-solver
