@@ -32,7 +32,7 @@ static int large_cache_opt = false;
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
-static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
+static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
@@ -1611,33 +1611,14 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (offset == 0) {
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
       auto capacity = S + KV_CACHE_INC_SIZE;
-#if 0
-      t_key_past = t_KL.new_zeros({capacity, B, N, H});
-      t_value_past = t_VL.new_zeros({capacity, B, N, H});
-      t_beam_idx = t_beam_idx.new_zeros({capacity, B});
-      t_offset = t_offset + S;
-      for (int i = 0; i < S; i++) {
-        //std::cout << "t_key_past.shape:" << t_key_past.select(0, i).sizes() << std::endl;
-        //std::cout << "t_KL.shape:" << t_KL.select(2, i).sizes() << std::endl;
-        t_key_past.select(0, i) = t_KL.select(2, i);
-        t_value_past.select(0, i) = t_VL.select(2, i);
-      }
-#else
       t_key_past = t_KL.new_zeros({B, N, capacity, H});
       t_value_past = t_VL.new_zeros({B, N, capacity, H});
       //t_beam_idx = t_beam_idx.new_zeros({capacity, B});
       t_beam_idx = at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
       // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() << std::endl;
       t_offset = t_offset + S;
-      for (int i = 0; i < S; i++) {
-        //std::cout << "t_key_past.shape:" << t_key_past.select(0, i).sizes() << std::endl;
-        //std::cout << "t_KL.shape:" << t_KL.select(2, i).sizes() << std::endl;
-        t_key_past.select(2, i) = t_KL.select(2, i);
-        t_value_past.select(2, i) = t_VL.select(2, i);
-      }
-      // t_key_past = t_key_past.view({capacity, B, N, H});
-      // t_value_past = t_value_past.view({capacity, B, N, H});
-#endif
+      t_key_past.slice(2, 0, S, 1).copy_(t_KL);
+      t_value_past.slice(2, 0, S, 1).copy_(t_VL);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
       return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());

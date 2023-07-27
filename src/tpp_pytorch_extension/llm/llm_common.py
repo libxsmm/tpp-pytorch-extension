@@ -186,7 +186,7 @@ def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discret
                 B2 = layer_past[2].shape[0]
             else:
                 B2 = B1
-            inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "64"))
+            inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "128"))
             capacity = S + inc_size
             new_key = layer_past[0].new_zeros([B2, N, capacity, H])
             new_value = layer_past[1].new_zeros([B2, N, capacity, H])
@@ -231,24 +231,16 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
         B2 = beam_idx.shape[0]
         # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
         # print(f"B1 = {B1}, B2 = {B2}")
-        xyz = True
         if B1 != B2:
             assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
             num_beams = B2 // B1
             new_past = []
-            print(f"past[2]: {past[0][2]}")
-            print(f"beam_idx: {beam_idx}")
             for layer_past in past:
                 layer_past_0 = layer_past[0].repeat_interleave(num_beams, dim=0).contiguous()
                 layer_past_1 = layer_past[1].repeat_interleave(num_beams, dim=0).contiguous()
                 layer_past_2 = layer_past[2].repeat_interleave(num_beams, dim=1).mul(num_beams).contiguous()
-                if xyz == True:
-                    print(f"layer_past[2]: {layer_past[2]}")
-                    print(f"layer_past_2: {layer_past_2}")
-                    xyz = False
                 layer_past_2[layer_past[3]-1]=beam_idx
                 new_past.append((layer_past_0, layer_past_1, layer_past_2, layer_past[3],))
-            print(f"new_past[0][2]: {new_past[0][2]}")
 
             return tuple(new_past)
         else:
