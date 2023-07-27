@@ -439,7 +439,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   auto dim = t.dim();
   if (dim < 5) return t;
   auto sizes = t.sizes();
-  constexpr long RBS = 2;
+  constexpr long RBS = 4;
   auto K1 = sizes[0];
   if (K1 % RBS != 0) return t;
   auto C1 = sizes[1];
@@ -1244,7 +1244,7 @@ inline at::Tensor attn(
     at::Tensor t_VL,
     at::Tensor t_KL_cache,
     at::Tensor t_VL_cache,
-    std::vector<std::vector<long>>& beam_idx,
+    VLAPtr<long, 1, long>& beam_idx,
     long offset) {
   RECORD_SCOPE(ac_gemm2, {t_QL, t_KL});
   auto t_CL = at::empty_like(t_QL);
@@ -1645,14 +1645,14 @@ struct LLMBlock : torch::CustomClassHolder {
       // std::cout << "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl;
       // std::cout << "t_offset:" << t_offset << std::endl;
       // std::cout << "B: " << B << " offset:" << offset << std::endl;
-      std::vector<std::vector<long>> beam_idx(B, std::vector<long>(offset+1, 0));
+      auto t_new_beam_idx = t_beam_idx.new_empty({B, offset});
+      auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset});
       auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
       for(auto i = 0; i < B; i++) {
         beam_idx[i][offset-1] = b_ptr[offset-1][i];
         for(auto j = offset-2; j >= 0; j--) { //for the token of input, the target beam is alwarys 0
           beam_idx[i][j] = b_ptr[j][beam_idx[i][j+1]];
         }
-        //std::cout << "idx[" << i << "] = " << beam_idx[i] << std::endl;
       }
       t_CL = attn<T>(t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
