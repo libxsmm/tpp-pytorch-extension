@@ -24,6 +24,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     import tpp_pytorch_extension as tpx
+    from tpp_pytorch_extension.llm.llm_commom import jit_trace_model
 except:
     pass
 
@@ -124,159 +125,6 @@ def print_rank0(*args, **kwargs):
         orig_print(*args, **kwargs)
 
 print = print_rank0
-def sparse_model_config(model_config):
-    embedding_size = None
-    if hasattr(model_config, "hidden_size"):
-        embedding_size = model_config.hidden_size
-    elif hasattr(model_config, "n_embed"):
-        embedding_size = model_config.n_embed
-    elif hasattr(model_config, "n_embd"):
-        embedding_size = model_config.n_embd
-
-    num_head = None
-    if hasattr(model_config, "num_attention_heads"):
-        num_head = model_config.num_attention_heads
-    elif hasattr(model_config, "n_head"):
-        num_head = model_config.n_head
-
-    if embedding_size is None or num_head is None or num_head == 0:
-        raise ValueError("Check the model config")
-
-    num_embedding_size_per_head = int(embedding_size / num_head)
-    if hasattr(model_config, "n_layer"):
-        num_layer = model_config.n_layer
-    elif hasattr(model_config, "num_hidden_layers"):
-        num_layer = model_config.num_hidden_layers
-    else:
-        raise ValueError("Number of hidden layers couldn't be determined from the model config")
-
-    return num_layer, num_head, num_embedding_size_per_head
-
-
-def generate_past_key_values(model, batch_size, seq_len, num_beams=1, indirect_kv=True):
-    num_block_layers, num_attention_heads, num_embedding_size_per_head = sparse_model_config(model.config)
-    if model.config.model_type == "bloom":
-        past_key_values = tuple(
-            (
-                torch.empty(int(num_attention_heads * batch_size), num_embedding_size_per_head, seq_len)
-                .to(model.dtype)
-                .to(model.device),
-                torch.empty(int(num_attention_heads * batch_size), seq_len, num_embedding_size_per_head)
-                .to(model.dtype)
-                .to(model.device),
-            )
-            for _ in range(num_block_layers)
-        )
-    else:
-        if indirect_kv == True:
-            past_key_values = tuple(
-                (
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty([seq_len, batch_size * num_beams], dtype=torch.long).to(model.device),
-                    torch.tensor(0),
-                )
-                for _ in range(num_block_layers)
-            )
-        else:
-            past_key_values = tuple(
-                (
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.zeros([batch_size * num_beams], dtype=torch.long).to(model.device),
-                )
-                for _ in range(num_block_layers)
-            )
-    return past_key_values
-
-
-def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
-    batch_size = len(inputs)
-    dummy_input = tokenizer.batch_encode_plus(inputs, return_tensors="pt")
-    dummy_input = dummy_input.to(model.device)
-    if model.config.use_cache:
-        dummy_input["past_key_values"] = generate_past_key_values(model, batch_size, 1, num_beams=num_beams)
-    if len(dummy_input["past_key_values"][0]) < 4:
-        dummy_input["attention_mask"] = torch.cat(
-            [
-                torch.zeros(dummy_input["attention_mask"].shape[0], 1)
-                .to(dummy_input["attention_mask"].dtype)
-                .to(model.device),
-                dummy_input["attention_mask"],
-            ],
-            -1,
-        )
-    return dummy_input
-
-
-class _ModelFallbackWrapper(GenerationMixin):
-    __slots__ = ("_optimized", "_default")
-
-    def __init__(self, optimized, default, num_beams):
-        self._optimized = optimized
-        self._default = default
-        self.num_beams = num_beams
-
-    def __call__(self, *args, **kwargs):
-        first_token = True if kwargs["past_key_values"] is None else False
-        if kwargs["past_key_values"] is None and self._default.config.use_cache:
-            kwargs["past_key_values"] = generate_past_key_values(self._default, kwargs["input_ids"].shape[0], 0)
-        #kwargs.pop("position_ids", None)
-        if first_token == True and self.num_beams > 1:
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor) and k in ['input_ids', 'position_ids', 'attention_mask', 'token_type_ids']:
-                    kwargs[k] = kwargs[k][::self.num_beams].contiguous()
-        for k in list(kwargs.keys()):
-            if kwargs[k] is None or isinstance(kwargs[k], bool):
-                kwargs.pop(k)
-        outputs = self._optimized(**kwargs)
-        lm_logits = outputs[0]
-        if first_token == True and self.num_beams > 1:
-            _, ret = self._default._expand_inputs_for_generation(expand_size=self.num_beams,output=lm_logits)
-            lm_logits = ret["output"]
-
-        past_key_values = outputs[1]
-        fixed_output = CausalLMOutputWithPast(
-            loss=None,
-            logits=lm_logits,
-            past_key_values=past_key_values,
-            hidden_states=None,
-            attentions=None,
-        )
-
-        if first_token == True:
-            tpx.print_debug_timers(detailed=False)
-            tpx.reset_debug_timers()
-        return fixed_output
-
-    def __getattr__(self, item):
-        return getattr(self._default, item)
-
-    def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, inputs_embeds=None, use_cache=None, **kwargs
-    ):
-        return self._default.prepare_inputs_for_generation(
-            input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs
-        )
-
-    def _reorder_cache(
-        self, past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
-    ) -> Tuple[Tuple[torch.Tensor]]:
-        """
-        This function is used to re-order the `past_key_values` cache if [`~PretrainedModel.beam_search`] or
-        [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
-        beam_idx at every generation step.
-        """
-        return self._default._reorder_cache(past_key_values, beam_idx)
-
 
 # device
 device = torch.device(args.device)
@@ -369,24 +217,7 @@ print("---- Prompt size:", input_size)
 # generate args
 generate_kwargs = dict(do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4)
 if args.jit:
-    torch._C._jit_set_texpr_fuser_enabled(False)
-    jit_input_texts = ["enable jit"]
-    jit_inputs = prepare_jit_inputs(jit_input_texts, model, tokenizer, generate_kwargs["num_beams"])
-    past_key_values = jit_inputs.pop("past_key_values")
-    jit_inputs = model.prepare_inputs_for_generation(**jit_inputs)
-    jit_inputs['past_key_values'] = past_key_values
-    model.config.return_dict = False
-    if hasattr(model, "forward"):
-        sig = inspect.signature(model.forward)
-    else:
-        sig = inspect.signature(model.__call__)
-    jit_inputs = tuple(jit_inputs[key] for key in sig.parameters if jit_inputs.get(key, None) is not None)
-    traced_model = torch.jit.trace(model, jit_inputs, strict=False)
-    traced_model = torch.jit.freeze(traced_model.eval())
-    traced_model(*jit_inputs)
-    traced_model(*jit_inputs)
-
-    model = _ModelFallbackWrapper(traced_model, model, generate_kwargs["num_beams"])
+    model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True)
 
     #generate_kwargs["jit"] = True
 if args.token_latency:
