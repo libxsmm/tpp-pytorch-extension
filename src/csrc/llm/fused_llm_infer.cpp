@@ -64,7 +64,7 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
   printf("Setting PG: my_size = %d  my_rank = %d\n", my_size, my_rank);
 }
 
-inline void allreduce(at::Tensor t_in) {
+static inline void allreduce(at::Tensor t_in) {
   RECORD_SCOPE(allred, {t_in});
   if (!process_group) {
     printf("Missing process group when using model parallel, use set_pg()\n");
@@ -2148,6 +2148,7 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_add2_scale", &fc_add2_scale_wrap, "TPP fc_add2_scale");
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
+  m.def("allreduce", &allreduce);
   m.def(
       "apply_rotary_pos_emb_gptj",
       &apply_rotary_pos_emb_gptj_wrap,
@@ -2169,6 +2170,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_add2_scale", &fc_add2_scale_wrap);
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
+  m.def("allreduce", &allreduce);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);

@@ -25,6 +25,7 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import os
 import inspect
+from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import (
@@ -53,6 +54,10 @@ def compare(ref, opt, name=""):
                     f"{ind}: ref: {ref[ind].item():.7g} opt: {opt[ind].item():.7g} diff: {adiff[ind].item():.7g}  rdiff: {rd:.7g}"
                 )
                 err = rd
+
+def shm_allreduce(t):
+    fused_llm_cpp.allreduce(t)
+
 
 def sparse_model_config(model_config):
     embedding_size = None
