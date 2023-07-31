@@ -25,6 +25,7 @@
 
 using namespace tpp;
 #include "tensor_helper.h"
+#include "shm_coll.h"
 
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
@@ -33,6 +34,7 @@ static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
+static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", 1);
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
@@ -74,8 +76,13 @@ inline void allreduce(at::Tensor t_in) {
     process_group->barrier()->wait();
   }
 #endif
-  std::vector<at::Tensor> temp_vec = {t_in};
-  process_group->allreduce(temp_vec)->wait();
+  if (!USE_SHM_ALLREDUCE) {
+    std::vector<at::Tensor> temp_vec = {t_in};
+    process_group->allreduce(temp_vec)->wait();
+  } else {
+    auto shm_inst = SHMBuffer::getInst(t_in.numel()*t_in.element_size(), process_group);
+    shm_inst->allreduce(t_in);
+  }
 }
 
 inline at::Tensor allgather(at::Tensor t_in, std::vector<long> &split_sizes) {
