@@ -24,6 +24,7 @@ import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import transformers
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .llm_common import (
     BlockedLinear,
@@ -214,7 +215,9 @@ def GPTJForCausalLM_forward_patched(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
-    return GPTJForCausalLM_forward(input_ids=input_ids,
+    return GPTJForCausalLM_forward(
+            self,
+            input_ids=input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             position_ids=position_ids,
