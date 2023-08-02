@@ -150,10 +150,11 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
 class _ModelFallbackWrapper(GenerationMixin):
     __slots__ = ("_optimized", "_default")
 
-    def __init__(self, optimized, default, num_beams):
+    def __init__(self, optimized, default, num_beams, enable_profile=False):
         self._optimized = optimized
         self._default = default
         self.num_beams = num_beams
+        self.enable_profile = enable_profile
 
     def __call__(self, *args, **kwargs):
         first_token = True if kwargs["past_key_values"] is None else False
@@ -182,7 +183,7 @@ class _ModelFallbackWrapper(GenerationMixin):
             attentions=None,
         )
 
-        if first_token == True:
+        if self.enable_profile and first_token == True:
             tpx.print_debug_timers(detailed=False)
             tpx.reset_debug_timers()
         return fixed_output
