@@ -11,6 +11,7 @@
 import math
 import torch
 from torch import nn
+from typing import Optional, Tuple, Union
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
     BlockedModule,
@@ -196,3 +197,35 @@ def OptimizeModelForGPTJ(model, dtype, device='cpu'):
 
 transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 
+GPTJForCausalLM_forward = transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward
+
+def GPTJForCausalLM_forward_patched(
+    self,
+    input_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+    attention_mask: Optional[torch.FloatTensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    token_type_ids: Optional[torch.LongTensor] = None,
+    head_mask: Optional[torch.FloatTensor] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+) -> Union[Tuple, CausalLMOutputWithPast]:
+    return GPTJForCausalLM_forward(input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+    )
+
+transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward = GPTJForCausalLM_forward_patched
