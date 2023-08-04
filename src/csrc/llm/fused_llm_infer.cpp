@@ -1587,6 +1587,9 @@ struct LLMBlock : torch::CustomClassHolder {
     if (csz > 3) {
       t_offset = t_cache[3];
       offset = t_offset.item<long>();
+      TPP_ASSERT(csz == 6, "Updated indirect kv_cache tuple should be of length 6\n");
+      t_key_past = t_cache[4];
+      t_value_past = t_cache[5];
     } else if (csz > 0) {
       offset = t_key_past.size(2);
     }
@@ -1620,7 +1623,7 @@ struct LLMBlock : torch::CustomClassHolder {
       t_key_past.slice(2, 0, S, 1).copy_(t_KL);
       t_value_past.slice(2, 0, S, 1).copy_(t_VL);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
-      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
     } else {
       auto capacity = t_key_past.size(2);
@@ -1657,8 +1660,11 @@ struct LLMBlock : torch::CustomClassHolder {
       t_CL = attn<T>(t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
       t_offset = t_offset + 1;
+      S = t_offset.item<long>();
+      t_KL = t_key_past.slice(2, 0, S, 1);
+      t_VL = t_value_past.slice(2, 0, S, 1);
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
-      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
     }
   }
 };
