@@ -24,7 +24,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     import tpp_pytorch_extension as tpx
-    from tpp_pytorch_extension.llm.llm_commom import jit_trace_model
+    from tpp_pytorch_extension.llm.llm_commom import jit_trace_model, optimize_for_first_token
 except:
     pass
 
@@ -216,8 +216,11 @@ print("---- Prompt size:", input_size)
 
 # generate args
 generate_kwargs = dict(do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4)
-if args.jit:
-    model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True)
+if args.use_tpp:
+    if args.jit:
+        model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True, print_first_token_profile=True)
+    else:
+        model = tpx.llm.llm_common.optimize_for_first_token(model, generate_kwargs["num_beams"], print_first_token_profile=True)
 
     #generate_kwargs["jit"] = True
 if args.token_latency:
@@ -236,6 +239,8 @@ prompt = [prompt] * args.batch_size
 #         "Once upon a time, there existed a little girl, who liked to have adventures. She wanted to go to places and meet new people, and have fun.",
 #         ]
 tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token == "":
+    tokenizer.pad_token = "</s>"
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
@@ -264,6 +269,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
             tpx.reset_debug_timers()
         tic = time.time()
         inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
+        #inputs = tokenizer(prompt, return_tensors="pt", padding=False).to(device)
         #input_ids = inputs.input_ids.to(device)
         #print(type(inputs))
 

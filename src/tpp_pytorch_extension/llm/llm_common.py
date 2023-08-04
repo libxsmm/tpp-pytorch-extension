@@ -106,14 +106,20 @@ def generate_past_key_values(model, batch_size, seq_len, num_beams=1, indirect_k
         if indirect_kv == True:
             past_key_values = tuple(
                 (
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
+                    torch.empty(batch_size, num_attention_heads, 0, num_embedding_size_per_head)
                     .to(model.dtype)
                     .to(model.device),
-                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
+                    torch.empty(batch_size, num_attention_heads, 0, num_embedding_size_per_head)
                     .to(model.dtype)
                     .to(model.device),
                     torch.empty([seq_len, batch_size * num_beams], dtype=torch.long).to(model.device),
                     torch.tensor(0),
+                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
+                    .to(model.dtype)
+                    .to(model.device),
+                    torch.empty(batch_size, num_attention_heads, seq_len, num_embedding_size_per_head)
+                    .to(model.dtype)
+                    .to(model.device),
                 )
                 for _ in range(num_block_layers)
             )
@@ -155,10 +161,11 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
 class _ModelFallbackWrapper(GenerationMixin):
     __slots__ = ("_optimized", "_default")
 
-    def __init__(self, optimized, default, num_beams):
+    def __init__(self, optimized, default, num_beams, enable_profile=False):
         self._optimized = optimized
         self._default = default
         self.num_beams = num_beams
+        self.enable_profile = enable_profile
 
     def __call__(self, *args, **kwargs):
         first_token = True if kwargs["past_key_values"] is None else False
@@ -187,7 +194,7 @@ class _ModelFallbackWrapper(GenerationMixin):
             attentions=None,
         )
 
-        if first_token == True:
+        if self.enable_profile and first_token == True:
             tpx.print_debug_timers(detailed=False)
             tpx.reset_debug_timers()
         return fixed_output
@@ -212,7 +219,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         """
         return self._default._reorder_cache(past_key_values, beam_idx)
 
-def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True):
+def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, print_first_token_profile=False):
     torch._C._jit_set_texpr_fuser_enabled(False)
     jit_input_texts = ["enable jit"]
     jit_inputs = prepare_jit_inputs(jit_input_texts, model, tokenizer, num_beams)
@@ -230,7 +237,11 @@ def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True):
     traced_model(*jit_inputs)
     traced_model(*jit_inputs)
 
-    model = _ModelFallbackWrapper(traced_model, model, num_beams)
+    model = _ModelFallbackWrapper(traced_model, model, num_beams, enable_profile=print_first_token_profile)
+    return model
+
+def optimize_for_first_token(model, num_beams, print_first_token_profile=False):
+    model = _ModelFallbackWrapper(model, model, num_beams, enable_profile=print_first_token_profile)
     return model
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
@@ -391,14 +402,16 @@ def get_layer_past_and_offset(layer_past: Optional[Tuple[torch.Tensor]], discret
                 # beam_idx was adjusted in reorder_cache by num_beams, so fit it back
                 new_beam_idx[:S] = layer_past[2] * num_beams
             offset = torch.tensor(S)
-            layer_past = (new_key, new_value, new_beam_idx, offset,)
+            key = new_key[:,:,:S,:]
+            value = new_value[:,:,:S,:]
+            layer_past = (key, value, new_beam_idx, offset, new_key, new_value,)
             return (layer_past, offset)
         else:
             return (layer_past, layer_past[0].shape[2])
 
     else:
-        B1, N, S, H = layer_past[0].shape
-        B2 = layer_past[2].shape[0]
+        #B1, N, S, H = layer_past[0].shape
+        #B2 = layer_past[2].shape[0]
         #print(f"pkv{n} B1: {B1}  B2: {B2} t_offset: {layer_past[3]}")
         #print(f"pkv{n} : layer_past[3]{layer_past[3]}")
         return (layer_past, layer_past[3])
@@ -411,8 +424,9 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
     beam_idx at every generation step.
     """
     # print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
-    if len(past[0]) == 4: #discrete kv_cache
-        B1 = past[0][0].shape[0]
+    if len(past[0]) >= 4: #discrete kv_cache
+        assert len(past[0]) == 6, f"Invalid past key_value tuple length ({len(past[0])})"
+        B1 = past[0][4].shape[0]
         B2 = beam_idx.shape[0]
         # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
         # print(f"B1 = {B1}, B2 = {B2}")
@@ -420,12 +434,15 @@ def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> 
             assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
             num_beams = B2 // B1
             new_past = []
+            S = past[0][0].shape[2]
             for layer_past in past:
-                layer_past_0 = layer_past[0].repeat_interleave(num_beams, dim=0).contiguous()
-                layer_past_1 = layer_past[1].repeat_interleave(num_beams, dim=0).contiguous()
+                layer_past_4 = layer_past[4].repeat_interleave(num_beams, dim=0).contiguous()
+                layer_past_5 = layer_past[5].repeat_interleave(num_beams, dim=0).contiguous()
                 layer_past_2 = layer_past[2].repeat_interleave(num_beams, dim=1).mul(num_beams).contiguous()
                 layer_past_2[layer_past[3]-1]=beam_idx
-                new_past.append((layer_past_0, layer_past_1, layer_past_2, layer_past[3],))
+                layer_past_0 = layer_past_4[:,:,:S,:]
+                layer_past_1 = layer_past_5[:,:,:S,:]
+                new_past.append((layer_past_0, layer_past_1, layer_past_2, layer_past[3], layer_past_4, layer_past_5,))
 
             return tuple(new_past)
         else:

@@ -21,8 +21,9 @@ from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
 from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 import time
 from contextlib import contextmanager
-from typing import Optional, Tuple, Union
+from typing import Optional, List, Tuple, Union
 import transformers
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .llm_common import (
     BlockedLinear,
@@ -185,23 +186,35 @@ def OptimizeModelForOPT(model, dtype, device='cpu'):
             m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
 
 
-def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
-    """
-    This function is used to re-order the `past_key_values` cache if [`~PretrainedModel.beam_search`] or
-    [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
-    beam_idx at every generation step.
-    """
-    return tuple(layer_past + (beam_idx,) for layer_past in past)
-
-    # ret = fused_llm_cpp.reorder_cache(past, beam_idx)
-    # return tuple(
-    #     tuple(p for p in layer_past) for layer_past in ret
-    # )
-
-    # return tuple(
-    #     tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
-    #     for layer_past in past
-    # )
-
 transformers.models.opt.modeling_opt.OPTForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 
+OPTForCausalLM_forward = transformers.models.opt.modeling_opt.OPTForCausalLM.forward
+
+def OPTForCausalLM_forward_patched(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    head_mask: Optional[torch.Tensor] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    labels: Optional[torch.LongTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+) -> Union[Tuple, CausalLMOutputWithPast]:
+    return OPTForCausalLM_forward(
+        self,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        head_mask=head_mask,
+        inputs_embeds=inputs_embeds,
+        labels=labels,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        output_hidden_states=output_hidden_states,
+        return_dict=return_dict,
+    )
+
+transformers.models.opt.modeling_opt.OPTForCausalLM.forward = OPTForCausalLM_forward_patched
