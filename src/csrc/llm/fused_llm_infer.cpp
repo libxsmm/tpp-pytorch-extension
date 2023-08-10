@@ -1288,8 +1288,7 @@ inline at::Tensor attn(
   auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
     SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
-  {
-    //float GAS[64][2048];
+  if (FSk <= 256) {
     RECORD_OMP_TIME();
     {
 #pragma omp parallel
@@ -1305,8 +1304,8 @@ inline at::Tensor attn(
             //auto t0 = getTime();
             {
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
-	      float tmp_QL[H];
-	      cvt_b2f_tpp(QL[b][n][0], tmp_QL);
+              float tmp_QL[H];
+              cvt_b2f_tpp(QL[b][n][0], tmp_QL);
               for (int sk = 0; sk < FSk; sk++) {
                 AS[sk] = 0.0f;
                 if (sk < offset) {
@@ -1331,7 +1330,7 @@ inline at::Tensor attn(
             //auto t2 = getTime();
             //printf("post softmax b: %d n: %d\n", b, n);
             {
-	      float tmp_CL[H];
+              float tmp_CL[H];
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
               zero_tpp(tmp_CL);
               for (int sk = 0; sk < FSk; sk++) {
@@ -1347,7 +1346,7 @@ inline at::Tensor attn(
                   cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
                 }
               }
-	      cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
+              cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
             }
             //auto t3 = getTime();
             //if (tid == 0) printf("MHA: bns= %d %d %ld  %10g %10g %10g    %10g\n", b, n, FSk, (t1-t0)*1e6, (t2-t1)*1e6, (t3-t2)*1e6, (t3-t0)*1e6);
@@ -1358,7 +1357,56 @@ inline at::Tensor attn(
         //if (tid == 0) printf("MHA: s= %ld  %10g\n", FSk, (t01-t00)*1e6);
       }
     }
-  } 
+  } else {
+    auto t_AS = t_QL.new_empty({B, N, FSk}, at::kFloat);
+    // auto t_XL = t_QL.new_empty({B, N, H}, at::kFloat);
+    auto t_XL = t_QL.to(at::kFloat);
+    auto XL = GetVLAPtr<float>(t_XL, {N, H});
+    auto AS = GetVLAPtr<float>(t_AS, {N, FSk});
+
+    RECORD_OMP_TIME();
+    {
+#pragma omp parallel for collapse(3)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          for (int sk = 0; sk < FSk; sk++) {
+            AS[b][n][sk] = 0.0f;
+            if (sk < offset) {
+              int bid = beam_idx[b][sk];
+              //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
+              //dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+              dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
+            } else {
+              //printf("b: %d n: %d sk: %d \n", b, n, sk);
+              dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
+              cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+            }
+            AS[b][n][sk] *= one_by_sqrt_H;
+            if (am_valid) {
+              AS[b][n][sk] += AM[b][sk];
+            }
+          }
+        }
+      }
+#pragma omp parallel for collapse(2)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          softmax_fwd_tpp(AS[b][n], AS[b][n]);
+          zero_tpp(XL[b][n]);
+          for (int sk = 0; sk < FSk; sk++) {
+            if (sk < offset) {
+              int bid = beam_idx[b][sk];
+              scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
+            } else {
+              scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
+              cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+            }
+          }
+        }
+      }
+    }
+    t_CL = t_XL.to(t_CL.dtype());
+  }
   return t_CL;
 }
 
@@ -1579,7 +1627,7 @@ struct LLMBlock : torch::CustomClassHolder {
     auto N = self->N;
     auto H = self->H;
     at::Tensor t_CL;
-    auto offset = 0;
+    long offset = 0;
     int csz = t_cache.size();
     if (csz > 0) t_key_past = t_cache[0];
     if (csz > 1) t_value_past = t_cache[1];
