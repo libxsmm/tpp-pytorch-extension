@@ -29,7 +29,7 @@ if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
 
 xsmm_makefile = os.path.join(libxsmm_root, "Makefile")
-xsmm_include = "./libxsmm/include"
+xsmm_include = os.path.join(libxsmm_root, "include")
 xsmm_lib = os.path.join(libxsmm_root, "lib")
 
 if not os.path.exists(xsmm_makefile):
@@ -180,8 +180,8 @@ setup(
                 xsmm_include,
                 "{}/src/csrc".format(cwd),
             ],
-            # library_dirs=[xsmm_lib],
-            # libraries=["xsmm"],
+            #library_dirs=[xsmm_lib],
+            #libraries=["xsmm"],
         )
     ],
     cmdclass={"build_ext": BuildExtension, "build_clib": BuildMakeLib},
