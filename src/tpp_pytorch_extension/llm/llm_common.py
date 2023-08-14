@@ -210,6 +210,9 @@ class _ModelFallbackWrapper(GenerationMixin):
                 latencies.append(self.token_latencies[i+1]-self.token_latencies[i])
             self.token_latencies = []
             output = [output, latencies,]
+        if self.enable_profile:
+            tpx.print_debug_timers(detailed=False)
+            tpx.reset_debug_timers()
         return output
 
     def __getattr__(self, item):
@@ -235,7 +238,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         """
         return self._default._reorder_cache(past_key_values, beam_idx)
 
-def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, print_first_token_profile=False):
+def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, enable_profile=False):
     torch._C._jit_set_texpr_fuser_enabled(False)
     jit_input_texts = ["enable jit"]
     jit_inputs = prepare_jit_inputs(jit_input_texts, model, tokenizer, num_beams)
@@ -253,11 +256,11 @@ def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, print_first_t
     traced_model(*jit_inputs)
     traced_model(*jit_inputs)
 
-    model = _ModelFallbackWrapper(traced_model, model, num_beams, enable_profile=print_first_token_profile)
+    model = _ModelFallbackWrapper(traced_model, model, num_beams, enable_profile=enable_profile)
     return model
 
-def optimize_for_first_token(model, num_beams, print_first_token_profile=False):
-    model = _ModelFallbackWrapper(model, model, num_beams, enable_profile=print_first_token_profile)
+def optimize_for_first_token(model, num_beams, enable_profile=False):
+    model = _ModelFallbackWrapper(model, model, num_beams, enable_profile=enable_profile)
     return model
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
