@@ -163,6 +163,9 @@ class _ModelFallbackWrapper(GenerationMixin):
         self.num_beams = num_beams
         self.enable_profile = enable_profile
         self.token_latency = None
+        self.output_past_key_values = None
+        self.saved_input_ids = None
+        self.saved_past_key_values = None
 
     def __call__(self, *args, **kwargs):
         first_token = True if kwargs["past_key_values"] is None else False
@@ -183,6 +186,8 @@ class _ModelFallbackWrapper(GenerationMixin):
             lm_logits = ret["output"]
 
         past_key_values = outputs[1]
+        if self.output_past_key_values == True:
+            self.saved_past_key_values = past_key_values
         fixed_output = CausalLMOutputWithPast(
             loss=None,
             logits=lm_logits,
@@ -198,6 +203,7 @@ class _ModelFallbackWrapper(GenerationMixin):
 
     #@torch.no_grad()
     def generate(self, *args, **kwargs):
+        self.output_past_key_values = kwargs.pop("output_past_key_values", None)
         self.token_latency = kwargs.pop("token_latency", None)
         if self.token_latency == True:
             self.token_latencies = []
@@ -213,6 +219,13 @@ class _ModelFallbackWrapper(GenerationMixin):
         if self.enable_profile:
             tpx.print_debug_timers(detailed=False)
             tpx.reset_debug_timers()
+
+        if self.output_past_key_values == True:
+            saved_input_ids = self.saved_input_ids
+            saved_past_key_values = self.saved_past_key_values
+            self.saved_input_ids = None
+            self.saved_past_key_values = None
+            output = [output, [saved_input_ids, saved_past_key_values]]
         return output
 
     def __getattr__(self, item):
@@ -221,6 +234,8 @@ class _ModelFallbackWrapper(GenerationMixin):
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, use_cache=None, **kwargs
     ):
+        if self.output_past_key_values == True:
+            self.saved_input_ids = input_ids
         if self.token_latency == True:
             self.token_latencies.append(time.time())
 

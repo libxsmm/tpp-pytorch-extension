@@ -244,6 +244,7 @@ if tokenizer.pad_token == "":
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
+generate_kwargs['output_past_key_values'] = True
 
 def trace_handler(prof):
     print(
@@ -274,6 +275,8 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         output = model.generate(
             **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
+        if generate_kwargs['output_past_key_values'] == True:
+            output, pkv = output
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         if args.device == "xpu":
