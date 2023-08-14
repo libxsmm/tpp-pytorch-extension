@@ -512,20 +512,6 @@ class GATConvOpt(BlockedModule):
         elif activation is not None and feat_drop == 0.0:
             self.activation = ReLU() 
 
-        #self.fused_bias_relu = None
-        #self.add_bias = None
-
-        #if bias and activation is not None:
-        #    if not self.fuse_bias and not (self.fuse_src_bias and self.fuse_dst_bias):
-        #        self.fused_bias_relu = FusedBiasReLU()
-
-        #if bias and activation is None:
-        #    self.add_bias = AddBias()
-
-        #self.activation = None
-        #if activation is not None and self.fused_bias_relu is None:
-        #    self.activation = ReLU()
-
         self.use_bf16 = False
         self.reset_parameters()
 
@@ -640,11 +626,6 @@ class GATConvOpt(BlockedModule):
                     self.fc_src.weight,
                     self.attn_l
                 ]
-                if self.use_bf16:
-                    inputs_src = [
-                        i.to(torch.bfloat16) if i.is_floating_point() else i
-                        for i in inputs_src
-                    ]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.fuse_bias:
@@ -653,10 +634,6 @@ class GATConvOpt(BlockedModule):
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
-                #feat_src_ = GATMLPFunction.apply(
-                #    align, self.fuse_src_bias or self.fuse_bias,
-                #    *inputs_src,
-                #)
                 el, feat_src_ = GATMLPAttentionFunction.apply(
                     align, self.fuse_dst_bias or self.fuse_bias,
                     *inputs_src,
@@ -690,11 +667,6 @@ class GATConvOpt(BlockedModule):
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
 
                 inputs_src = [ h_src, self.fc_src.weight, ]
-                if self.use_bf16:
-                    inputs_src = [
-                        i.to(torch.bfloat16) if i.is_floating_point() else i
-                        for i in inputs_src
-                    ]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.bias is not None:
@@ -703,10 +675,6 @@ class GATConvOpt(BlockedModule):
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
-                #feat_src = GATMLPFunction.apply(
-                #    align, self.fuse_src_bias or self.fuse_bias,
-                #    *inputs_src,
-                #)
                 el, feat_src_ = GATMLPAttentionFunction.apply(
                     align, self.fuse_src_bias or self.fuse_bias,
                     *inputs_src,
@@ -723,22 +691,7 @@ class GATConvOpt(BlockedModule):
                         graph.number_of_dst_nodes(),
                     ) + dst_prefix_shape[1:]
 
-            #inputs_src = [feat_src, self.attn_l]
-            #if self.use_bf16:
-            #    inputs_src = [
-            #        i.to(torch.bfloat16) if i.is_floating_point() else i
-            #        for i in inputs_src
-            #    ]
-            #N = feat_src.size(0)
-            #align = self.align if (N > self.align or N == 0) else N
-            #el = GATAttentionFunction.apply(align, *inputs_src).view(-1, self._num_heads, 1)
-
             inputs_dst = [feat_dst, self.attn_r]
-            if self.use_bf16:
-                inputs_dst = [
-                    i.to(torch.bfloat16) if i.is_floating_point() else i
-                    for i in inputs_dst
-                ]
             N = feat_dst.size(0)
             align = self.align if (N > self.align or N == 0) else N
             er = GATAttentionFunction.apply(align, *inputs_dst).view(-1, self._num_heads, 1)
@@ -758,15 +711,6 @@ class GATConvOpt(BlockedModule):
             # message passing
             graph.update_all(fn.u_mul_e("ft", "a", "m"), fn.sum("m", "ft"))
             rst = graph.dstdata["ft"]
-
-            #if self.fused_bias_relu is not None:
-            #    rst = rst.view(*dst_prefix_shape, self._num_heads*self._out_feats)
-            #    rst = self.fused_bias_relu(rst, self.bias)
-            #    rst = rst.view(*dst_prefix_shape, self._num_heads, self._out_feats)
-            #elif self.bias is not None and self.activation is None:
-            #    rst = rst.view(*dst_prefix_shape, self._num_heads*self._out_feats)
-            #    rst = self.add_bias(rst, self.bias)
-            #    rst = rst.view(*dst_prefix_shape, self._num_heads, self._out_feats)
 
             if self.act_drop is not None:
                 rst = self.act_drop(rst)
@@ -822,6 +766,8 @@ class GATConvOptBF16(GATConvOpt):
                     torch.bfloat16,
                 )
             )
+            self.attn_l.data = self.attn_l.to(torch.bfloat16)
+            self.attn_r.data = self.attn_r.to(torch.bfloat16)
 
         self.use_bf16 = True
 
