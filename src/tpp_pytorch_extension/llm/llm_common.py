@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import numpy as np
 import os
+import time
 import inspect
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -161,6 +162,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         self._default = default
         self.num_beams = num_beams
         self.enable_profile = enable_profile
+        self.token_latency = None
 
     def __call__(self, *args, **kwargs):
         first_token = True if kwargs["past_key_values"] is None else False
@@ -194,12 +196,31 @@ class _ModelFallbackWrapper(GenerationMixin):
             tpx.reset_debug_timers()
         return fixed_output
 
+    #@torch.no_grad()
+    def generate(self, *args, **kwargs):
+        self.token_latency = kwargs.pop("token_latency", None)
+        if self.token_latency == True:
+            self.token_latencies = []
+
+        output = super().generate(*args, **kwargs)
+        if self.token_latency == True:
+            self.token_latencies.append(time.time())
+            latencies = []
+            for i in range(len(self.token_latencies) - 1):
+                latencies.append(self.token_latencies[i+1]-self.token_latencies[i])
+            self.token_latencies = []
+            output = [output, latencies,]
+        return output
+
     def __getattr__(self, item):
         return getattr(self._default, item)
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, use_cache=None, **kwargs
     ):
+        if self.token_latency == True:
+            self.token_latencies.append(time.time())
+
         return self._default.prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs
         )

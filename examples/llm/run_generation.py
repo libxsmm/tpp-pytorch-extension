@@ -224,8 +224,7 @@ if args.use_tpp:
 
     #generate_kwargs["jit"] = True
 if args.token_latency:
-    raise NotImplementedError("--token_latency not supported here")
-    #generate_kwargs["token_latency"] = True
+    generate_kwargs["token_latency"] = True
 #if args.use_tpp:
 #    generate_kwargs["TP_number"] = my_size
 
