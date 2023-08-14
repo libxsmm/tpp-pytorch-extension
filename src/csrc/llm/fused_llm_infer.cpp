@@ -363,6 +363,7 @@ inline void fc_plain(
 
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
 
+  t_in = t_in.contiguous();
   auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
@@ -1261,6 +1262,7 @@ inline at::Tensor attn(
   // std::cout << "KL: " << t_KL.sizes() << std::endl;
   TPP_ASSERT(Sq == 1 && Sk == 1, "Sq (%ld) and Sk (%ld) must be 1, offset (%ld)\n", Sq, Sk, offset);
   auto FSk = offset + Sk;
+  auto FSk_aligned = (FSk + 0x3FL) & ~0x3FL;
   auto CSk = t_KL_cache.size(2);
   //printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
@@ -1287,7 +1289,7 @@ inline at::Tensor attn(
   auto cvt_b2f_tpp = ConvertTPP<T,float>(H);
   auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
-    SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
+    SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
   if (FSk <= 256) {
     RECORD_OMP_TIME();
     {
@@ -1299,7 +1301,7 @@ inline at::Tensor attn(
 #pragma omp for collapse(2) nowait
         for (int b = 0; b < B; b++) {
           for (int n = 0; n < N; n++) {
-            float AS[FSk];
+            float AS[FSk_aligned];
             //float *AS = GAS[tid]; //FSk];
             //auto t0 = getTime();
             {
@@ -1323,6 +1325,10 @@ inline at::Tensor attn(
                 if (am_valid) {
                   AS[sk] += AM[b][sk];
                 }
+              }
+              for (int sk = FSk; sk < FSk_aligned; sk++) {
+                // pad AS to align for softmax
+                AS[sk] = -1e9f;
               }
             }
             //auto t1 = getTime();
@@ -1358,11 +1364,11 @@ inline at::Tensor attn(
       }
     }
   } else {
-    auto t_AS = t_QL.new_empty({B, N, FSk}, at::kFloat);
+    auto t_AS = t_QL.new_empty({B, N, FSk_aligned}, at::kFloat);
     // auto t_XL = t_QL.new_empty({B, N, H}, at::kFloat);
     auto t_XL = t_QL.to(at::kFloat);
     auto XL = GetVLAPtr<float>(t_XL, {N, H});
-    auto AS = GetVLAPtr<float>(t_AS, {N, FSk});
+    auto AS = GetVLAPtr<float>(t_AS, {N, FSk_aligned});
 
     RECORD_OMP_TIME();
     {
@@ -1391,6 +1397,10 @@ inline at::Tensor attn(
 #pragma omp parallel for collapse(2)
       for (int b = 0; b < B; b++) {
         for (int n = 0; n < N; n++) {
+          for (int sk = FSk; sk < FSk_aligned; sk++) {
+            // pad AS to align for softmax
+            AS[b][n][sk] = -1e9f;
+          }
           softmax_fwd_tpp(AS[b][n], AS[b][n]);
           zero_tpp(XL[b][n]);
           for (int sk = 0; sk < FSk; sk++) {
@@ -1516,7 +1526,7 @@ inline at::Tensor attn(
               for (int sq1 = 0; sq1 < qbs; sq1++) {
                 auto qval = sq + sq1 + offset;
                 for (int sk1 = qval + 1; sk1 < sk+kbs; sk1++) {
-                  AS[sq1][sk1-sk] = -1e9;
+                  AS[sq1][sk1-sk] = -1e9f;
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
