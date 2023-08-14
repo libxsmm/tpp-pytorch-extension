@@ -348,13 +348,13 @@ def ShardLinear(m, dim, rank, size, block_size=1):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
     dim_size = m.weight.shape[dim]
-    assert(dim_size % block_size == 0, f"dim_size ({dim_size}) is not multiple of block_size ({block_size})")
+    assert dim_size % block_size == 0, f"dim_size ({dim_size}) is not multiple of block_size ({block_size})"
     num_blocks = dim_size // block_size
     split_size = ((num_blocks + size - 1) // size) * block_size
     m.split_sizes = [split_size] * size
     m.split_sizes[-1] -= (split_size * size - dim_size)
     # print(m.split_sizes)
-    assert(sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size")
+    assert sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size"
     # m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
     m.weight.data = torch.split(m.weight.data, split_size, dim)[rank].contiguous()
     if m.weight.is_meta:
