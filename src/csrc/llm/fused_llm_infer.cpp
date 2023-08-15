@@ -1200,30 +1200,37 @@ struct AttnKernels
   SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
   SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
   SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
+  SCOPEIT_DECL(CpyTPP<T>) cpy_tpp;
   SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
   SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
   SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
+  long Sqb_aligned;
+  static constexpr long SQB_ALIGN = 16;
 
-  AttnKernels(long Sqb, long Skb, long H, int pad, int kl_in_vnni, int vl_in_vnni) {
+  AttnKernels(long Sqb, long Skb, long H, int pad, int kl_in_vnni, int vl_in_vnni, bool am_is_2d) {
     //printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb, Skb, H, pad, kl_in_vnni, vl_in_vnni);
-    if (Sqb == 0) Sqb = 1; // hack for unused kernels to not generate 0 size kernels
-    if (Skb == 0) Skb = 2; // hack for unused kernels to not generate 0 size kernels
-    // [Sqb, H] * [H, Skb] = [Sqb, Skb]
+    if (Sqb == 0 || Skb == 0) return;
+    Sqb_aligned = (Sqb + SQB_ALIGN - 1) & ~(SQB_ALIGN - 1);
+    // [Sqb_aligned, H] * [H, Skb] = [Sqb_aligned, Skb]
     a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-            Sqb, Skb, H, H, H * Skb, H, Skb, Skb, 0.0, 0, 1, kl_in_vnni)));
-    // [Sqb, Skb]
-    scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
-    add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
-    add_2dmask_tpp = SCOPEIT((AddTPP<T,float,float>(Sqb, Skb)), EW_ADD);
+            Sqb_aligned, Skb, H, H, H * Skb, H, Skb, Skb, 0.0, 0, 1, kl_in_vnni)));
+    // [Sqb_aligned, Skb]
+    scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb_aligned * Skb)), EW_SCL);
+    if (!am_is_2d)
+      add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb_aligned, Skb), EW_ADD);
+    else
+      add_2dmask_tpp = SCOPEIT((AddTPP<T,float,float>(Sqb, Skb)), EW_ADD);
     softmax_fwd_tpp =
       SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
     softmax_fixup =
       SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H)), EW_RCP);
-    // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
+    // [Sqb_aligned, Skb] * [Skb, H] = tmp[Sqb_aligned, H]
     c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-            Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
+            Sqb_aligned, H, Skb, Sqb_aligned * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
     // [Sqb, H] --> [Sqb, H]
     cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H, H, H)), EW_COPY);
+    if (Sqb != Sqb_aligned)
+      cpy_tpp = SCOPEIT(CpyTPP<T>(Sqb, H, H, H), EW_COPY);
     auto xform = XformTPP::XFORM_XPOSE_TPP;
     if (!std::is_same<T, float>::value && kl_in_vnni) {
       xform = XformTPP::XFORM_XPOSE_N2V_TPP;
@@ -1272,8 +1279,6 @@ inline at::Tensor attn(
   auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
-  // auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  // auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
   auto KL_C = GetVLAPtr<T>(t_KL_cache, {N, CSk, H});
   auto VL_C = GetVLAPtr<T>(t_VL_cache, {N, CSk, H});
 
@@ -1444,8 +1449,9 @@ inline at::Tensor attn(
 
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
-  long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  const long Skb = (!inline_trans ? 512 : SK_BLOCK_SIZE); 
+  const long SK_ALIGN = (VBS == 1 ? 1 : 64);
+  long Sk_pad = (Sk + SK_ALIGN - 1) & ~(SK_ALIGN - 1);
+  const long Skb = (!inline_trans ? 1024 : SK_BLOCK_SIZE); 
   long krem = Sk % Skb;
   int pad = Sk_pad - Sk;
 
@@ -1478,10 +1484,10 @@ inline at::Tensor attn(
 
 
   AttnKernels<T, Tv> attn_kern[4] =  {
-    AttnKernels<T,Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-    AttnKernels<T,Tv>(Sqb, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
-    AttnKernels<T,Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-    AttnKernels<T,Tv>(qrem, krem+pad, H, pad, kl_in_vnni, vl_in_vnni),
+    AttnKernels<T,Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni, am_is_2d),
+    AttnKernels<T,Tv>(Sqb, krem+pad, H, pad, kl_in_vnni, vl_in_vnni, am_is_2d),
+    AttnKernels<T,Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni, am_is_2d),
+    AttnKernels<T,Tv>(qrem, krem+pad, H, pad, kl_in_vnni, vl_in_vnni, am_is_2d),
   };
 
   if (!inline_trans) {
@@ -1508,21 +1514,27 @@ inline at::Tensor attn(
           for (int sq = 0; sq < Sq; sq += Sqb) {
             long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
             int qid = (sq + Sqb > Sq) ? 1 : 0;
+            long Sqb_aligned = attn_kern[qid*2].Sqb_aligned;
+            T q_tmp[Sqb_aligned*H];
+            T *q_ptr = QL[b][n][sq];
+            if (Sqb_aligned != qbs) {
+              attn_kern[qid*2].cpy_tpp(QL[b][n][sq], q_tmp);
+              q_ptr = q_tmp;
+            }
             float omax[qbs], osum[qbs], cmax[qbs], csum[qbs];
             for (int sk = 0; sk < Sk; sk += Skb) {
               long kbs = (Sk - sk >= Skb ? Skb : Sk_pad - sk);
               int kid = qid * 2 + ((sk + Skb > Sk) ? 1 : 0);
               auto &ak = attn_kern[kid];
-              float AS[qbs][kbs];
-              Tv AST[qbs][kbs];
+              float AS[Sqb_aligned][kbs];
+              Tv AST[Sqb_aligned][kbs];
               T*k_ptr = KL_TV[b][n][sk];
               T k_tmp[kbs*H];
               if (inline_trans) {
-                //ak.xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
                 ak.xform_tpp(KL[b][n][sk], k_tmp);
                 k_ptr = k_tmp;
               }
-              ak.a_gemm_tpp(QL[b][n][sq], k_ptr, AS[0], 1);
+              ak.a_gemm_tpp(q_ptr, k_ptr, AS[0], 1);
               for (int sq1 = 0; sq1 < qbs; sq1++) {
                 auto qval = sq + sq1 + offset;
                 for (int sk1 = qval + 1; sk1 < sk+kbs; sk1++) {
@@ -1545,13 +1557,10 @@ inline at::Tensor attn(
                 psum = csum;
               }
               ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
-	      //for (int xx=0;xx<kbs;xx++)
-	      //if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n", sk+xx, (float)AST[0][xx]); 
-              Tv tmp[qbs * H];
+              Tv tmp[Sqb_aligned * H];
               Tv *v_ptr = VL_V[b][n][sk];
               Tv v_tmp[kbs*H];
               if (inline_trans && VBS != 1) {
-                //ak.vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
                 ak.vnni_tpp(VL[b][n][sk], v_tmp);
                 v_ptr = v_tmp;
               }
