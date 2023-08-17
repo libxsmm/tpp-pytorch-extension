@@ -137,6 +137,10 @@ inline T* pt_get_data_ptr(at::Tensor t) {
   if (!t.is_contiguous()) {
     std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
               << std::endl;
+#if 0
+    std::cout << c10::get_backtrace(0, 3) << std::endl;
+    throw std::invalid_argument("Tensor is not contiguous");
+#endif
   }
   return t.data_ptr<T>();
 }
