@@ -217,15 +217,15 @@ print("---- Prompt size:", input_size)
 # generate args
 generate_kwargs = dict(do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4)
 if args.use_tpp:
+    cpp_profile = True
     if args.jit:
-        model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True, print_first_token_profile=True)
+        model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True, enable_profile=cpp_profile)
     else:
-        model = tpx.llm.llm_common.optimize_for_first_token(model, generate_kwargs["num_beams"], print_first_token_profile=True)
+        model = tpx.llm.llm_common.optimize_for_first_token(model, generate_kwargs["num_beams"], enable_profile=cpp_profile)
 
     #generate_kwargs["jit"] = True
 if args.token_latency:
-    raise NotImplementedError("--token_latency not supported here")
-    #generate_kwargs["token_latency"] = True
+    generate_kwargs["token_latency"] = True
 #if args.use_tpp:
 #    generate_kwargs["TP_number"] = my_size
 
@@ -244,6 +244,7 @@ if tokenizer.pad_token == "":
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
+generate_kwargs['output_past_key_values'] = True
 
 def trace_handler(prof):
     print(
@@ -265,8 +266,6 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     dtype=amp_dtype if amp_enabled else None,
 ):
     for i in range(num_iter):
-        if args.use_tpp:
-            tpx.reset_debug_timers()
         tic = time.time()
         inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
         #inputs = tokenizer(prompt, return_tensors="pt", padding=False).to(device)
@@ -276,6 +275,8 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         output = model.generate(
             **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
+        if generate_kwargs['output_past_key_values'] == True:
+            output, pkv = output
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         if args.device == "xpu":
@@ -287,8 +288,6 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         toc = time.time()
         if args.profile:
             prof.step()
-        if args.use_tpp:
-            tpx.print_debug_timers(detailed=False)
         print(gen_text, len(gen_ids), flush=True)
         if i >= num_warmup:
             total_time += toc - tic

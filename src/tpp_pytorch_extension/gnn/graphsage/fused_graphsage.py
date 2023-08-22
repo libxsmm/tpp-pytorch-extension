@@ -60,15 +60,13 @@ class SAGEMLPFunction(torch.autograd.Function):
     def forward(ctx, align, apply_bias, p, act, res, training, *inputs):
         if res:
             (inp, inp_res, wt, res_wt, bias) = inputs
-            N = inp.size(0)
             (out, act_mask, dp_mask,) = fused_gsage_cpp.fused_gsage_mlp_fwd(
-                align if N > align else N, apply_bias, p, act, res, training, inputs
+                align, apply_bias, p, act, res, training, inputs
             )
         else:
             (inp, wt, bias) = inputs
-            N = inp.size(0)
             out, act_mask, dp_mask = fused_gsage_cpp.fused_gsage_mlp_fwd(
-                align if N > align else N, apply_bias, p, act, res, training, inputs
+                align, apply_bias, p, act, res, training, inputs
             )
 
         if training:
@@ -420,10 +418,6 @@ class SAGEConvOpt(BlockedModule):
                 if graph.is_block:
                     feat_dst = feat_src[: graph.number_of_dst_nodes()]
 
-            if self.use_bf16:
-                feat_src = feat_src.to(torch.bfloat16)
-                feat_dst = feat_dst.to(torch.bfloat16)
-
             msg_fn = fn.copy_src("h", "m")
             if edge_weight is not None:
                 assert edge_weight.shape[0] == graph.number_of_edges()
@@ -499,9 +493,11 @@ class SAGEConvOpt(BlockedModule):
                         for i in inputs
                     ]
                 inputs.append(self.bias)
+                N = h_neigh.size(0)
+                align = self.align if (N > self.align or N == 0) else N
 
                 rst = SAGEMLPFunction.apply(
-                    self.align,
+                    align,
                     self.apply_bias,
                     self.feat_drop,
                     self.activation,
@@ -511,6 +507,8 @@ class SAGEConvOpt(BlockedModule):
                 )
             elif "concat" in self._aggre_type:
                 h = torch.cat((h_self, h_neigh), 1)
+                N = h.size(0)
+                align = self.align if (N > self.align or N == 0) else N
                 inputs = [h, self.fc_neigh.weight]
                 if self.use_bf16:
                     inputs = [
@@ -519,7 +517,7 @@ class SAGEConvOpt(BlockedModule):
                     ]
                 inputs.append(self.bias)
                 rst = SAGEMLPFunction.apply(
-                    self.align,
+                    align,
                     self.apply_bias,
                     self.self.feat_drop,
                     self.activation,
@@ -541,8 +539,10 @@ class SAGEConvOpt(BlockedModule):
                         for i in inputs
                     ]
                 inputs.append(self.bias)
+                N = h_self.size(0)
+                align = self.align if (N > self.align or N == 0) else N
                 rst = SAGEMLPFunction.apply(
-                    self.align,
+                    align,
                     self.apply_bias,
                     self.feat_drop,
                     self.activation,

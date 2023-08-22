@@ -24,6 +24,7 @@ from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import numpy as np
 import os
+import time
 import inspect
 from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 
@@ -166,6 +167,10 @@ class _ModelFallbackWrapper(GenerationMixin):
         self._default = default
         self.num_beams = num_beams
         self.enable_profile = enable_profile
+        self.token_latency = None
+        self.output_past_key_values = None
+        self.saved_input_ids = None
+        self.saved_past_key_values = None
 
     def __call__(self, *args, **kwargs):
         first_token = True if kwargs["past_key_values"] is None else False
@@ -186,6 +191,8 @@ class _ModelFallbackWrapper(GenerationMixin):
             lm_logits = ret["output"]
 
         past_key_values = outputs[1]
+        if self.output_past_key_values == True:
+            self.saved_past_key_values = past_key_values
         fixed_output = CausalLMOutputWithPast(
             loss=None,
             logits=lm_logits,
@@ -199,12 +206,44 @@ class _ModelFallbackWrapper(GenerationMixin):
             tpx.reset_debug_timers()
         return fixed_output
 
+    #@torch.no_grad()
+    def generate(self, *args, **kwargs):
+        self.output_past_key_values = kwargs.pop("output_past_key_values", None)
+        self.token_latency = kwargs.pop("token_latency", None)
+        if self.token_latency == True:
+            self.token_latencies = []
+
+        output = super().generate(*args, **kwargs)
+        if self.token_latency == True:
+            self.token_latencies.append(time.time())
+            latencies = []
+            for i in range(len(self.token_latencies) - 1):
+                latencies.append(self.token_latencies[i+1]-self.token_latencies[i])
+            self.token_latencies = []
+            output = [output, latencies,]
+        if self.enable_profile:
+            tpx.print_debug_timers(detailed=False)
+            tpx.reset_debug_timers()
+
+        if self.output_past_key_values == True:
+            saved_input_ids = self.saved_input_ids
+            saved_past_key_values = self.saved_past_key_values
+            self.saved_input_ids = None
+            self.saved_past_key_values = None
+            output = [output, [saved_input_ids, saved_past_key_values]]
+        return output
+
     def __getattr__(self, item):
         return getattr(self._default, item)
 
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, inputs_embeds=None, use_cache=None, **kwargs
     ):
+        if self.output_past_key_values == True:
+            self.saved_input_ids = input_ids
+        if self.token_latency == True:
+            self.token_latencies.append(time.time())
+
         return self._default.prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs
         )
@@ -219,7 +258,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         """
         return self._default._reorder_cache(past_key_values, beam_idx)
 
-def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, print_first_token_profile=False):
+def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, enable_profile=False):
     torch._C._jit_set_texpr_fuser_enabled(False)
     jit_input_texts = ["enable jit"]
     jit_inputs = prepare_jit_inputs(jit_input_texts, model, tokenizer, num_beams)
@@ -237,11 +276,11 @@ def jit_trace_model(model, tokenizer, num_beams, indirect_kv=True, print_first_t
     traced_model(*jit_inputs)
     traced_model(*jit_inputs)
 
-    model = _ModelFallbackWrapper(traced_model, model, num_beams, enable_profile=print_first_token_profile)
+    model = _ModelFallbackWrapper(traced_model, model, num_beams, enable_profile=enable_profile)
     return model
 
-def optimize_for_first_token(model, num_beams, print_first_token_profile=False):
-    model = _ModelFallbackWrapper(model, model, num_beams, enable_profile=print_first_token_profile)
+def optimize_for_first_token(model, num_beams, enable_profile=False):
+    model = _ModelFallbackWrapper(model, model, num_beams, enable_profile=enable_profile)
     return model
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
@@ -329,13 +368,13 @@ def ShardLinear(m, dim, rank, size, block_size=1):
     # dim = 0 - shard output features
     # dim = 1 - shard input features
     dim_size = m.weight.shape[dim]
-    assert(dim_size % block_size == 0, f"dim_size ({dim_size}) is not multiple of block_size ({block_size})")
+    assert dim_size % block_size == 0, f"dim_size ({dim_size}) is not multiple of block_size ({block_size})"
     num_blocks = dim_size // block_size
     split_size = ((num_blocks + size - 1) // size) * block_size
     m.split_sizes = [split_size] * size
     m.split_sizes[-1] -= (split_size * size - dim_size)
     # print(m.split_sizes)
-    assert(sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size")
+    assert sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size"
     # m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
     m.weight.data = torch.split(m.weight.data, split_size, dim)[rank].contiguous()
     if m.weight.is_meta:
