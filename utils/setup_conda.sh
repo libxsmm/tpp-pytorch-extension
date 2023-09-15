@@ -60,7 +60,7 @@ else
   exit 1
 fi
 # for bert
-conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
+#conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
 
 # for unbuffer
 #conda install -y -c eumetsat expect
