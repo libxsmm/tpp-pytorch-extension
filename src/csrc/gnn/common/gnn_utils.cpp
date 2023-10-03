@@ -128,7 +128,7 @@ std::vector<at::Tensor> find_nodes(
   auto t_lnodes = inputs[3];
 
   typedef long Ta;
-  typedef int Ts;
+  typedef uint8_t Ts;
 #include "find_nodes.h"
 }
 
@@ -156,7 +156,7 @@ std::vector<at::Tensor> find_n_map_nodes(std::vector<at::Tensor> inputs) {
   auto t_lnodes = inputs[4];
 
   typedef long Ta;
-  typedef int Ts;
+  typedef uint8_t Ts;
 #include "find_n_map_solid_nodes.h"
 }
 

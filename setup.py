@@ -29,7 +29,7 @@ if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
 
 xsmm_makefile = os.path.join(libxsmm_root, "Makefile")
-xsmm_include = "./libxsmm/include"
+xsmm_include = os.path.join(libxsmm_root, "include")
 xsmm_lib = os.path.join(libxsmm_root, "lib")
 
 if not os.path.exists(xsmm_makefile):
@@ -133,7 +133,7 @@ sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 sources += glob.glob("src/csrc/dlrm/*.cpp")
 
 
-extra_compile_args = ["-fopenmp", "-g"]  # , "-O0"]
+extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
 if platform.processor() != "aarch64":
     extra_compile_args.append("-march=native")
 
@@ -180,8 +180,8 @@ setup(
                 xsmm_include,
                 "{}/src/csrc".format(cwd),
             ],
-            # library_dirs=[xsmm_lib],
-            # libraries=["xsmm"],
+            #library_dirs=[xsmm_lib],
+            #libraries=["xsmm"],
         )
     ],
     cmdclass={"build_ext": BuildExtension, "build_clib": BuildMakeLib},

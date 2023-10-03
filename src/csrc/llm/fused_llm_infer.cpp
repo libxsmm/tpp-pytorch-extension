@@ -32,7 +32,7 @@ static int large_cache_opt = false;
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
-static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 64);
+static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int SPMM_PACKED_BLOCK_SIZE = env2int("SPMM_PACKED_BLOCK_SIZE", 64);
 int spmm_use_flat_acts = env2int("SPMM_FLAT_ACTIVATIONS", 0);
 
@@ -42,6 +42,7 @@ REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm_sparse, "qkv_spmm");
+REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
@@ -141,21 +142,23 @@ inline at::Tensor allgather(at::Tensor t_in, std::vector<long> &split_sizes) {
 template <typename T>
 inline at::Tensor kv_concat(at::Tensor t_in1, at::Tensor t_in2, int dim, at::Tensor t_beam_idx) {
   RECORD_SCOPE(concat, {t_in1, t_in2});
+  bool indirect = t_beam_idx.numel() > 0;
   auto ndim =  t_in1.dim();
   dim = dim >= 0 ? dim : dim+ndim;
 
   auto out_sizes = t_in1.sizes().vec();
   out_sizes[dim] += t_in2.size(dim);
+  if (indirect) out_sizes[0] = t_beam_idx.size(0);
   auto t_out = t_in1.new_empty(out_sizes);
 
   auto B = out_sizes[0];
   auto N = out_sizes[1];
   auto S = out_sizes[2];
   auto F = out_sizes[3];
+  TPP_ASSERT(B == t_in2.size(0), "Batch size mismatch\n");
   auto BNS = B * N * S;
   auto S1 = t_in1.size(dim);
   auto S2 = t_in2.size(dim);
-  bool indirect = t_beam_idx.numel() > 0;
 
   //auto cpy_tpp = SCOPEIT(CpyTPP<T>(F), EW_COPY);
   auto cpy_tpp = CpyTPP<T>(F);
@@ -394,6 +397,7 @@ inline void fc_plain(
 
   auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
 
+  t_in = t_in.contiguous();
   auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
   auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
   auto bias = GetVLAPtr<T>(t_bias, {Hk});
@@ -470,7 +474,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   auto dim = t.dim();
   if (dim < 5) return t;
   auto sizes = t.sizes();
-  constexpr long RBS = 2;
+  constexpr long RBS = 4;
   auto K1 = sizes[0];
   if (K1 % RBS != 0) return t;
   auto C1 = sizes[1];
@@ -1462,7 +1466,7 @@ inline at::Tensor attn(
     at::Tensor t_VL,
     at::Tensor t_KL_cache,
     at::Tensor t_VL_cache,
-    std::vector<std::vector<long>>& beam_idx,
+    VLAPtr<long, 1, long>& beam_idx,
     long offset) {
   RECORD_SCOPE(ac_gemm2, {t_QL, t_KL});
   auto t_CL = at::empty_like(t_QL);
@@ -1479,6 +1483,9 @@ inline at::Tensor attn(
   // std::cout << "KL: " << t_KL.sizes() << std::endl;
   TPP_ASSERT(Sq == 1 && Sk == 1, "Sq (%ld) and Sk (%ld) must be 1, offset (%ld)\n", Sq, Sk, offset);
   auto FSk = offset + Sk;
+  auto FSk_aligned = (FSk + 0x3FL) & ~0x3FL;
+  auto CSk = t_KL_cache.size(2);
+  //printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
 
   auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
@@ -1486,22 +1493,25 @@ inline at::Tensor attn(
   auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
-  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+  // auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+  // auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {N, CSk, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {N, CSk, H});
 
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
   // auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
   // auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
   // auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
-  auto dot_tpp = MulReduceTPP<T,T,float>(1, H);
-  auto scale_add_tpp = ScaleAddTPP<T, T>(H);
+  auto dot_tpp = MulReduceTPP<float,T,float>(1, H);
+  auto scale_add_tpp = ScaleAddTPP<T, float>(H);
   auto cpy_tpp = CpyTPP<T>(H);
-  auto zero_tpp = SetZeroTPP<T>(H);
+  auto cvt_f2b_tpp = ConvertTPP<float,T>(H);
+  auto cvt_b2f_tpp = ConvertTPP<T,float>(H);
+  auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
-    SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk)), SOFTMAX);
-  {
-    //float GAS[64][2048];
+    SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
+  if (FSk <= 256) {
     RECORD_OMP_TIME();
     {
 #pragma omp parallel
@@ -1512,46 +1522,58 @@ inline at::Tensor attn(
 #pragma omp for collapse(2) nowait
         for (int b = 0; b < B; b++) {
           for (int n = 0; n < N; n++) {
-            float AS[FSk];
+            float AS[FSk_aligned];
             //float *AS = GAS[tid]; //FSk];
             //auto t0 = getTime();
             {
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
+              float tmp_QL[H];
+              cvt_b2f_tpp(QL[b][n][0], tmp_QL);
               for (int sk = 0; sk < FSk; sk++) {
                 AS[sk] = 0.0f;
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
                   //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-                  dot_tpp(QL[b][n][0], KL_C[sk][bid][n], &AS[sk]);
+                  //dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+                  dot_tpp(tmp_QL, KL_C[bid][n][sk], &AS[sk]);
                 } else {
                   //printf("b: %d n: %d sk: %d \n", b, n, sk);
-                  dot_tpp(QL[b][n][0], KL[b][n][0], &AS[sk]);
-                  cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+                  dot_tpp(tmp_QL, KL[b][n][0], &AS[sk]);
+                  //cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+                  cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
                 }
                 AS[sk] *= one_by_sqrt_H;
                 if (am_valid) {
                   AS[sk] += AM[b][sk];
                 }
               }
+              for (int sk = FSk; sk < FSk_aligned; sk++) {
+                // pad AS to align for softmax
+                AS[sk] = -1e9f;
+              }
             }
             //auto t1 = getTime();
             softmax_fwd_tpp(AS, AS);
-            zero_tpp(CL[b][n][0]);
             //auto t2 = getTime();
             //printf("post softmax b: %d n: %d\n", b, n);
             {
+              float tmp_CL[H];
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
+              zero_tpp(tmp_CL);
               for (int sk = 0; sk < FSk; sk++) {
                 //printf("bmm2: b: %d n: %d sk: %d \n", b, n, sk);
                 //if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]); 
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
-                  scale_add_tpp(VL_C[sk][bid][n], CL[b][n][0], AS[sk]);
+                  //scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
+                  scale_add_tpp(VL_C[bid][n][sk], tmp_CL, AS[sk]);
                 } else {
-                  scale_add_tpp(VL[b][n][0], CL[b][n][0], AS[sk]);
-                  cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+                  scale_add_tpp(VL[b][n][0], tmp_CL, AS[sk]);
+                  //cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+                  cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
                 }
               }
+              cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
             }
             //auto t3 = getTime();
             //if (tid == 0) printf("MHA: bns= %d %d %ld  %10g %10g %10g    %10g\n", b, n, FSk, (t1-t0)*1e6, (t2-t1)*1e6, (t3-t2)*1e6, (t3-t0)*1e6);
@@ -1562,7 +1584,60 @@ inline at::Tensor attn(
         //if (tid == 0) printf("MHA: s= %ld  %10g\n", FSk, (t01-t00)*1e6);
       }
     }
-  } 
+  } else {
+    auto t_AS = t_QL.new_empty({B, N, FSk_aligned}, at::kFloat);
+    // auto t_XL = t_QL.new_empty({B, N, H}, at::kFloat);
+    auto t_XL = t_QL.to(at::kFloat);
+    auto XL = GetVLAPtr<float>(t_XL, {N, H});
+    auto AS = GetVLAPtr<float>(t_AS, {N, FSk_aligned});
+
+    RECORD_OMP_TIME();
+    {
+#pragma omp parallel for collapse(3)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          for (int sk = 0; sk < FSk; sk++) {
+            AS[b][n][sk] = 0.0f;
+            if (sk < offset) {
+              int bid = beam_idx[b][sk];
+              //printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
+              //dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+              dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
+            } else {
+              //printf("b: %d n: %d sk: %d \n", b, n, sk);
+              dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
+              cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+            }
+            AS[b][n][sk] *= one_by_sqrt_H;
+            if (am_valid) {
+              AS[b][n][sk] += AM[b][sk];
+            }
+          }
+        }
+      }
+#pragma omp parallel for collapse(2)
+      for (int b = 0; b < B; b++) {
+        for (int n = 0; n < N; n++) {
+          for (int sk = FSk; sk < FSk_aligned; sk++) {
+            // pad AS to align for softmax
+            AS[b][n][sk] = -1e9f;
+          }
+          softmax_fwd_tpp(AS[b][n], AS[b][n]);
+          zero_tpp(XL[b][n]);
+          for (int sk = 0; sk < FSk; sk++) {
+            if (sk < offset) {
+              int bid = beam_idx[b][sk];
+              scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
+            } else {
+              scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
+              cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+            }
+          }
+        }
+      }
+    }
+    t_CL = t_XL.to(t_CL.dtype());
+  }
   return t_CL;
 }
 
@@ -1672,7 +1747,7 @@ inline at::Tensor attn(
               for (int sq1 = 0; sq1 < qbs; sq1++) {
                 auto qval = sq + sq1 + offset;
                 for (int sk1 = qval + 1; sk1 < sk+kbs; sk1++) {
-                  AS[sq1][sk1-sk] = -1e9;
+                  AS[sq1][sk1-sk] = -1e9f;
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
@@ -1772,6 +1847,7 @@ struct LLMBlock : torch::CustomClassHolder {
 
   template<typename T>
   std::vector<at::Tensor> self_mha(at::Tensor t_QL, at::Tensor t_KL, at::Tensor t_VL, at::Tensor t_am, std::vector<at::Tensor>& t_cache) {
+    RECORD_SCOPE(mha, {t_QL, t_KL});
     auto self = static_cast<cls*>(this);
     auto t_key_past = this->t_dummy;
     auto t_value_past = this->t_dummy;
@@ -1782,7 +1858,7 @@ struct LLMBlock : torch::CustomClassHolder {
     auto N = self->N;
     auto H = self->H;
     at::Tensor t_CL;
-    auto offset = 0;
+    long offset = 0;
     int csz = t_cache.size();
     if (csz > 0) t_key_past = t_cache[0];
     if (csz > 1) t_value_past = t_cache[1];
@@ -1790,6 +1866,9 @@ struct LLMBlock : torch::CustomClassHolder {
     if (csz > 3) {
       t_offset = t_cache[3];
       offset = t_offset.item<long>();
+      TPP_ASSERT(csz == 6, "Updated indirect kv_cache tuple should be of length 6\n");
+      t_key_past = t_cache[4];
+      t_value_past = t_cache[5];
     } else if (csz > 0) {
       offset = t_key_past.size(2);
     }
@@ -1814,46 +1893,57 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (offset == 0) {
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
       auto capacity = S + KV_CACHE_INC_SIZE;
-      t_key_past = t_KL.new_zeros({capacity, B, N, H});
-      t_value_past = t_VL.new_zeros({capacity, B, N, H});
-      t_beam_idx = t_beam_idx.new_zeros({capacity, B});
+      t_key_past = t_KL.new_zeros({B, N, capacity, H});
+      t_value_past = t_VL.new_zeros({B, N, capacity, H});
+      //t_beam_idx = t_beam_idx.new_zeros({capacity, B});
+      t_beam_idx = at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
+      // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() << std::endl;
       t_offset = t_offset + S;
-      for (int i = 0; i < S; i++) {
-        //std::cout << "t_key_past.shape:" << t_key_past.select(0, i).sizes() << std::endl;
-        //std::cout << "t_KL.shape:" << t_KL.select(2, i).sizes() << std::endl;
-        t_key_past.select(0, i) = t_KL.select(2, i);
-        t_value_past.select(0, i) = t_VL.select(2, i);
-      }
+      t_key_past.slice(2, 0, S, 1).copy_(t_KL);
+      t_value_past.slice(2, 0, S, 1).copy_(t_VL);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
-      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
     } else {
-      auto capacity = t_key_past.size(0);
+      auto capacity = t_key_past.size(2);
       if (capacity <= offset) {
+        printf("Warning: Reallocating kv cache, consider increasing KV_CACHE_INC_SIZE (%d)\n", KV_CACHE_INC_SIZE);
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
-        t_key_past.resize_({new_capacity, B, N, H});
-        t_value_past.resize_({new_capacity, B, N, H});
-        t_beam_idx.resize_({new_capacity, B});
+        auto t_key_past_new = t_key_past.new_empty({B, N, new_capacity, H});
+        t_key_past_new.slice(2, 0, offset, 1).copy_(t_key_past);
+	t_key_past = t_key_past_new;
+
+        auto t_value_past_new = t_value_past.new_empty({B, N, new_capacity, H});
+        t_value_past_new.slice(2, 0, offset, 1).copy_(t_value_past);
+	t_value_past = t_value_past_new;
+
+        auto t_beam_idx_new = at::arange(B).unsqueeze(0).expand({new_capacity, B}).contiguous();
+        t_beam_idx_new.slice(0, 0, offset, 1).copy_(t_beam_idx);
+	t_beam_idx = t_beam_idx_new;
       }
 
+      // if (my_rank == 0) std::cout << "t_beam_idx2: " << t_beam_idx.sizes() << std::endl;
       // std::cout << "t_key_past.shape:" << t_key_past.sizes() << std::endl;
       // std::cout << "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl;
       // std::cout << "t_offset:" << t_offset << std::endl;
       // std::cout << "B: " << B << " offset:" << offset << std::endl;
-      std::vector<std::vector<long>> beam_idx(B, std::vector<long>(offset+1, 0));
+      auto t_new_beam_idx = t_beam_idx.new_empty({B, offset});
+      auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset});
       auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
       for(auto i = 0; i < B; i++) {
         beam_idx[i][offset-1] = b_ptr[offset-1][i];
         for(auto j = offset-2; j >= 0; j--) { //for the token of input, the target beam is alwarys 0
           beam_idx[i][j] = b_ptr[j][beam_idx[i][j+1]];
         }
-        //std::cout << "idx[" << i << "] = " << beam_idx[i] << std::endl;
       }
       t_CL = attn<T>(t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
       t_CL = t_CL.view({B, N, S, H}).permute({0, 2, 1, 3}).contiguous().view({B, S, N * H});
       t_offset = t_offset + 1;
+      S = t_offset.item<long>();
+      t_KL = t_key_past.slice(2, 0, S, 1);
+      t_VL = t_value_past.slice(2, 0, S, 1);
       // printf("old offset = %d, new_offset = %ld\n", offset, t_offset.item<long>());
-      return {t_CL, t_key_past, t_value_past, t_beam_idx, t_offset};
+      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
     }
   }
 };

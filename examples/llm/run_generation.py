@@ -5,21 +5,26 @@ import json
 import pathlib
 import argparse
 import os
+import inspect
 from accelerate import init_empty_weights
+from typing import Tuple
 
 from transformers import (
     # pipeline,
     AutoModelForCausalLM,
     # AutoModel,
+    GenerationMixin,
     LlamaForCausalLM,
     T5ForConditionalGeneration,
     AutoTokenizer,
     LlamaTokenizer,
     AutoConfig,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     import tpp_pytorch_extension as tpx
+    from tpp_pytorch_extension.llm.llm_commom import jit_trace_model, optimize_for_first_token
 except:
     pass
 
@@ -70,8 +75,8 @@ parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
 parser.add_argument("--jit", action="store_true")
-parser.add_argument("--num-iter", default=100, type=int, help="num iter")
-parser.add_argument("--num-warmup", default=10, type=int, help="num warmup")
+parser.add_argument("--num-iter", default=10, type=int, help="num iter")
+parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
 parser.add_argument("--batch-size", default=1, type=int, help="batch size")
 parser.add_argument("--token-latency", action="store_true", help="get token latency")
 parser.add_argument("--profile", action="store_true")
@@ -211,12 +216,16 @@ print("---- Prompt size:", input_size)
 
 # generate args
 generate_kwargs = dict(do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4)
-if args.jit:
-    torch._C._jit_set_texpr_fuser_enabled(False)
+if args.use_tpp:
+    cpp_profile = True
+    if args.jit:
+        model = tpx.llm.llm_common.jit_trace_model(model, tokenizer, generate_kwargs["num_beams"], indirect_kv=True, enable_profile=cpp_profile)
+    else:
+        model = tpx.llm.llm_common.optimize_for_first_token(model, generate_kwargs["num_beams"], enable_profile=cpp_profile)
+
     #generate_kwargs["jit"] = True
 if args.token_latency:
-    raise NotImplementedError("--token_latency not supported here")
-    #generate_kwargs["token_latency"] = True
+    generate_kwargs["token_latency"] = True
 #if args.use_tpp:
 #    generate_kwargs["TP_number"] = my_size
 
@@ -225,8 +234,17 @@ total_time = 0.0
 num_iter = args.num_iter
 num_warmup = args.num_warmup
 prompt = [prompt] * args.batch_size
+# prompt = [
+#         "It is done, and submitted. You can play 'Survival of the Tastiest' on Android, and on the web. Playing on the web works fine if you like",
+#         "Once upon a time, there existed a little girl, who liked to have adventures. She wanted to go to places and meet new people, and have fun.",
+#         ]
+tokenizer.pad_token = tokenizer.eos_token
+if tokenizer.pad_token == "":
+    tokenizer.pad_token = "</s>"
+tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
+generate_kwargs['output_past_key_values'] = True
 
 def trace_handler(prof):
     print(
@@ -248,13 +266,17 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     dtype=amp_dtype if amp_enabled else None,
 ):
     for i in range(num_iter):
-        if args.use_tpp:
-            tpx.reset_debug_timers()
         tic = time.time()
-        input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+        inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
+        #inputs = tokenizer(prompt, return_tensors="pt", padding=False).to(device)
+        #input_ids = inputs.input_ids.to(device)
+        #print(type(inputs))
+
         output = model.generate(
-            input_ids, max_new_tokens=args.max_new_tokens, **generate_kwargs
+            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
+        if generate_kwargs['output_past_key_values'] == True:
+            output, pkv = output
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         if args.device == "xpu":
@@ -266,8 +288,6 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         toc = time.time()
         if args.profile:
             prof.step()
-        if args.use_tpp:
-            tpx.print_debug_timers()
         print(gen_text, len(gen_ids), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
