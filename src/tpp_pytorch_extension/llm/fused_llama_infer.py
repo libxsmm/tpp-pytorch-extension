@@ -226,6 +226,10 @@ def OptimizeModelForLlama(model, dtype, device='cpu'):
             kwargs = m._parameters[name].__dict__
             m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
 
+def UpdateLLamaModel(model):
+    for m in model.modules():
+        if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
+            m.cpp_block.update_sparse_copy()
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 

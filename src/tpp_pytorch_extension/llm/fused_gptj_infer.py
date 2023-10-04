@@ -199,7 +199,7 @@ def OptimizeModelForGPTJ(model, dtype, device='cpu'):
 def UpdateGPTJModel(model):
     for m in model.modules():
         if isinstance(m, GPTJBlock):
-            m.cpp_block.update_bcsc_copy()
+            m.cpp_block.update_sparse_copy()
 
 
 transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(_reorder_cache)
