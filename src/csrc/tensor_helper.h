@@ -53,34 +53,54 @@ void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn,
   int N = Nb*bn;
   int K = Kb*bk*v;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
-  unsigned long long n_grid_points = (N/sparse_block_bn) * (K/sparse_block_bk);
-  unsigned long long *grid_point_array = (unsigned long long *) malloc(n_grid_points * sizeof(unsigned long long));
-  unsigned long long n_dense_grid_points = (unsigned long long) ((double)(1.0-sparse_frac) * n_grid_points);
   unsigned long long i;
   long long l_i, l_j, in, ik;
-  for (i = 0; i < n_grid_points; i++) {
-    grid_point_array[i] = (unsigned long long)i;
-  }
-  /* Pemute array of n grid points and consider densifying on the ones with id <= n_dense_grid_points */
-  l_shuffle_array<DType>(grid_point_array, n_grid_points);
-  qsort(grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
-  for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
-    for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
-      if (l_is_dense_grid_point<DType>(l_i * (K/sparse_block_bk) + l_j, n_dense_grid_points, grid_point_array) == 0) {
-        long long l_ui = l_i * sparse_block_bn;
-        long long l_uj = l_j * sparse_block_bk;
-        long long l_di = 0, l_dj = 0;
-        for (l_di = 0; l_di < sparse_block_bn; l_di++) {
-          for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
-            in = l_ui+l_di;
-            ik = l_uj+l_dj;
-            LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+  if (sparse_block_bn == 1 && sparse_block_bk == 1) {
+    for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
+      for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
+        float tmp = (float)libxsmm_rng_f64();
+        if (tmp <= sparse_frac) {
+          long long l_ui = l_i * sparse_block_bn;
+          long long l_uj = l_j * sparse_block_bk;
+          long long l_di = 0, l_dj = 0;
+          for (l_di = 0; l_di < sparse_block_bn; l_di++) {
+            for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
+              in = l_ui+l_di;
+              ik = l_uj+l_dj;
+              LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+            }
           }
         }
       }
     }
+  } else {
+    unsigned long long n_grid_points = (N/sparse_block_bn) * (K/sparse_block_bk);
+    unsigned long long *grid_point_array = (unsigned long long *) malloc(n_grid_points * sizeof(unsigned long long));
+    unsigned long long n_dense_grid_points = (unsigned long long) ((double)(1.0-sparse_frac) * n_grid_points);
+    for (i = 0; i < n_grid_points; i++) {
+      grid_point_array[i] = (unsigned long long)i;
+    }
+    /* Pemute array of n grid points and consider densifying on the ones with id <= n_dense_grid_points */
+    l_shuffle_array<DType>(grid_point_array, n_grid_points);
+    qsort(grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
+    for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
+      for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
+        if (l_is_dense_grid_point<DType>(l_i * (K/sparse_block_bk) + l_j, n_dense_grid_points, grid_point_array) == 0) {
+          long long l_ui = l_i * sparse_block_bn;
+          long long l_uj = l_j * sparse_block_bk;
+          long long l_di = 0, l_dj = 0;
+          for (l_di = 0; l_di < sparse_block_bn; l_di++) {
+            for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
+              in = l_ui+l_di;
+              ik = l_uj+l_dj;
+              LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+            }
+          }
+        }
+      }
+    }
+    free(grid_point_array);
   }
-  free(grid_point_array);
 }
 
 template<typename DType>
@@ -125,7 +145,7 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
 
   /* Sparsify tensors for benchmarking purposes */
   if (sparse_pct > 0) {
-    //sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
+    sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
   }
 
   /* First pass to count number of non-zeros */
@@ -149,6 +169,11 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   # pragma omp parallel for
   for (l_i = 0; l_i < nnz; l_i++) {
     compressed_weight[l_i] = (DType)1;
+  }
+
+  # pragma omp parallel for
+  for (l_i = 0; l_i < (N*K)/16; l_i++) {
+    bitmap_array[l_i] = (unsigned short)0;
   }
 
   column_offsets[0] = l_c;
