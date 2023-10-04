@@ -108,6 +108,113 @@ double measure_sparsity_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, 
   return res;
 }
 
+template<typename DType>
+void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, tensor_compressed_t *compressed_wt) {
+  long long  nnz = 0;
+  int N = Nb*bn;
+  int K = Kb*bk*v;
+  int l_i = 0, l_j = 0, l_ii = 0, l_jj = 0, l_v = 0, l_c = 0, l_cur = 0, l_bm = 0;
+  DType val;
+  LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
+  auto sparse_pct = env2int("SPFRAC", 0);
+  double sparse_frac = (double) (1.0*sparse_pct/100.0);
+  long long *column_offsets = NULL;
+  DType *compressed_weight = NULL;
+  unsigned int *bitmap = NULL;
+  unsigned short *bitmap_array;
+
+  /* Sparsify tensors for benchmarking purposes */
+  if (sparse_pct > 0) {
+    //sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
+  }
+
+  /* First pass to count number of non-zeros */
+  for (l_i = 0; l_i < Nb * Kb * bk * bn * v; l_i++) {
+    val = dense_wt_ptr[l_i];
+    if ((val != 0) && (val != -0)) {
+      nnz++;
+    }
+  }
+
+  /* Allocate compressedC structures */
+  if (compressed_wt->data) libxsmm_free(compressed_wt->data);
+  if (compressed_wt->bitmap) libxsmm_free(compressed_wt->bitmap);
+  if (compressed_wt->column_offsets) libxsmm_free(compressed_wt->column_offsets);
+
+  bitmap  = (unsigned int*) libxsmm_aligned_malloc( (N*K)/8, 64 );
+  column_offsets  = (long long*) libxsmm_aligned_malloc( Nb*sizeof(long long), 64 );
+  compressed_weight    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );
+  bitmap_array = (unsigned short*)bitmap;
+
+  # pragma omp parallel for
+  for (l_i = 0; l_i < nnz; l_i++) {
+    compressed_weight[l_i] = (DType)1;
+  }
+
+  column_offsets[0] = l_c;
+  if (v == 1) {
+    for (l_i = 0; l_i < Nb; l_i++) {
+      for (l_j = 0; l_j < Kb; l_j++) {
+        DType *tmp = (DType*)&LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i, l_j, 0, 0, 0, Kb, bk, bn, v);
+        for (l_cur = 0; l_cur < bn*bk; l_cur += 16) {
+          unsigned short mask = (unsigned short)0;
+          int l_b = 0;
+          for (l_b = 0; l_b < 16; l_b++) {
+            DType cur_data = tmp[l_cur+l_b];
+            if ((cur_data != 0) && (cur_data != -0)) {
+              mask |= (unsigned short)((unsigned short)1 << l_b);
+              compressed_weight[l_c] = cur_data;
+              l_c++;
+            } 
+          }
+          bitmap_array[l_bm] = mask;
+          l_bm++;
+        }
+      }
+      if (l_i + 1 < Nb) column_offsets[l_i+1] = l_c;  
+    }
+  } else {
+    for (l_i = 0; l_i < Nb; l_i++) {
+      for (l_j = 0; l_j < Kb; l_j++) {
+        /* Undo vnni format to tmp buf */
+        DType tmp[bn*bk*v];
+        for (l_jj = 0; l_jj < bk; l_jj++) {
+          for (l_ii = 0; l_ii < bn; l_ii++) {   
+            for (l_v = 0; l_v < v; l_v++) {
+              tmp[(l_jj*v+l_v)*bn + l_ii] = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i, l_j, l_jj, l_ii, l_v, Kb, bk, bn, v);
+            }
+          }
+        }
+        for (l_cur = 0; l_cur < bn*bk*v; l_cur += 16) {
+          unsigned short mask = (unsigned short)0;
+          int l_b = 0;
+          for (l_b = 0; l_b < 16; l_b++) {
+            DType cur_data = tmp[l_cur+l_b];
+            if ((cur_data != 0) && (cur_data != -0)) {
+              mask |= (unsigned short)((unsigned short)1 << l_b);
+              compressed_weight[l_c] = cur_data;
+              l_c++;
+            } 
+          }
+          bitmap_array[l_bm] = mask;
+          l_bm++;
+        }
+      }
+      if (l_i + 1 < Nb) column_offsets[l_i+1] = l_c;
+    }
+  }
+
+  compressed_wt->data = (void*)compressed_weight;
+  compressed_wt->bitmap = (char*)bitmap;
+  compressed_wt->column_offsets = (long long*)column_offsets;
+  compressed_wt->nnz = nnz;
+  compressed_wt->n_dense_elts = N*K;
+  compressed_wt->sizes[0] = Nb;
+  compressed_wt->sizes[1] = Kb;
+  compressed_wt->sizes[2] = bk;
+  compressed_wt->sizes[3] = bn;
+  compressed_wt->sizes[4] = v;
+}
 
 template<typename DType>
 void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int bcsc_bk, int bcsc_bn, int N_target_blocks, tensor_bcsc_t *sparse_wt) {

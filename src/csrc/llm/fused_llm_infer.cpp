@@ -42,6 +42,7 @@ REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm_sparse, "qkv_spmm");
+REGISTER_LOCAL_SCOPE(qkv_gemm_compressed, "qkv_gemm_cmp");
 REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
@@ -87,6 +88,13 @@ void create_bcsc_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_bcsc_t *t_W_bc
   }
 }
 
+void create_compressed_from_blocked_nkkn_weight(at::Tensor& t_W, tensor_compressed_t *t_W_compressed) {
+  if (t_W.dtype() == at::kFloat) {
+    create_compressed_from_blocked_weight_tensor( GetVLAPtr<float>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), t_W_compressed);
+  } else {
+    create_compressed_from_blocked_weight_tensor( GetVLAPtr<bfloat16>(t_W), t_W.sizes()[0], t_W.sizes()[1], t_W.sizes()[2], t_W.sizes()[3], get_vnni_block_size(t_W.dtype()), t_W_compressed);
+  }
+}
 static c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 
 void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
@@ -1392,12 +1400,102 @@ inline void qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias, at::Te
 }
 
 template <typename T, typename Tout = T>
+inline void qkv_gemm_compressed(at::Tensor t_in, const tensor_compressed_t& t_wt, at::Tensor t_bias, at::Tensor t_out) {
+  RECORD_SCOPE(qkv_gemm_compressed, {t_in});
+  auto in_sizes = t_in.sizes();
+  auto out_sizes = t_out.sizes();
+  auto BS = out_sizes[0] * out_sizes[1];
+#if 0
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+#endif
+  auto C = in_sizes[2];
+  auto Nc = t_wt.sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = t_wt.sizes[0];
+  auto Hk = t_wt.sizes[3];
+  auto K = Nk * Hk;
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto bias = GetVLAPtr<T>(t_bias, {Hk});
+  auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % BSb;
+
+  bool with_bias = (t_bias.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
+
+  auto gemm_tpp = SCOPEITGEMM(
+      (GemmTPP<T, Tout>(BSb, Hk, C, C, Hk, K, 1.0, 0, 1)));
+  auto gemm_tpp_rem = SCOPEITGEMM(
+      (GemmTPP<T, Tout>(rem, Hk, C, C, Hk, K, 1.0, 0, 1)));
+
+  {
+    RECORD_OMP_TIME();
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto gemm_loop = ThreadedLoop<3>(
+        {{0, Nc, Ncb, false}, {0, BS, BSb}, {Nk}}, loop_scheme);
+    gemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp(out[s1][nk]);
+              }
+            }
+            gemm_tpp(in[s1][nc],
+                     (T*)t_wt.data + t_wt.column_offsets[nk],
+                     out[s1][nk],
+                     (char*)t_wt.bitmap + nk * C * (Hk/8),
+                     true);
+          } else {
+            if (nc == 0) {
+              if (with_bias) {
+                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+              } else {
+                zero_tpp_rem(out[s1][nk]);
+              }
+            }
+            gemm_tpp_rem(in[s1][nc],
+                     (T*)t_wt.data + t_wt.column_offsets[nk],
+                     out[s1][nk],
+                     (char*)t_wt.bitmap + nk * C * (Hk/8),
+                     false);
+            gemm_tpp.config();
+          }
+        },
+        [&]() { TimerStart();gemm_tpp.config(); },
+        [&]() { gemm_tpp.release(); TimerEnd(); });
+  }
+}
+
+template <typename T, typename Tout = T>
 inline at::Tensor qkv_gemm(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
   auto sizes = t_in.sizes().vec();
   auto wt_sizes = t_wt.sizes();
   sizes[2] = wt_sizes[0] * wt_sizes[3];
   auto t_out = t_in.new_empty(sizes);
   qkv_gemm<T, Tout>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T, typename Tout = T>
+inline at::Tensor qkv_gemm_compressed(at::Tensor t_in, tensor_compressed_t& t_wt, at::Tensor t_bias) {
+  auto sizes = t_in.sizes().vec();
+  sizes[2] = t_wt.sizes[0] * t_wt.sizes[3];
+  auto t_out = t_in.new_empty(sizes);
+  qkv_gemm_compressed<T, Tout>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1953,6 +2051,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
   tensor_bcsc_t t_Wi_bcsc = {0}, t_Wo_bcsc = {0}, t_Wq_bcsc = {0}, t_Wk_bcsc = {0}, t_Wv_bcsc = {0}, t_Wp_bcsc = {0};
+  tensor_compressed_t t_Wq_compressed = {0}, t_Wk_compressed = {0}, t_Wk_compressedc = {0};
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
@@ -2005,6 +2104,9 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     libxsmm_free( t_Wq_bcsc.rowidx);
     libxsmm_free( t_Wq_bcsc.colptr);
     libxsmm_free( t_Wq_bcsc.Nblocks_offsets);
+    libxsmm_free( t_Wq_compressed.data);
+    libxsmm_free( t_Wq_compressed.column_offsets);
+    libxsmm_free( t_Wq_compressed.bitmap);
     libxsmm_free( t_Wk_bcsc.data);
     libxsmm_free( t_Wk_bcsc.rowidx);
     libxsmm_free( t_Wk_bcsc.colptr);
@@ -2041,6 +2143,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
     bcsc_bn_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bn;
     create_bcsc_from_blocked_nkkn_weight(t_Wq, &t_Wq_bcsc, bcsc_bk_use, bcsc_bn_use);
+    create_compressed_from_blocked_nkkn_weight(t_Wq, &t_Wq_compressed);
 
     //sparsity = measure_sparsity_in_blocked_nkkn_weight(t_Wk);
     bcsc_bk_use = (sparsity <= sparse_threshold && is_spr > 0) ? 32 : bcsc_bk;
@@ -2102,7 +2205,11 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     auto bn_HS = (N_HS <= SPMM_PACKED_BLOCK_SIZE) ? N_HS : SPMM_PACKED_BLOCK_SIZE;
     auto t_HS_use = (spmm_use_flat_acts > 0) ? t_HS : act_tensor_trans_n2v_flat(N_HS, C_HS, bn_HS, bc_HS, t_HS);
 
+#if 0
     auto t_QL = qkv_gemm_sparse<T>(t_HS.sizes(), t_HS_use, t_Wq_bcsc, t_null);
+#else
+    auto t_QL = qkv_gemm_compressed<T>(t_HS, t_Wq_compressed, t_null);
+#endif
     apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
     auto t_KL = qkv_gemm_sparse<T>(t_HS.sizes(), t_HS_use, t_Wk_bcsc, t_null);

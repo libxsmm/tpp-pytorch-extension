@@ -51,6 +51,16 @@ typedef struct tensor_bcsc_t {
   long sizes[8];
 } tensor_bcsc_t;
 
+typedef struct tensor_compressed_t {
+  void *data;
+  char *bitmap;
+  long long *column_offsets;
+  long long n_cols;
+  unsigned int nnz;
+  unsigned int n_dense_elts;
+  long sizes[8];
+} tensor_compressed_t;
+
 extern long long hsh_key, hsh_ret;
 
 namespace tpp {
@@ -2197,6 +2207,205 @@ class SpmmTPP {
   SpmmKernel k_spmm_no_tc;
 };
 
+template <typename Tin, typename Tout>
+class GemmTPP {
+ public:
+  GemmTPP() {}
+  GemmTPP(
+      long M,
+      long N,
+      long K,
+      float beta = 1.0,
+      int a_trans = 0,
+      int b_compressed = 0)
+      : GemmTPP(
+            M,
+            N,
+            K,
+            (a_trans == 0 ? K : M),
+            N,
+            N,
+            beta,
+            a_trans,
+            b_compressed) {}
+  GemmTPP(
+      long M,
+      long N,
+      long K,
+      long lda,
+      long ldb,
+      long ldc,
+      float beta,
+      int a_trans,
+      int b_compressed,
+      int b_vnni = 0)
+      : M(M),
+        N(N),
+        K(K),
+        lda(lda),
+        ldb(ldb),
+        ldc(ldc),
+        beta(beta),
+        a_trans(a_trans),
+        b_compressed(b_compressed),
+        b_vnni(b_vnni),
+        k_gemm_with_tc(this, 0),
+        k_cfg(this, 1),
+        k_rls(this, 2),
+        k_gemm_no_tc(this, 3) {}
+  void config() {
+    k_cfg(NULL);
+  }
+  void release() {
+    k_rls(NULL);
+  }
+  void operator()(
+      Tin* A,
+      Tin* B,
+      Tout* C,
+      char* B_bitmap,
+      bool no_tile_cfg = false) {
+    libxsmm_gemm_param gemm_param;
+    memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+    gemm_param.c.primary = (void*)C;
+    gemm_param.a.primary = (void*)B;
+    gemm_param.a.secondary = (void*)B_bitmap;
+    gemm_param.b.primary = (void*)A;
+    if (!no_tile_cfg) {
+      k_gemm_with_tc(&gemm_param);
+    } else {
+      k_gemm_no_tc(&gemm_param);
+    }
+  }
+
+  long flops() {
+    return 2L * M * N * K;
+  }
+
+  class GemmKernel : public BaseTPP {
+   public:
+    GemmKernel() {}
+    GemmKernel(GemmTPP* p, int config) : p(p), config(config) {
+      auto dt_in = XsmmDtype<Tin>();
+      auto dt_out = XsmmDtype<Tout>();
+      long type = -1;
+      if (dt_in == LIBXSMM_DATATYPE_F32) {
+        TPP_ASSERT(dt_out == LIBXSMM_DATATYPE_F32, "GEMM Assert\n");
+        type = 0;
+      } else if (dt_out == LIBXSMM_DATATYPE_F32) {
+        type = 1;
+      } else {
+        type = 2;
+      }
+      // if (type != 0)
+      //   TPP_ASSERT(
+      //       p->a_trans == 0, "A Transpose supported only for FP32 BRGEMM\n");
+      gemm_type = type;
+      kernel.gemm = (libxsmm_gemmfunction)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_gemm_param* gemm_param) {
+      if (!initialized)
+        return;
+      kernel.gemm(gemm_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "gemm_m%ld_n%ld_k%ld_t%ld_beta%d_at%d_bc%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dto%d",
+          p->M,
+          p->N,
+          p->K,
+          gemm_type,
+          (int)p->beta,
+          p->a_trans,
+          p->b_compressed,
+          (long)p->lda,
+          (long)p->ldb,
+          (long)p->ldc,
+          config,
+          p->b_vnni,
+          XsmmDtype<Tin>(),
+          XsmmDtype<Tout>());
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      // float alpha = 1.0;
+      libxsmm_gemm_shape l_shape;
+      libxsmm_bitfield l_flags = LIBXSMM_GEMM_FLAGS('N', 'N');
+      libxsmm_bitfield l_prefetch_flags = 0;
+      libxsmm_xmmfunction l_test_jit = {NULL};
+
+      if (p->a_trans == 1)
+        l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
+      if (p->b_compressed == 1)
+        l_flags |= LIBXSMM_GEMM_FLAG_DECOMPRESS_A_VIA_BITMASK;
+      if (gemm_type != 0) {
+        if (p->b_vnni) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->a_trans == 1) {
+          l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
+        }
+      }
+      if (p->beta == 0)
+        l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+
+      // config = 0 - normal
+      // config = 1 - no tile release
+      // config = 2 - no tile config
+      // config = 3 - gemm with no tile config or release
+      if (config == 1) {
+        l_flags |= LIBXSMM_GEMM_FLAG_NO_RESET_TILECONFIG;
+      } else if (config == 2) {
+        l_flags |= LIBXSMM_GEMM_FLAG_NO_SETUP_TILECONFIG;
+      } else if (config == 3) {
+        l_flags |=
+            (LIBXSMM_GEMM_FLAG_NO_SETUP_TILECONFIG |
+             LIBXSMM_GEMM_FLAG_NO_RESET_TILECONFIG);
+      }
+
+      /* setting update GEMM struct */
+      l_shape.m = p->N;
+      l_shape.n = p->M;
+      l_shape.k = p->K;
+      l_shape.lda = p->ldb;
+      l_shape.ldb = p->lda;
+      l_shape.ldc = p->ldc;
+      l_shape.a_in_type = XsmmDtype<Tin>();
+      l_shape.b_in_type = XsmmDtype<Tin>();
+      l_shape.out_type = XsmmDtype<Tout>();
+      l_shape.comp_type = (XsmmDtype<Tin>() == LIBXSMM_DATATYPE_F16) ? LIBXSMM_DATATYPE_F16 : LIBXSMM_DATATYPE_F32;
+
+      l_test_jit.gemm = libxsmm_dispatch_gemm_v2(l_shape, l_flags, l_prefetch_flags);
+
+      return (void*)l_test_jit.gemm;
+    }
+
+   private:
+    GemmTPP* p;
+    int config;
+    libxsmm_xmmfunction kernel;
+    long gemm_type = -1;
+  };
+
+ private:
+  long M, N, K;
+  libxsmm_blasint lda;
+  libxsmm_blasint ldb;
+  libxsmm_blasint ldc;
+  float beta;
+  int a_trans;
+  long gemm_type = -1;
+  int b_compressed;
+  int b_vnni;
+  GemmKernel k_gemm_with_tc;
+  GemmKernel k_cfg;
+  GemmKernel k_rls;
+  GemmKernel k_gemm_no_tc;
+};
 
 template <typename Tin, typename Tout>
 class BrgemmTPP {

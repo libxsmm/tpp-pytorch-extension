@@ -208,6 +208,38 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout>, impl> {
 };
 
 template <typename Tin, typename Tout, int impl>
+class ScopedTPP<tpp::GemmTPP<Tin, Tout>, impl> {
+ public:
+  ScopedTPP() {}
+  ScopedTPP(tpp::GemmTPP<Tin, Tout> func) : func(std::move(func)) {}
+  void operator()(
+      Tin* A,
+      Tin* B,
+      Tout* C,
+      char* B_bitmap,
+      bool no_tile_cfg = false) {
+    ScopedTimer _t(BRGEMM, func.flops());
+    if (impl == 0) {
+      func(A, B, C, B_bitmap, no_tile_cfg);
+    } else {
+      printf("invalid impl requested\n");
+      exit(1);
+    }
+  }
+
+  void config() {
+    func.config();
+  }
+
+  void release() {
+    func.release();
+  }
+
+ private:
+  tpp::GemmTPP<Tin, Tout> func;
+};
+
+template <typename Tin, typename Tout, int impl>
 class ScopedTPP<tpp::BrgemmExtTPP<Tin, Tout>, impl> {
  public:
   ScopedTPP() {}
