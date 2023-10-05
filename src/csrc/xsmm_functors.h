@@ -36,6 +36,7 @@
   } while (0)
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
+extern long long hsh_key, hsh_ret;
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -317,10 +318,12 @@ inline int meqn_push_ternary_op(
 class BaseTPP {
  public:
   void* get_kernel() {
+    auto t0 = __rdtsc();
     auto& kernel_cache = get_kernel_cache();
     void* kernel = NULL;
     if (hash == "")
       hash = hash_str();
+    auto t1 = __rdtsc();
     auto search = kernel_cache.find(hash);
     if (search != kernel_cache.end())
       kernel = search->second;
@@ -332,7 +335,12 @@ class BaseTPP {
       }
       // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
       kernel_cache[hash] = kernel;
+      //printf("Hash size = %ld\n", (long)kernel_cache.size());
     }
+    auto t2 = __rdtsc();
+    hsh_key += t1-t0;
+    hsh_ret += t2-t1;
+    //printf("%6lld  %6lld %6lld  get_kernel[%s]\n", t2-t0, (t1-t0), (t2-t1), hash.c_str());
     return kernel;
   }
   // We should make hash_str() public
@@ -341,10 +349,17 @@ class BaseTPP {
   }
 
  protected:
+#if 0
   std::unordered_map<std::string, void*>& get_kernel_cache() {
     static std::unordered_map<std::string, void*> kernel_cache;
     return kernel_cache;
   }
+#else
+  ska::flat_hash_map<std::string, void*>& get_kernel_cache() {
+    static ska::flat_hash_map<std::string, void*> kernel_cache;
+    return kernel_cache;
+  }
+#endif
   virtual std::string hash_str() = 0;
   virtual void* build_kernel() = 0;
   std::string hash = "";
@@ -456,13 +471,13 @@ class UnaryTPP : public BaseTPP {
 
   libxsmm_blasint rows = 0;
   libxsmm_blasint cols = 0;
-  libxsmm_blasint ldi;
-  libxsmm_blasint ldo;
-  libxsmm_datatype dt_in;
-  libxsmm_datatype dt_out;
-  libxsmm_datatype dt_compute;
-  libxsmm_bitfield flags;
-  libxsmm_meltw_unary_type type;
+  libxsmm_blasint ldi = 0;
+  libxsmm_blasint ldo = 0;
+  libxsmm_datatype dt_in = LIBXSMM_DATATYPE_F32;
+  libxsmm_datatype dt_out = LIBXSMM_DATATYPE_F32;
+  libxsmm_datatype dt_compute = LIBXSMM_DATATYPE_F32;
+  libxsmm_bitfield flags = LIBXSMM_MELTW_FLAG_UNARY_NONE;
+  libxsmm_meltw_unary_type type = LIBXSMM_MELTW_TYPE_UNARY_IDENTITY;
   libxsmm_meltwfunction_unary kernel = NULL;
 };
 
@@ -650,8 +665,8 @@ class ConvertTPP {
  private:
   int rows = 0;
   int cols = 0;
-  int ldi;
-  int ldo;
+  int ldi = 0;
+  int ldo = 0;
   UnaryTPP kernel;
   bool init_done = false;
 };
@@ -692,6 +707,56 @@ class CpyTPP {
   int ldi;
   int ldo;
   UnaryTPP kernel;
+};
+
+template <typename T>
+class PadTPP {
+ public:
+  PadTPP() {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols)
+      : PadTPP(in_rows, in_cols, out_rows, out_cols, in_cols, out_cols) {}
+  PadTPP(int in_rows, int in_cols, int out_rows, int out_cols, int ldi, int ldo)
+      : in_rows(in_rows),
+        in_cols(in_cols),
+        out_rows(out_rows),
+        out_cols(out_cols),
+        ldi(ldi),
+        ldo(ldo),
+        cpy(),
+        zero() {
+    if (out_rows > in_rows || out_cols > in_cols) {
+      TPP_ASSERT(
+          out_rows == in_rows || out_cols == in_cols,
+          "PadTPP can pad only 1 dim at a time");
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, ldo);
+      if (out_rows > in_rows) {
+        zero = SetZeroTPP<T>(out_rows - in_rows, out_cols, ldo);
+        zero_offset = in_rows * ldo;
+      } else {
+        zero = SetZeroTPP<T>(out_rows, out_cols - in_cols, ldo);
+        zero_offset = in_cols;
+      }
+    }
+  }
+  void operator()(T* in, T* out) {
+    cpy(in, out);
+    zero(out);
+  }
+  void ref(T* in, T* out) {
+    cpy.ref(in, out);
+    zero.ref(out);
+  }
+
+ private:
+  int in_rows = 0;
+  int in_cols = 0;
+  int out_rows = 0;
+  int out_cols = 0;
+  int ldi;
+  int ldo;
+  int zero_offset = 0;
+  CpyTPP<T> cpy;
+  SetZeroTPP<T> zero;
 };
 
 template <typename Tin, typename Tout = Tin>
@@ -781,25 +846,17 @@ class AddBiasTPP {
         kernel(
             rows,
             cols,
+	    cols,
             ld,
             ld,
+	    XsmmDtype<T>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0,
-            LIBXSMM_MELTW_TYPE_BINARY_ADD),
-        cvt() {
-    if (!std::is_same<T, float>::value)
-      cvt = ConvertTPP<T, float>(1, cols);
-  }
+            LIBXSMM_MELTW_TYPE_BINARY_ADD) {}
   void operator()(T* in, float* out) {
-    if (std::is_same<T, float>::value) {
-      kernel((void*)in, (void*)out, (void*)out);
-    } else {
-      float tmp[cols];
-      cvt(in, tmp);
-      kernel((void*)tmp, (void*)out, (void*)out);
-    }
+    kernel((void*)in, (void*)out, (void*)out);
   }
   void ref(T* in, float* out) {
     for (int r = 0; r < rows; r++) {
@@ -814,37 +871,41 @@ class AddBiasTPP {
   int cols = 0;
   int ld;
   BinaryTPP kernel;
-  ConvertTPP<T, float> cvt;
 };
 
-template <typename Tin, typename Tout = Tin>
+
+template <typename Tin, typename Tout = Tin, typename Tin2 = Tin>
 class AddTPP {
  public:
   AddTPP() {}
   AddTPP(int N) : AddTPP(1, N) {}
   AddTPP(int rows, int cols) : AddTPP(rows, cols, cols, cols) {}
-  AddTPP(int rows, int cols, int ldi, int ldo)
+  AddTPP(int rows, int cols, int ldi, int ldo) : AddTPP(rows, cols, ldi, ldi, ldo) {}
+  AddTPP(int rows, int cols, int ldi0, int ldi1, int ldo)
       : rows(rows),
         cols(cols),
-        ldi(ldi),
+        ldi0(ldi0),
+        ldi1(ldi1),
         ldo(ldo),
         kernel(
             rows,
             cols,
-            ldi,
+            ldi0,
+            ldi1,
             ldo,
             XsmmDtype<Tin>(),
+            XsmmDtype<Tin2>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_NONE,
             LIBXSMM_MELTW_TYPE_BINARY_ADD) {}
-  void operator()(Tin* in0, Tin* in1, Tout* out) {
+  void operator()(Tin* in0, Tin2* in1, Tout* out) {
     kernel((void*)in0, (void*)in1, (void*)out);
   }
-  void ref(Tin* in0, Tin* in1, Tout* out) {
+  void ref(Tin* in0, Tin2* in1, Tout* out) {
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        out[r * ldo + c] = (float)in0[r * ldi + c] + (float)in1[r * ldi + c];
+        out[r * ldo + c] = (float)in0[r * ldi0 + c] + (float)in1[r * ldi1 + c];
       }
     }
   }
@@ -852,7 +913,8 @@ class AddTPP {
  private:
   int rows = 0;
   int cols = 0;
-  int ldi;
+  int ldi0;
+  int ldi1;
   int ldo;
   BinaryTPP kernel;
 };
@@ -1361,31 +1423,43 @@ template <typename Tin, typename Tout>
 class ScaleAddTPP {
  public:
   ScaleAddTPP() {}
-  ScaleAddTPP(int N)
-      : N(N),
+  ScaleAddTPP(int N) : ScaleAddTPP(1, N) {}
+  ScaleAddTPP(int rows, int cols) : ScaleAddTPP(rows, cols, cols, cols) {}
+  ScaleAddTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+	cols(cols),
+	ldi(ldi),
+	ldo(ldo),
         kernel(
-            1,
-            N,
-            N,
-            N,
+            rows,
+            cols,
+	    1,
+            ldi,
+            ldo,
+            XsmmDtype<float>(),
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
             LIBXSMM_MELTW_TYPE_BINARY_MULADD) {}
   void operator()(Tin* in, Tout* out, float scale) {
-    Tin alpha = scale;
+    float alpha = scale;
     kernel((void*)&alpha, (void*)in, (void*)out);
   }
   void ref(Tin* in, Tout* out, float scale) {
-    Tin alpha = scale;
-    for (int i = 0; i < N; i++) {
-      out[i] += (float)in[i] * (float)alpha;
+    float alpha = scale;
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i*ldo+j] += (float)in[i*ldi+j] * (float)alpha;
+      }
     }
   }
 
  private:
-  int N = 0;
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
   BinaryTPP kernel;
 };
 
@@ -1688,21 +1762,21 @@ class XformExtTPP {
           unary_type);
     }
 
-    if ((xtype == XformTPP::XFORM_N2V_TPP ||
-         xtype == XformTPP::XFORM_XPOSE_TPP) &&
-        in_rows_p != in_rows) {
-      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols);
-      zero = SetZeroTPP<T>(in_rows_p - in_rows, in_cols);
-      zero_offset = in_rows * in_cols;
-    } else if (xtype == XformTPP::XFORM_XPOSE_N2V_TPP && in_cols_p != in_cols) {
-      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols_p);
-      zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
-      zero_offset = in_cols;
-    } else if (xtype == XformTPP::XFORM_XPOSE_V2V_TPP && in_cols_p != in_cols) {
+    if (xtype == XformTPP::XFORM_XPOSE_V2V_TPP && in_cols_p != in_cols) {
       cpy = CpyTPP<T>(in_rows / BS, in_cols * BS, ldi * BS, in_cols_p * BS);
       zero = SetZeroTPP<T>(
           in_rows / BS, (in_cols_p - in_cols) * BS, in_cols_p * BS);
       zero_offset = in_cols * BS;
+    } else if (/*(xtype == XformTPP::XFORM_N2V_TPP ||
+         xtype == XformTPP::XFORM_XPOSE_TPP) &&*/
+        in_rows_p != in_rows) {
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols);
+      zero = SetZeroTPP<T>(in_rows_p - in_rows, in_cols);
+      zero_offset = in_rows * in_cols;
+    } else if (/*xtype == XformTPP::XFORM_XPOSE_N2V_TPP &&*/ in_cols_p != in_cols) {
+      cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols_p);
+      zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
+      zero_offset = in_cols;
     }
     if (std::is_same<T, bfloat16>::value)
       cvt = ConvertTPP<float, bfloat16>(in_rows, in_cols);
@@ -1914,7 +1988,8 @@ class BrgemmTPP {
       long ldc,
       float beta,
       int a_trans,
-      int unroll_hint)
+      int unroll_hint,
+      int b_vnni = 1)
       : M(M),
         N(N),
         K(K),
@@ -1926,6 +2001,7 @@ class BrgemmTPP {
         beta(beta),
         a_trans(a_trans),
         unroll_hint(unroll_hint),
+        b_vnni(b_vnni),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
         k_rls(this, 2),
@@ -1964,7 +2040,7 @@ class BrgemmTPP {
     for (uint64_t c = 0; c < count; c++) {
       auto A_ = &A[c * str_a];
       auto B_ = &B[c * str_b];
-      if (std::is_same<Tin, float>::value) {
+      if (std::is_same<Tin, float>::value || b_vnni == 0) {
         for (int i = 0; i < M; i++) {
           for (int j = 0; j < N; j++) {
             if (beta == 0.0 && c == 0)
@@ -1982,13 +2058,17 @@ class BrgemmTPP {
         const int BS = xsmm_get_vnni_block_size(dtype);
         for (int i = 0; i < M; i++) {
           for (int j = 0; j < N; j++) {
-            float sum = 0.0f;
-            if (beta == 1.0 && c == 0)
-              sum = C[i * ldc + j];
+            float sum =
+                ((beta == 0.0 && c == 0) ? 0.0f : (float)C[i * ldc + j]);
             for (int k = 0; k < K / BS; k++) {
               for (int b = 0; b < BS; b++) {
-                sum += (float)A_[i * lda + k * BS + b] *
-                    (float)B_[k * ldb * BS + j * BS + b];
+                if (a_trans == 1) {
+                  sum += (float)A_[k * lda * BS + i * BS + b] *
+                      (float)B_[k * ldb * BS + j * BS + b];
+                } else {
+                  sum += (float)A_[i * lda + k * BS + b] *
+                      (float)B_[k * ldb * BS + j * BS + b];
+                }
               }
             }
             C[i * ldc + j] = (Tout)sum;
@@ -2017,9 +2097,9 @@ class BrgemmTPP {
       } else {
         type = 2;
       }
-      if (type != 0)
-        TPP_ASSERT(
-            p->a_trans == 0, "A Transpose supported only for FP32 BRGEMM\n");
+      // if (type != 0)
+      //   TPP_ASSERT(
+      //       p->a_trans == 0, "A Transpose supported only for FP32 BRGEMM\n");
       brgemm_type = type;
       kernel.gemm = (libxsmm_gemmfunction)get_kernel();
       initialized = true;
@@ -2036,7 +2116,7 @@ class BrgemmTPP {
       snprintf(
           hash,
           200,
-          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d",
+          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dto%d",
           p->M,
           p->N,
           p->K,
@@ -2049,7 +2129,10 @@ class BrgemmTPP {
           (long)p->lda,
           (long)p->ldb,
           (long)p->ldc,
-          config);
+          config,
+          p->b_vnni,
+          XsmmDtype<Tin>(),
+          XsmmDtype<Tout>());
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -2062,8 +2145,12 @@ class BrgemmTPP {
 
       if (p->a_trans == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
-      if (brgemm_type != 0)
-        l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+      if (brgemm_type != 0) {
+        if (p->b_vnni) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->a_trans == 1) {
+          l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
+        }
+      }
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
 
@@ -2120,6 +2207,7 @@ class BrgemmTPP {
   int a_trans;
   long brgemm_type = -1;
   int unroll_hint;
+  int b_vnni;
   BrgemmKernel k_gemm_with_tc;
   BrgemmKernel k_cfg;
   BrgemmKernel k_rls;
@@ -2130,13 +2218,18 @@ template <typename Tin, typename Tout = Tin>
 class GeluFwdTPP {
  public:
   GeluFwdTPP() {}
-  GeluFwdTPP(int N)
-      : N(N),
+  GeluFwdTPP(int N) : GeluFwdTPP(1, N) {}
+  GeluFwdTPP(int M, int N) : GeluFwdTPP(M, N, N, N) {}
+  GeluFwdTPP(int M, int N, int ldi, int ldo)
+      : M(M),
+        N(N),
+        ldi(ldi),
+        ldo(ldo),
         kernel(
-            1,
+            M,
             N,
-            N,
-            N,
+            ldi,
+            ldo,
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
@@ -2147,31 +2240,38 @@ class GeluFwdTPP {
   }
   void ref(Tin* in, Tout* out) {
 #ifdef __AVX512F__
-    int i;
-    for (i = 0; i < ALIGNDOWN(N, 16); i += 16) {
-      auto vin = _mm512_loadu_ps_auto(&in[i]);
-      // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
-      auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
-      _mm512_storeu_ps_auto(&out[i], vout);
-    }
-    if (i < N) {
-      int rem = N - i;
-      __mmask16 mask = (1 << rem) - 1;
-      auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[i]);
-      // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
-      auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
-      _mm512_mask_storeu_ps_auto(&out[i], mask, vout);
+    for (int j = 0; j < M; j++) {
+      int i;
+      for (i = 0; i < ALIGNDOWN(N, 16); i += 16) {
+        auto vin = _mm512_loadu_ps_auto(&in[j * ldi + i]);
+        // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
+        auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
+        _mm512_storeu_ps_auto(&out[j * ldo + i], vout);
+      }
+      if (i < N) {
+        int rem = N - i;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[j * ldi + i]);
+        // auto vout = LIBXSMM_INTRINSICS_MM512_TANH_PS_GELU_FWD(vin);
+        auto vout = LIBXSMM_INTRINSICS_MM512_GELU_FWD_PS_MINIMAX3(vin);
+        _mm512_mask_storeu_ps_auto(&out[j * ldo + i], mask, vout);
+      }
     }
 #else
-    for (int i = 0; i < N; i++) {
-      float x = in[i];
-      out[i] = (erff(x / sqrtf(2.0)) + 1.0) * 0.5 * x;
+    for (int j = 0; j < M; j++) {
+      for (int i = 0; i < N; i++) {
+        float x = in[j * ldi + i];
+        out[j * ldo + i] = (erff(x / sqrtf(2.0)) + 1.0) * 0.5 * x;
+      }
     }
 #endif
   }
 
  private:
+  int M = 0;
   int N = 0;
+  int ldi = 0;
+  int ldo = 0;
   UnaryTPP kernel;
 };
 
@@ -2259,6 +2359,101 @@ class GeluBwdTPP : public BaseTPP {
  private:
   int N = 0;
   libxsmm_matrix_eqn_function kernel = NULL;
+};
+
+template <typename Tin, typename Tout = Tin>
+class SigmoidFwdTPP {
+ public:
+  SigmoidFwdTPP() {}
+  SigmoidFwdTPP(int rows, int cols) : SigmoidFwdTPP(rows, cols, cols, cols) {}
+  SigmoidFwdTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_SIGMOID) {}
+  void operator()(Tin* in, Tout* out) {
+    kernel((void*)in, (void*)out);
+  }
+  void ref(Tin* in, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        out[i * ldo + j] = 1. / (1. + exp(-in[i * ldi + j]));
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  UnaryTPP kernel;
+};
+
+template <typename Tin, typename Tout = Tin>
+class SigmoidBwdTPP {
+ public:
+  SigmoidBwdTPP() {}
+  SigmoidBwdTPP(int rows, int cols) : SigmoidBwdTPP(rows, cols, cols, cols) {}
+  SigmoidBwdTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        ksub(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_0,
+            LIBXSMM_MELTW_TYPE_BINARY_SUB),
+        kmul(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
+  void operator()(Tin* in_grad_act, Tin* in_act, Tout* out) {
+    Tin val = 1.0;
+    ksub(&val, (void*)in_act, (void*)out);
+    kmul((void*)out, (void*)in_act, (void*)out);
+    kmul((void*)out, (void*)in_grad_act, (void*)out);
+  }
+  void ref(Tin* in_grad_act, Tin* in_act, Tout* out) {
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        int outIndex = i * ldo + j;
+        int inIndex = i * ldi + j;
+        out[outIndex] =
+            in_grad_act[inIndex] * (1.0 - in_act[inIndex]) * in_act[inIndex];
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi;
+  int ldo;
+  BinaryTPP ksub;
+  BinaryTPP kmul;
 };
 
 template <typename Tin, typename Tout = Tin>
@@ -2541,16 +2736,22 @@ class SiLUFwdTPP {
             cols,
             ldi,
             ldo,
+            ldo,
+            XsmmDtype<T>(),
             XsmmDtype<T>(),
             XsmmDtype<T>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_NONE,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-  void operator()(T* in, T* out, T* sigout) {
+  void operator()(T* in, T* out, T* sigout = nullptr) {
+    T tmp[rows*ldo];
+    if (sigout == nullptr) sigout = tmp;
     sigmoid((void*)in, (void*)sigout);
     mul((void*)in, (void*)sigout, (void*)out);
   }
-  void ref(T* in, T* out, T* sigout) {
+  void ref(T* in, T* out, T* sigout = nullptr) {
+    T tmp[rows*ldo];
+    if (sigout == nullptr) sigout = tmp;
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
         sigout[i * ldo + j] = 1. / (1. + exp(-in[i * ldi + j]));
@@ -2875,7 +3076,7 @@ class SoftMaxFwdTPP {
     }
     void* build_kernel() override {
       auto dt_in = XsmmDtype<Tin>();
-      libxsmm_blasint tmp_ld = S2;
+      libxsmm_blasint tmp_ld = S3;
       libxsmm_blasint ld = S2 * S3;
       libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
       meqn_push_unary_op(my_eqn0, LIBXSMM_MELTW_TYPE_UNARY_EXP);
@@ -2938,7 +3139,7 @@ class SoftMaxFwdTPP {
     }
     void* build_kernel() override {
       auto dt_out = XsmmDtype<Tout>();
-      libxsmm_blasint tmp_ld = S2;
+      libxsmm_blasint tmp_ld = S3;
       libxsmm_blasint ld = S2 * S3;
       libxsmm_blasint my_eqn1 = libxsmm_matrix_eqn_create();
       meqn_push_binary_op(
@@ -3193,8 +3394,10 @@ class VarSoftMaxFwdTPP {
             1,
             S3,
             S3,
+            1,
             S3,
             XsmmDtype<Tin>(),
+            LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
@@ -3229,10 +3432,10 @@ class VarSoftMaxFwdTPP {
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-  void operator()(int S1, Tin* in, Tout* out) {
+  void operator()(int S1, Tin* in, Tout* out, float *max_buf = nullptr, float *sum_buf = nullptr) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
-      Tin max = in[s2 * S3];
+      float max = (float)in[s2 * S3];
       float sum = 0.0f;
       for (int s1 = 0; s1 < S1; s1++) {
         float rmax = 0;
@@ -3248,13 +3451,15 @@ class VarSoftMaxFwdTPP {
         ksum(&tmp[s1 * S3], &lsum);
         sum += lsum;
       }
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (int s1 = 0; s1 < S1; s1++) {
         kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
       }
     }
   }
-  void ref(int S1, Tin* pinp, Tout* pout) {
+  void ref(int S1, Tin* pinp, Tout* pout, float *max_buf = nullptr, float *sum_buf = nullptr) {
     int s1, s2, s3;
     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
@@ -3308,6 +3513,8 @@ class VarSoftMaxFwdTPP {
         }
       }
       sum = _mm512_reduce_add_ps(vsum);
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       vsum = _mm512_set1_ps(sum);
       for (s1 = 0; s1 < S1; s1++) {
@@ -3350,6 +3557,8 @@ class VarSoftMaxFwdTPP {
           sum += z;
         }
       }
+      if (max_buf) max_buf[s2] = max;
+      if (sum_buf) sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < S3; s3++) {
@@ -3555,6 +3764,264 @@ class VarSoftMaxBwdTPP {
   Eqn eqn0, eqn1;
 };
 
+template <typename T>
+class SoftMaxFixUpTPP {
+ public:
+  SoftMaxFixUpTPP() {}
+  SoftMaxFixUpTPP(int S2, int S3) : S2(S2), S3(S3), eqn(S3) {}
+  void operator()(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+    libxsmm_matrix_eqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[4];
+    eqn_param.inputs = arg_array;
+
+    for (int s2 = 0; s2 < S2; s2++) {
+      float nmax = std::max(cmax[s2], omax[s2]);
+      float oexp = expf(omax[s2] - nmax);
+      float cexp = expf(cmax[s2] - nmax);
+      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float rsum = 1.0 / nsum;
+      float oscale = osum[s2] * oexp * rsum;
+      float cscale = csum[s2] * cexp * rsum;
+      arg_array[0].primary = &out[s2*S3];
+      arg_array[1].primary = &oscale;
+      arg_array[2].primary = &cur[s2*S3];
+      arg_array[3].primary = &cscale;
+      eqn_param.output.primary = (void*)&out[s2 * S3];
+      eqn(&eqn_param);
+      omax[s2] = nmax;
+      osum[s2] = nsum;
+    }
+  }
+
+  void ref(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+    for (int s2 = 0; s2 < S2; s2++) {
+      float nmax = std::max(cmax[s2], omax[s2]);
+      float oexp = exp(omax[s2] - nmax);
+      float cexp = exp(cmax[s2] - nmax);
+      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float rsum = 1.0 / nsum;
+      float oscale = osum[s2] * oexp * rsum;
+      float cscale = csum[s2] * cexp * rsum;
+      for (int s3 = 0; s3 < S3; s3++) {
+        out[s2*S3+s3] = oscale * out[s2*S3+s3] + cscale * cur[s2*S3+s3];
+      }
+      omax[s2] = nmax;
+      osum[s2] = nsum;
+    }
+  }
+
+  class Eqn : BaseTPP {
+   public:
+    Eqn() {}
+    Eqn(int S3) : S3(S3) {
+      kernel = (libxsmm_matrix_eqn_function)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_matrix_eqn_param* eqn_param) {
+      if (!initialized)
+        return;
+      kernel(eqn_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "softmax_fixup_eqn_t1%d_S3%d",
+          XsmmDtype<T>(),
+          S3);
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      auto in_dt = XsmmDtype<T>();
+      auto out_dt = XsmmDtype<T>();
+      libxsmm_blasint tmp_ld = 1;
+      libxsmm_blasint ld = S3;
+      libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_ADD,
+          LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+      meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+      meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 3, 0, LIBXSMM_DATATYPE_F32);
+      debug_print_eqn_tree(my_eqn0); // printf
+      return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
+    }
+
+   private:
+    int S3;
+    libxsmm_matrix_eqn_function kernel = NULL;
+  };
+
+ protected:
+  int S2 = 0;
+  int S3 = 0;
+  Eqn eqn;
+};
+
+template <typename T, typename LT = T>
+class RMSNormFwdTPP {
+ public:
+  RMSNormFwdTPP() {}
+  RMSNormFwdTPP(int S1, int S2, int S3, float eps)
+      : S1(S1),
+        S2(S2),
+        S3(S3),
+        eps(eps),
+        reduce_cols_kernel(
+            S1,
+            S3,
+            S2 * S3,
+            S3,
+            XsmmDtype<T>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_REDUCE_COLS,
+            LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X2_OP_ADD),
+        reduce_rows_kernel(
+            1,
+            S3,
+            S3,
+            1,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_REDUCE_ROWS,
+            LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_ADD),
+        eqn(S1, S2, S3) {}
+  void operator()(
+      T* inp,
+      LT* gamma,
+      float* var,
+      T* out) {
+    LIBXSMM_ALIGNED(float tmp[S3], 64);
+    const float c = 1.0 / ((float)S1 * S3);
+    float v, s;
+    libxsmm_matrix_eqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[3];
+    eqn_param.inputs = arg_array;
+    arg_array[1].primary = &s;
+    arg_array[2].primary = (void*)gamma;
+    for (int s2 = 0; s2 < S2; s2++) {
+      reduce_cols_kernel((void*)&inp[s2 * S3], (void*)tmp);
+      reduce_rows_kernel((void*)tmp, (void*)&v);
+      v = v * c;
+      // v = LIBXSMM_MAX(v, 0.0f);
+      v = 1.0f / ((float)sqrt(v + eps));
+      if (var)
+        var[s2] = v;
+      s = v;
+      arg_array[0].primary = (void*)&inp[s2 * S3];
+      eqn_param.output.primary = (void*)&out[s2 * S3];
+      eqn(&eqn_param);
+    }
+  }
+  void ref(T* pinp, 
+          LT* pgamma, 
+          float* var, 
+          T* pout) {
+    int s1, s2, s3;
+    LIBXSMM_VLA_DECL(3, T, inp, pinp, S2, S3);
+    LIBXSMM_VLA_DECL(3, T, out, pout, S2, S3);
+    LIBXSMM_VLA_DECL(2, LT, gamma, pgamma, S3);
+    for (s2 = 0; s2 < S2; s2++) {
+      float v = 0;
+      float c = 1.0 / (S1 * S3);
+      for (s1 = 0; s1 < S1; s1++) {
+        for (s3 = 0; s3 < S3; s3++) {
+          v += LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3) *
+              LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3);
+        }
+      }
+      v = v * c;
+      // v = LIBXSMM_MAX(v, 0.0f);
+      v = 1.0f / ((float)sqrt(v + eps));
+      float s = v;
+      for (s1 = 0; s1 < S1; s1++) {
+        for (s3 = 0; s3 < S3; s3++) {
+          LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) =
+              (LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3) * s) *
+                  LIBXSMM_VLA_ACCESS(2, gamma, s1, s3, S3);
+        }
+      }
+    }
+  }
+  class Eqn : BaseTPP {
+   public:
+    Eqn() {}
+    Eqn(int S1, int S2, int S3) : S1(S1), S2(S2), S3(S3) {
+      kernel = (libxsmm_matrix_eqn_function)get_kernel();
+      initialized = true;
+    }
+    void operator()(libxsmm_matrix_eqn_param* eqn_param) {
+      if (!initialized)
+        return;
+      kernel(eqn_param);
+    }
+
+   protected:
+    std::string hash_str() override {
+      char hash[200];
+      snprintf(
+          hash,
+          200,
+          "rmsnorm_fwd_eqn_t1%d_t2%d_S1%d_S2%d_S3%d",
+          XsmmDtype<T>(),
+          XsmmDtype<LT>(),
+          S1,
+          S2,
+          S3);
+      return std::string(hash);
+    }
+    void* build_kernel() override {
+      auto in_dt = XsmmDtype<T>();
+      auto bg_dt = XsmmDtype<LT>();
+      auto out_dt = XsmmDtype<T>();
+      libxsmm_blasint tmp_ld = 1;
+      libxsmm_blasint tmp_ld2 = S3;
+      libxsmm_blasint ld = S2 * S3;
+      libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_binary_op(
+          my_eqn0,
+          LIBXSMM_MELTW_TYPE_BINARY_MUL,
+          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1 |
+              LIBXSMM_MELTW_FLAG_BINARY_NONE);
+      meqn_push_arg(my_eqn0, S3, S1, ld, 0, 0, in_dt);
+      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+      meqn_push_arg(my_eqn0, S3, S1, tmp_ld2, 2, 0, bg_dt);
+      debug_print_eqn_tree(my_eqn0); // printf
+      return (void*)meqn_dispatch(S3, S1, &ld, out_dt, my_eqn0);
+    }
+
+   private:
+    int S1, S2, S3;
+    libxsmm_matrix_eqn_function kernel = NULL;
+  };
+
+ private:
+  int S1, S2, S3;
+  float eps;
+  UnaryTPP reduce_cols_kernel;
+  UnaryTPP reduce_rows_kernel;
+  Eqn eqn;
+};
+
 template <typename T, typename LT = T>
 class LayerNormFwdTPP {
  public:
@@ -3610,8 +4077,10 @@ class LayerNormFwdTPP {
       v = v * c;
       v = LIBXSMM_MAX(v - m * m, 0.0f);
       v = 1.0f / ((float)sqrt(v + eps));
-      mean[s2] = m;
-      var[s2] = v;
+      if (mean)
+        mean[s2] = m;
+      if (var)
+        var[s2] = v;
       s = v;
       b = -1.0 * v * m;
       arg_array[0].primary = (void*)&inp[s2 * S3];
@@ -4415,7 +4884,7 @@ class SplitSGDTPP : public BaseTPP {
   void* build_kernel() override {
     libxsmm_blasint ld = N;
     libxsmm_blasint my_eqn0 = libxsmm_matrix_eqn_create();
-    meqn_push_unary_op(my_eqn0, LIBXSMM_MELTW_TYPE_UNARY_UNPACK_TO_BLOCKS);
+    meqn_push_unary_op(my_eqn0, LIBXSMM_MELTW_TYPE_UNARY_UNZIP);
     meqn_push_ternary_op(
         my_eqn0,
         LIBXSMM_MELTW_TYPE_TERNARY_MULADD,
@@ -4425,7 +4894,7 @@ class SplitSGDTPP : public BaseTPP {
     meqn_push_arg(my_eqn0, N, 1, ld, 3, 0, LIBXSMM_DATATYPE_BF16);
     /* This is the scalar learning rate */
     meqn_push_arg(my_eqn0, 1, 1, 1, 2, 0, LIBXSMM_DATATYPE_F32);
-    meqn_push_binary_op(my_eqn0, LIBXSMM_MELTW_TYPE_BINARY_PACK);
+    meqn_push_binary_op(my_eqn0, LIBXSMM_MELTW_TYPE_BINARY_ZIP);
     /* This is the tensor with lo bits  */
     meqn_push_arg(my_eqn0, N, 1, ld, 0, 0, LIBXSMM_DATATYPE_I16);
     /* This is the tensor with hi bits  */
@@ -4811,7 +5280,7 @@ class FusedSplitAdamWTPP {
     arg_array[6].primary = (void*)&lrwd_1;
     eqn_param.output.primary = (void*)lo;
     auto offset = (long long)((char*)hi - (char*)lo);
-    eqn_param.output.secondary = (void*)offset;
+    eqn_param.output.secondary = (void*)&offset;
     eqn2(&eqn_param);
   }
 
@@ -4971,7 +5440,7 @@ class FusedSplitAdamWTPP {
       } else if (eqn_no == 2) {
         // Equation for data_i (with decay)
         auto my_eqn2 = libxsmm_matrix_eqn_create();
-        meqn_push_unary_op(my_eqn2, LIBXSMM_MELTW_TYPE_UNARY_UNPACK_TO_BLOCKS);
+        meqn_push_unary_op(my_eqn2, LIBXSMM_MELTW_TYPE_UNARY_UNZIP, LIBXSMM_MELTW_FLAG_UNARY_NONE, LIBXSMM_DATATYPE_IMPLICIT);
         if (use_wd == 1) {
           meqn_push_binary_op(
               my_eqn2,
@@ -4979,11 +5448,11 @@ class FusedSplitAdamWTPP {
               LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
         }
         meqn_push_binary_op(my_eqn2, LIBXSMM_MELTW_TYPE_BINARY_SUB);
-        meqn_push_binary_op(my_eqn2, LIBXSMM_MELTW_TYPE_BINARY_PACK);
+        meqn_push_binary_op(my_eqn2, LIBXSMM_MELTW_TYPE_BINARY_ZIP, LIBXSMM_MELTW_FLAG_BINARY_NONE, LIBXSMM_DATATYPE_IMPLICIT);
         meqn_push_arg(
-            my_eqn2, N, 1, ld, 4, 0, LIBXSMM_DATATYPE_I16); // data_i lo
+            my_eqn2, N, 1, ld, 4, 0, LIBXSMM_DATATYPE_U16); // data_i lo
         meqn_push_arg(
-            my_eqn2, N, 1, ld, 5, 0, LIBXSMM_DATATYPE_I16); // data_i hi
+            my_eqn2, N, 1, ld, 5, 0, LIBXSMM_DATATYPE_U16); // data_i hi
 
         meqn_push_binary_op(
             my_eqn2,
@@ -5005,7 +5474,7 @@ class FusedSplitAdamWTPP {
           meqn_push_arg(my_eqn2, 1, 1, 1, 6, 0, LIBXSMM_DATATYPE_F32);
         }
         debug_print_eqn_tree(my_eqn2);
-        func = meqn_dispatch(N, 1, &ld, LIBXSMM_DATATYPE_I16, my_eqn2);
+        func = meqn_dispatch(N, 1, &ld, LIBXSMM_DATATYPE_U16, my_eqn2);
       } else {
         TPP_ASSERT(false, "Should not come here\n");
       }

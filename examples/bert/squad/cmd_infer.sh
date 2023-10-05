@@ -48,11 +48,11 @@ if test -z $dataset || ! test -d $dataset ; then
   fi
 fi
 
-if test -z $model_path || ! test -d $model_path ; then
+if test -z $model_path ; then
   if test -d ./squad_finetuned_checkpoint ; then
     model_path=./squad_finetuned_checkpoint
   else
-    echo "Unable to find model path"
+    echo "model_path not specified"
     exit 1
   fi
 fi

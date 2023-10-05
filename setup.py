@@ -28,7 +28,6 @@ if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
 
 xsmm_makefile = os.path.join(libxsmm_root, "Makefile")
-# xsmm_include = "./libxsmm/include"
 xsmm_include = os.path.join(libxsmm_root, "include")
 xsmm_lib = os.path.join(libxsmm_root, "lib")
 
@@ -137,13 +136,20 @@ sources += glob.glob("src/csrc/alphafold/*.cpp")
 # BERT sources
 sources += glob.glob("src/csrc/bert/pad/*.cpp")
 sources += glob.glob("src/csrc/bert/unpad/*.cpp")
+sources += glob.glob("src/csrc/bert/infer/*.cpp")
+
+sources += glob.glob("src/csrc/llm/*.cpp")
 
 # GNN sources
 sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
 sources += glob.glob("src/csrc/gnn/common/*.cpp")
 sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 
-extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]
+# DLRM sources
+sources += glob.glob("src/csrc/dlrm/*.cpp")
+
+extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
+
 if platform.processor() != "aarch64":
     extra_compile_args.append("-march=native")
 
@@ -179,7 +185,7 @@ setup(
     # install_requires=["torch>=1.4.0"],
     scripts=["utils/run_dist.sh", "utils/run_dist_ht.sh"],
     libraries=[
-        ("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j"]),
+        ("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j", "STATIC=1"]),
         (
             "parlooper",
             parlooper_makefile,

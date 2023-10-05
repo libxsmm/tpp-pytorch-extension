@@ -1570,6 +1570,12 @@ def main():
                                 f"{desc} min: {tmin:10.1f} ({tmin_i:2d}) max: {tmax:10.1f} ({tmax_i:2d})  diff: {tmax-tmin:10.1f} ({(tmax-tmin)*100.0/tmin:5.1f}) avg: {tavg:10.1f}"
                             )
 
+                        def print_all_ranks(desc, t):
+                            if isinstance(t, torch.Tensor):
+                                t = t.tolist()
+                            tt = " ".join([f"{t1:10.1f}" for t1 in t])
+                            print(f"{desc} {tt} ")
+
                         print_summary("NNZ:", t_all_time[:, 0])
                         print_summary("FWD:", t_all_time[:, 1])
                         print_summary("BWD:", t_all_time[:, 2])
@@ -1578,6 +1584,9 @@ def main():
                         print_summary("SYS:", t_all_time[:, 7])
                         print_summary("ARS:", t_all_time[:, 8])
                         print_summary("ARE:", t_all_time[:, 9])
+                        print_all_ranks("FBW_ALL:", t_all_time[:, 3])
+                        print_all_ranks("SYN_ALL:", t_all_time[:, 4])
+                        print_all_ranks("STT_ALL:", t_all_time[:, 6])
                 if args.local_rank == 0 and args.profile and args.use_tpp:
                     tpp_bert.print_debug_timers()
                 if args.benchmark_steps > 0 and global_step + 1 >= args.benchmark_steps:

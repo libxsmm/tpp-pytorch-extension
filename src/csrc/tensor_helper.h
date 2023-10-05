@@ -58,7 +58,7 @@ inline at::Tensor wt_tensor_trans_n2v(
   auto in = GetVLAPtr<T>(input, {Hc * Hk});
   auto trans_n2v_tpp = SCOPEIT(
       XformExtTPP<T>(
-          Hc, Hk, Hc, Hkp2 * BS, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+          Hc, Hk, Hkp2 * BS, Hc, XformTPP::XFORM_XPOSE_N2V_TPP, true),
       XPOSE);
   RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
@@ -87,7 +87,7 @@ inline at::Tensor wt_tensor_trans_n2v_compact(
   auto in = GetVLAPtr<T>(input, {Nc, Hc * Hk});
   auto trans_n2v_tpp = SCOPEIT(
       XformExtTPP<T>(
-          Hc, Hk, Hc, Hkp2 * BS, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+          Hc, Hk, Hkp2 * BS, Hc, XformTPP::XFORM_XPOSE_N2V_TPP, true),
       XPOSE);
   RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(2)
@@ -536,6 +536,36 @@ inline at::Tensor get_padded_activation_for_vnni(at::Tensor& input) {
   new_sizes[ndims - 1] = align - pad;
   auto output = at::cat({input, input.new_zeros(new_sizes)}, ndims - 1);
   return output;
+}
+
+inline at::Tensor act_tensor_trans_n2v(
+    long S1,
+    long N,
+    long S2,
+    long H,
+    at::Tensor& input) {
+  RECORD_SCOPE(a_vnni, {input});
+  const int BS = get_vnni_block_size(input.dtype());
+  TPP_ASSERT(S2 % BS == 0, "Uneven number for S2\n");
+#if 0
+  return input.view({S1, N, S2, H / BS, BS})
+      .permute({0, 1, 3, 2, 4})
+      .contiguous();
+#else
+  auto output = input.new_empty({S1, N, H / BS, S2, BS});
+  auto out = GetVLAPtr<bfloat16>(output, {H * S2});
+  auto in = GetVLAPtr<bfloat16>(input, {H * S2});
+  auto xpose_n2v_tpp = SCOPEIT(
+      XformExtTPP<bfloat16>(S2, H, XformTPP::XFORM_XPOSE_N2V_TPP), VNNI);
+  {
+    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+    for (int n = 0; n < S1 * N; n++) {
+      xpose_n2v_tpp(in[n], out[n]);
+    }
+  }
+  return output;
+#endif
 }
 
 USING_SCOPE(zero);

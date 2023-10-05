@@ -34,18 +34,36 @@ REGISTER_SCOPE(gao_dropout, "gao_dropout");
 REGISTER_SCOPE(gado_dropout, "gado_dropout");
 REGISTER_SCOPE(go_lrelu, "go_lrelu");
 REGISTER_SCOPE(gdo_lrelu, "gdo_lrelu");
+REGISTER_SCOPE(go_relu, "go_relu");
+REGISTER_SCOPE(gdo_relu, "gdo_relu");
+REGISTER_SCOPE(go_bias_relu, "go_bias_relu");
+REGISTER_SCOPE(gdo_bias_relu, "gdo_bias_relu");
+REGISTER_SCOPE(go_add_bias, "go_add_bias");
+REGISTER_SCOPE(gdo_add_bias, "gdo_add_bias");
 REGISTER_SCOPE(go_attn, "go_attn");
 REGISTER_SCOPE(gdo_attn, "gdo_attn");
 REGISTER_SCOPE(go_mlp_attn, "go_mlp_attn");
 REGISTER_SCOPE(gdo_mlp_attn, "gdo_mlp_attn");
-REGISTER_SCOPE(ga_dattn_dbias_din, "ga_dattn_dbias_din");
+REGISTER_SCOPE(go_mlp, "go_mlp");
+REGISTER_SCOPE(gdo_mlp, "gdo_mlp");
+REGISTER_SCOPE(ga_dattn, "ga_dattn");
+REGISTER_SCOPE(ga_dbias, "ga_dbias");
+REGISTER_SCOPE(ga_din, "ga_din");
+REGISTER_SCOPE(ga_fused_dattn, "ga_fused_dattn");
+REGISTER_SCOPE(ga_fused_dbias, "ga_fused_dbias");
+REGISTER_SCOPE(ga_fused_din, "ga_fused_din");
+REGISTER_SCOPE(gao_gemm_attn, "gao_gemm_attn");
+REGISTER_SCOPE(gadi_gemm_attn, "gadi_gemm_attn");
+REGISTER_SCOPE(gadw_gemm_attn, "gadw_gemm_attn");
+REGISTER_SCOPE(gao_relu_drop, "go_relu_drop");
+REGISTER_SCOPE(gado_relu_drop, "gdo_relu_drop");
 
 // ######################################## FUSED GAT MLP & ATTENTION
 // ################################################
 
 std::vector<at::Tensor> fused_gat_mlp_attn_fwd(
     long align,
-    std::string act,
+    int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
@@ -59,7 +77,7 @@ std::vector<at::Tensor> fused_gat_mlp_attn_fwd(
 
 std::vector<at::Tensor> fused_gat_mlp_attn_bwd(
     long align,
-    std::string act,
+    int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
@@ -68,6 +86,86 @@ std::vector<at::Tensor> fused_gat_mlp_attn_bwd(
   } else {
     typedef bfloat16 T;
 #include "fused_gat_mlp_attn_flat_bwd.h"
+  }
+}
+
+at::Tensor fused_mlp_fwd(
+    long align,
+    int add_bias,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "fused_mlp_flat_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "fused_mlp_flat_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> fused_mlp_bwd(
+    long align,
+    int add_bias,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "fused_mlp_flat_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "fused_mlp_flat_bwd.h"
+  }
+}
+
+at::Tensor attn_fwd(
+    long align,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "attn_flat_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "attn_flat_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> attn_bwd(
+    long align,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "attn_flat_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "attn_flat_bwd.h"
+  }
+}
+
+at::Tensor gemm_attn_fwd(
+    long align,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "gemm_attn_flat_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "gemm_attn_flat_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> gemm_attn_bwd(
+    long align,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "gemm_attn_flat_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "gemm_attn_flat_bwd.h"
   }
 }
 
@@ -125,17 +223,129 @@ at::Tensor leakyrelu_bwd(float alpha, std::vector<at::Tensor> inputs) {
   }
 }
 
-REGISTER_SUBMODULE(_fused_gsage, m) {
+// ######################################## ReLU
+// ################################################
+
+std::vector<at::Tensor> relu_fwd(at::Tensor inp) {
+  GlobalPass _gp(FWD);
+  if (inp.dtype() == at::kFloat) {
+    typedef float T;
+#include "relu_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "relu_fwd.h"
+  }
+}
+
+at::Tensor relu_bwd(std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "relu_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "relu_bwd.h"
+  }
+}
+// ######################################## Fused Bias Add with ReLU
+// ################################################
+
+std::vector<at::Tensor> bias_relu_fwd(std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_relu_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_relu_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> bias_relu_bwd(std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_relu_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_relu_bwd.h"
+  }
+}
+
+// ######################################## Fused Dropout with ReLU
+// ################################################
+std::vector<at::Tensor> relu_drop_fwd(float p, at::Tensor inp, bool training) {
+  GlobalPass _gp(FWD);
+  if (inp.dtype() == at::kFloat) {
+    typedef float T;
+#include "relu_drop_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "relu_drop_fwd.h"
+  }
+}
+
+at::Tensor relu_drop_bwd(float p, std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "relu_drop_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "relu_drop_bwd.h"
+  }
+}
+
+// ######################################## Bias Add
+// ################################################
+
+at::Tensor add_bias_fwd(std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "add_bias_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "add_bias_fwd.h"
+  }
+}
+
+at::Tensor add_bias_bwd(std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "add_bias_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "add_bias_bwd.h"
+  }
+}
+
+REGISTER_SUBMODULE(_fused_gat, m) {
   m.def(
       "fused_gat_mlp_attn_fwd",
       &fused_gat_mlp_attn_fwd,
-      "Tpp GAT fused MLP-Attention forward");
+      "Tpp fused MLP-Attention forward");
   m.def(
       "fused_gat_mlp_attn_bwd",
       &fused_gat_mlp_attn_bwd,
-      "Tpp GAT fused MLP-Attention backward");
+      "Tpp fused MLP-Attention backward");
+  m.def("fused_mlp_fwd", &fused_mlp_fwd, "Tpp fused MLP forward");
+  m.def( "fused_mlp_bwd", &fused_mlp_bwd, "Tpp GAT fused MLP backward");
+  m.def( "attn_fwd", &attn_fwd, "Tpp Attention forward");
+  m.def( "attn_bwd", &attn_bwd, "Tpp Attention backward");
+  m.def( "gemm_attn_fwd", &gemm_attn_fwd, "Tpp GEMM Attention forward");
+  m.def( "gemm_attn_bwd", &gemm_attn_bwd, "Tpp GEMM Attention backward");
   m.def("gat_dropout_fwd", &gat_dropout_fwd, "Tpp Optimized Dropout FWD");
   m.def("gat_dropout_bwd", &gat_dropout_bwd, "Tpp Optimized Dropout BWD");
   m.def("leakyrelu_fwd", &leakyrelu_fwd, "Tpp Optimized Leaky Relu FWD");
   m.def("leakyrelu_bwd", &leakyrelu_bwd, "Tpp Optimized Leaky Relu BWD");
+  m.def("relu_fwd", &relu_fwd, "Tpp Optimized Relu FWD");
+  m.def("relu_bwd", &relu_bwd, "Tpp Optimized Relu BWD");
+  m.def("bias_relu_fwd", &bias_relu_fwd, "Tpp Optimized Bias+Relu FWD");
+  m.def("bias_relu_bwd", &bias_relu_bwd, "Tpp Optimized Relu+GradBias BWD");
+  m.def("add_bias_fwd", &add_bias_fwd, "Tpp Optimized Bias Add FWD");
+  m.def("add_bias_bwd", &add_bias_bwd, "Tpp Optimized GradBias BWD");
+  m.def("relu_drop_fwd", &relu_drop_fwd, "Fused ReLU + Dropout FWD");
+  m.def("relu_drop_bwd", &relu_drop_bwd, "Fused Relu + Dropout BWD");
 }

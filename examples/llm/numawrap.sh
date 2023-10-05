@@ -1,0 +1,9 @@
+#!/bin/bash
+
+NUMAOFFSET=0
+NUMAOFFSET=$1
+NUMARANK=$(( MPI_LOCALRANKID + NUMAOFFSET ))
+shift
+
+numactl -m $NUMARANK $@
+

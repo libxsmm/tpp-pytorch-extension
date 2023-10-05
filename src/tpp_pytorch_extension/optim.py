@@ -28,8 +28,6 @@ class SGD(Optimizer):
         weight_decay=0,
         nesterov=False,
     ):
-        if not is_available():
-            raise ValueError("Module function 'bf16_update' not available for SplitSGD")
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if momentum != 0.0:
@@ -46,11 +44,11 @@ class SGD(Optimizer):
         )
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
-        super(SplitSGD, self).__init__(params, defaults)
+        super(SGD, self).__init__(params, defaults)
         print("Using SplitSGD")
 
     def __setstate__(self, state):
-        super(SplitSGD, self).__setstate__(state)
+        super(SGD, self).__setstate__(state)
         for group in self.param_groups:
             group.setdefault("nesterov", False)
 
@@ -102,7 +100,7 @@ class SGD(Optimizer):
                     optim_cpp.bf16_split_add_(p.data, buf, d_p, -group["lr"])
                 else:
                     if d_p.is_sparse:
-                        optim_cpp.dense_sparse_add(p.data, d_p, -group["lr"])
+                        optim_cpp.dense_sparse_add_(p.data, d_p, -group["lr"])
                     else:
                         p.data.add_(d_p, alpha=-group["lr"])
 

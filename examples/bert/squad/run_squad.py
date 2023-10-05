@@ -473,8 +473,11 @@ def evaluate(args, model, tokenizer, prefix=""):
 
     all_results = []
     start_time = timeit.default_timer()
+    all_times = []
 
-    for batch in tqdm(eval_dataloader, desc="Evaluating"):
+    for it, batch in tqdm(
+        enumerate(eval_dataloader), desc="Evaluating", disable=args.no_tqdm
+    ):
         model.eval()
         batch = tuple(t.to(args.device) for t in batch)
 
@@ -510,7 +513,20 @@ def evaluate(args, model, tokenizer, prefix=""):
                             ).to(args.device)
                         }
                     )
+            if args.profile and args.use_tpp:
+                tpp_bert.reset_debug_timers()
+            _t0 = timeit.default_timer()
             outputs = model(**inputs)
+            _t1 = timeit.default_timer()
+            bs = batch[0].size(0)
+            all_times.append(
+                (
+                    _t1 - _t0,
+                    bs,
+                )
+            )
+            if args.profile and args.use_tpp:
+                tpp_bert.print_debug_timers()
 
         for i, feature_index in enumerate(feature_indices):
             eval_feature = features[feature_index.item()]
@@ -543,6 +559,11 @@ def evaluate(args, model, tokenizer, prefix=""):
             all_results.append(result)
 
     evalTime = timeit.default_timer() - start_time
+    for it, (t, b) in enumerate(all_times):
+        print(
+            "Step %4d: time = %10.3f ms   bs: %3d  %10.3f seq/sec"
+            % (it, t * 1000.0, b, b / t)
+        )
     logger.info(
         "  Evaluation done in total %f secs (%f sec per example)",
         evalTime,
@@ -675,6 +696,8 @@ def load_and_cache_examples(args, tokenizer, evaluate=False, output_examples=Fal
                     args.data_dir, filename=args.train_file
                 )
 
+        if args.num_examples > 0:
+            examples = examples[: args.num_examples]
         features, dataset = squad_convert_examples_to_features(
             examples=examples,
             tokenizer=tokenizer,
@@ -936,9 +959,19 @@ def main():
         help="Whether to use TPP Fused impl when available",
     )
     parser.add_argument(
+        "--opt_infer",
+        action="store_true",
+        help="Whether to use TPP Fused impl when available",
+    )
+    parser.add_argument(
         "--unpad",
         action="store_true",
         help="Whether to use TPP Fused impl when available",
+    )
+    parser.add_argument(
+        "--no_tqdm",
+        action="store_true",
+        help="Whether to disable tqdm progress bar",
     )
     parser.add_argument(
         "--dist_backend",
@@ -958,6 +991,15 @@ def main():
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="random seed for initialization"
+    )
+    parser.add_argument(
+        "--num_examples",
+        type=int,
+        default=0,
+        help="Number of examples to pick from dataset",
+    )
+    parser.add_argument(
+        "--features_block_size", type=int, default=0, help="Feature block size"
     )
 
     parser.add_argument(
@@ -1106,7 +1148,10 @@ def main():
     )
 
     low_prec = args.tpp_bf16 or args.tpp_bf8
-    with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8):
+    use_infer_only = args.opt_infer and not args.do_train
+    with tpp_bert.tpp_impl(
+        args.use_tpp, low_prec, args.unpad, args.tpp_bf8, use_infer_only
+    ):
         model = AutoModelForQuestionAnswering.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
@@ -1197,9 +1242,14 @@ def main():
             # Reload the model
             global_step = checkpoint.split("-")[-1] if len(checkpoints) > 1 else ""
             low_prec = args.tpp_bf16 or args.tpp_bf8
-            with tpp_bert.tpp_impl(args.use_tpp, low_prec, args.unpad, args.tpp_bf8):
+            config = AutoConfig.from_pretrained(checkpoint)
+            if args.features_block_size != 0:
+                config.features_block_size = args.features_block_size
+            with tpp_bert.tpp_impl(
+                args.use_tpp, low_prec, args.unpad, args.tpp_bf8, args.opt_infer
+            ):
                 model = AutoModelForQuestionAnswering.from_pretrained(
-                    checkpoint
+                    checkpoint, config=config
                 )  # , force_download=True)
             model.to(args.device)
             if args.use_tpp:
@@ -1208,7 +1258,9 @@ def main():
             #     print(f"{n}: {p.dtype}")
 
             # Evaluate
+            tpp_bert.reset_debug_timers()
             result = evaluate(args, model, tokenizer, prefix=global_step)
+            tpp_bert.print_debug_timers()
 
             result = dict(
                 (k + ("_{}".format(global_step) if global_step else ""), v)

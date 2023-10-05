@@ -10,6 +10,7 @@
 
 from . import fused_bert_unpad
 from . import fused_bert
+from . import fused_bert_infer
 from tpp_pytorch_extension import manual_seed
 from tpp_pytorch_extension import reset_debug_timers
 from tpp_pytorch_extension import print_debug_timers
@@ -23,8 +24,13 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def tpp_impl(enable=True, use_low_prec=False, use_unpad=True, use_bf8=False):
-    if use_unpad == True:
+def tpp_impl(
+    enable=True, use_low_prec=False, use_unpad=True, use_bf8=False, infer=False
+):
+    if infer == True:
+        with fused_bert_infer.tpp_impl(enable, use_unpad, use_low_prec, use_bf8):
+            yield
+    elif use_unpad == True:
         with fused_bert_unpad.tpp_impl(enable, use_low_prec, use_bf8):
             yield
     else:

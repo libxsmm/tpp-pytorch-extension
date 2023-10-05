@@ -134,11 +134,23 @@ VLAPtr<T, N, index_t> GetVLAPtr(T* data_, const index_t (&list)[N]) {
 #ifdef TORCH_API_INCLUDE_EXTENSION_H
 template <typename T>
 inline T* pt_get_data_ptr(at::Tensor t) {
+  if (!t.is_contiguous()) {
+    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
+              << std::endl;
+#if 0
+    std::cout << c10::get_backtrace(0, 3) << std::endl;
+    throw std::invalid_argument("Tensor is not contiguous");
+#endif
+  }
   return t.data_ptr<T>();
 }
 #ifndef PYTORCH_SUPPORTS_BFLOAT8
 template <>
 inline at::BFloat8* pt_get_data_ptr<at::BFloat8>(at::Tensor t) {
+  if (!t.is_contiguous()) {
+    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
+              << std::endl;
+  }
   return (at::BFloat8*)t.data_ptr<uint8_t>();
 }
 #endif
