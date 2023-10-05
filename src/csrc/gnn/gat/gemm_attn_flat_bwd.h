@@ -16,12 +16,12 @@ int i = 0;
 
 const int threads = omp_get_max_threads();
 
-auto t_grad_out = inputs[i++].contiguous(); 
+auto t_grad_out = inputs[i++].contiguous();
 
-t_in = inputs[i++]; 
-t_wt = inputs[i++]; 
+t_in = inputs[i++];
+t_wt = inputs[i++];
 
-auto in_sizes = t_in.sizes(); 
+auto in_sizes = t_in.sizes();
 auto N = in_sizes[0];
 
 auto bn = align;
@@ -145,85 +145,84 @@ auto brgemm_dw_bf16_tpp_b1 =
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
       {
-	T tmp[bn][nk][bkp];
+        T tmp[bn][nk][bkp];
 
-#pragma omp for 
-	for (int n = 0; n < nn; n++) {
-	  // Grad_in Brgemm computation if bk != bkp
-	  if (bk != bkp) {
-	    for (int k = 0; k < nk; k++)
-	      set_zero_col_tpp(&tmp[0][k][bk]);
+#pragma omp for
+        for (int n = 0; n < nn; n++) {
+          // Grad_in Brgemm computation if bk != bkp
+          if (bk != bkp) {
+            for (int k = 0; k < nk; k++)
+              set_zero_col_tpp(&tmp[0][k][bk]);
 
-	    brgemm_di_tpp.config();
-	    for (int c = 0; c < nc; c++) {
-	      for (int k = 0; k < nk; k++)
-		cpy_tpp(grad_out[n][0][k], tmp[0][k]);
-	      brgemm_di_tpp(tmp[0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
-	    }
-	    brgemm_di_tpp.release();
-	  } else { // Grad_in Brgemm computation if bk == bkp
-	    brgemm_di_tpp.config();
-	    for (int c = 0; c < nc; c++) {
-	      brgemm_di_tpp(
-		  grad_out[n][0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
-	    }
-	    brgemm_di_tpp.release();
-	  }
-	} 
-      } 
+            brgemm_di_tpp.config();
+            for (int c = 0; c < nc; c++) {
+              for (int k = 0; k < nk; k++)
+                cpy_tpp(grad_out[n][0][k], tmp[0][k]);
+              brgemm_di_tpp(tmp[0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
+            }
+            brgemm_di_tpp.release();
+          } else { // Grad_in Brgemm computation if bk == bkp
+            brgemm_di_tpp.config();
+            for (int c = 0; c < nc; c++) {
+              brgemm_di_tpp(
+                  grad_out[n][0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
+            }
+            brgemm_di_tpp.release();
+          }
+        }
+      }
 
       if (rem > 0) {
+        auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
 
-	auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
+        // Grad_in-----------------------------------------------------
+        {
+          auto grad_in = GetVLAPtr<T>(t_grad_in, {nc, bc});
+          auto wt_TV = GetVLAPtr<T>(t_wt_TV, {nc, bc * bkp});
 
-	// Grad_in-----------------------------------------------------
-	{
-	  auto grad_in = GetVLAPtr<T>(t_grad_in, {nc, bc});
-	  auto wt_TV = GetVLAPtr<T>(t_wt_TV, {nc, bc * bkp});
+          auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(rem, 1, bkp), EW_ZERO);
+          auto cpy_tpp = SCOPEIT(CpyTPP<T>(rem, bk, bk, bkp), EW_COPY);
+          auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<T, T>(
+              rem,
+              bc,
+              bkp,
+              bkp,
+              nc * bc * bkp,
+              nk * bkp,
+              bc,
+              nc * bc,
+              0.0,
+              0,
+              nk)));
 
-	  auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(rem, 1, bkp), EW_ZERO);
-	  auto cpy_tpp = SCOPEIT(CpyTPP<T>(rem, bk, bk, bkp), EW_COPY);
-	  auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<T, T>(
-		  rem,
-		  bc,
-		  bkp,
-		  bkp,
-		  nc * bc * bkp,
-		  nk * bkp,
-		  bc,
-		  nc * bc,
-		  0.0,
-		  0,
-		  nk)));
+          if (bk != bkp) {
+            T tmp[rem][nk][bkp];
 
-	  if (bk != bkp) {
-	    T tmp[rem][nk][bkp];
+            for (int k = 0; k < nk; k++)
+              set_zero_col_tpp(&tmp[0][k][bk]);
 
-	    for (int k = 0; k < nk; k++)
-	      set_zero_col_tpp(&tmp[0][k][bk]);
+            brgemm_di_tpp.config();
 
-	    brgemm_di_tpp.config();
-
-	    for (int c = 0; c < nc; c++) {
-	      for (int k = 0; k < nk; k++)
-		cpy_tpp(grad_out[nn * bn][k], tmp[0][k]);
-	      brgemm_di_tpp(
-		  tmp[0][0], wt_TV[0][c], grad_in[nn * bn][c], nk, true);
-	    }
-	    brgemm_di_tpp.release();
-	  } else { // Grad_in Brgemm computation if bk == bkp
-	    brgemm_di_tpp.config();
-	    for (int c = 0; c < nc; c++) {
-	      brgemm_di_tpp(
-		  grad_out[nn * bn][0],
-		  wt_TV[0][c],
-		  grad_in[nn * bn][c],
-		  nk,
-		  true);
-	    }
-	    brgemm_di_tpp.release();
-	  }
-	}
+            for (int c = 0; c < nc; c++) {
+              for (int k = 0; k < nk; k++)
+                cpy_tpp(grad_out[nn * bn][k], tmp[0][k]);
+              brgemm_di_tpp(
+                  tmp[0][0], wt_TV[0][c], grad_in[nn * bn][c], nk, true);
+            }
+            brgemm_di_tpp.release();
+          } else { // Grad_in Brgemm computation if bk == bkp
+            brgemm_di_tpp.config();
+            for (int c = 0; c < nc; c++) {
+              brgemm_di_tpp(
+                  grad_out[nn * bn][0],
+                  wt_TV[0][c],
+                  grad_in[nn * bn][c],
+                  nk,
+                  true);
+            }
+            brgemm_di_tpp.release();
+          }
+        }
       } // rem > 0
     }
   }

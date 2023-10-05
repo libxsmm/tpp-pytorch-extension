@@ -10,7 +10,7 @@
 
 RECORD_FUNCTION("bias_relu_fwd", std::vector<c10::IValue>());
 
-int i=0;
+int i = 0;
 auto t_in = inputs[i++].contiguous();
 auto t_bias = inputs[i];
 
@@ -40,9 +40,9 @@ auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
     for (int n = 0; n < N; n++) {
-        cvt_f32_tpp(in[n], out_f32[n]);
-        add_bias_tpp(bias[0], out_f32[n]);
-        relu_fwd_tpp(out_f32[n], out[n], relu_mask[n]);
+      cvt_f32_tpp(in[n], out_f32[n]);
+      add_bias_tpp(bias[0], out_f32[n]);
+      relu_fwd_tpp(out_f32[n], out[n], relu_mask[n]);
     }
   }
 }

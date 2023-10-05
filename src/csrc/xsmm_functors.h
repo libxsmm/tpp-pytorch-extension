@@ -335,12 +335,13 @@ class BaseTPP {
       }
       // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
       kernel_cache[hash] = kernel;
-      //printf("Hash size = %ld\n", (long)kernel_cache.size());
+      // printf("Hash size = %ld\n", (long)kernel_cache.size());
     }
     auto t2 = __rdtsc();
-    hsh_key += t1-t0;
-    hsh_ret += t2-t1;
-    //printf("%6lld  %6lld %6lld  get_kernel[%s]\n", t2-t0, (t1-t0), (t2-t1), hash.c_str());
+    hsh_key += t1 - t0;
+    hsh_ret += t2 - t1;
+    // printf("%6lld  %6lld %6lld  get_kernel[%s]\n", t2-t0, (t1-t0), (t2-t1),
+    // hash.c_str());
     return kernel;
   }
   // We should make hash_str() public
@@ -846,10 +847,10 @@ class AddBiasTPP {
         kernel(
             rows,
             cols,
-	    cols,
+            cols,
             ld,
             ld,
-	    XsmmDtype<T>(),
+            XsmmDtype<T>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_DATATYPE_F32,
@@ -873,14 +874,14 @@ class AddBiasTPP {
   BinaryTPP kernel;
 };
 
-
 template <typename Tin, typename Tout = Tin, typename Tin2 = Tin>
 class AddTPP {
  public:
   AddTPP() {}
   AddTPP(int N) : AddTPP(1, N) {}
   AddTPP(int rows, int cols) : AddTPP(rows, cols, cols, cols) {}
-  AddTPP(int rows, int cols, int ldi, int ldo) : AddTPP(rows, cols, ldi, ldi, ldo) {}
+  AddTPP(int rows, int cols, int ldi, int ldo)
+      : AddTPP(rows, cols, ldi, ldi, ldo) {}
   AddTPP(int rows, int cols, int ldi0, int ldi1, int ldo)
       : rows(rows),
         cols(cols),
@@ -1427,13 +1428,13 @@ class ScaleAddTPP {
   ScaleAddTPP(int rows, int cols) : ScaleAddTPP(rows, cols, cols, cols) {}
   ScaleAddTPP(int rows, int cols, int ldi, int ldo)
       : rows(rows),
-	cols(cols),
-	ldi(ldi),
-	ldo(ldo),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
         kernel(
             rows,
             cols,
-	    1,
+            1,
             ldi,
             ldo,
             XsmmDtype<float>(),
@@ -1450,7 +1451,7 @@ class ScaleAddTPP {
     float alpha = scale;
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
-        out[i*ldo+j] += (float)in[i*ldi+j] * (float)alpha;
+        out[i * ldo + j] += (float)in[i * ldi + j] * (float)alpha;
       }
     }
   }
@@ -1769,11 +1770,12 @@ class XformExtTPP {
       zero_offset = in_cols * BS;
     } else if (/*(xtype == XformTPP::XFORM_N2V_TPP ||
          xtype == XformTPP::XFORM_XPOSE_TPP) &&*/
-        in_rows_p != in_rows) {
+               in_rows_p != in_rows) {
       cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols);
       zero = SetZeroTPP<T>(in_rows_p - in_rows, in_cols);
       zero_offset = in_rows * in_cols;
-    } else if (/*xtype == XformTPP::XFORM_XPOSE_N2V_TPP &&*/ in_cols_p != in_cols) {
+    } else if (
+        /*xtype == XformTPP::XFORM_XPOSE_N2V_TPP &&*/ in_cols_p != in_cols) {
       cpy = CpyTPP<T>(in_rows, in_cols, ldi, in_cols_p);
       zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
       zero_offset = in_cols;
@@ -2146,7 +2148,8 @@ class BrgemmTPP {
       if (p->a_trans == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
       if (brgemm_type != 0) {
-        if (p->b_vnni) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->b_vnni)
+          l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
         if (p->a_trans == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
@@ -2744,14 +2747,16 @@ class SiLUFwdTPP {
             LIBXSMM_MELTW_FLAG_BINARY_NONE,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
   void operator()(T* in, T* out, T* sigout = nullptr) {
-    T tmp[rows*ldo];
-    if (sigout == nullptr) sigout = tmp;
+    T tmp[rows * ldo];
+    if (sigout == nullptr)
+      sigout = tmp;
     sigmoid((void*)in, (void*)sigout);
     mul((void*)in, (void*)sigout, (void*)out);
   }
   void ref(T* in, T* out, T* sigout = nullptr) {
-    T tmp[rows*ldo];
-    if (sigout == nullptr) sigout = tmp;
+    T tmp[rows * ldo];
+    if (sigout == nullptr)
+      sigout = tmp;
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
         sigout[i * ldo + j] = 1. / (1. + exp(-in[i * ldi + j]));
@@ -3432,7 +3437,12 @@ class VarSoftMaxFwdTPP {
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-  void operator()(int S1, Tin* in, Tout* out, float *max_buf = nullptr, float *sum_buf = nullptr) {
+  void operator()(
+      int S1,
+      Tin* in,
+      Tout* out,
+      float* max_buf = nullptr,
+      float* sum_buf = nullptr) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
       float max = (float)in[s2 * S3];
@@ -3451,15 +3461,22 @@ class VarSoftMaxFwdTPP {
         ksum(&tmp[s1 * S3], &lsum);
         sum += lsum;
       }
-      if (max_buf) max_buf[s2] = max;
-      if (sum_buf) sum_buf[s2] = sum;
+      if (max_buf)
+        max_buf[s2] = max;
+      if (sum_buf)
+        sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (int s1 = 0; s1 < S1; s1++) {
         kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
       }
     }
   }
-  void ref(int S1, Tin* pinp, Tout* pout, float *max_buf = nullptr, float *sum_buf = nullptr) {
+  void ref(
+      int S1,
+      Tin* pinp,
+      Tout* pout,
+      float* max_buf = nullptr,
+      float* sum_buf = nullptr) {
     int s1, s2, s3;
     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
@@ -3513,8 +3530,10 @@ class VarSoftMaxFwdTPP {
         }
       }
       sum = _mm512_reduce_add_ps(vsum);
-      if (max_buf) max_buf[s2] = max;
-      if (sum_buf) sum_buf[s2] = sum;
+      if (max_buf)
+        max_buf[s2] = max;
+      if (sum_buf)
+        sum_buf[s2] = sum;
       sum = 1.0 / sum;
       vsum = _mm512_set1_ps(sum);
       for (s1 = 0; s1 < S1; s1++) {
@@ -3557,8 +3576,10 @@ class VarSoftMaxFwdTPP {
           sum += z;
         }
       }
-      if (max_buf) max_buf[s2] = max;
-      if (sum_buf) sum_buf[s2] = sum;
+      if (max_buf)
+        max_buf[s2] = max;
+      if (sum_buf)
+        sum_buf[s2] = sum;
       sum = 1.0 / sum;
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < S3; s3++) {
@@ -3769,7 +3790,13 @@ class SoftMaxFixUpTPP {
  public:
   SoftMaxFixUpTPP() {}
   SoftMaxFixUpTPP(int S2, int S3) : S2(S2), S3(S3), eqn(S3) {}
-  void operator()(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+  void operator()(
+      T* cur,
+      T* out,
+      float* cmax,
+      float* csum,
+      float* omax,
+      float* osum) {
     libxsmm_matrix_eqn_param eqn_param;
     libxsmm_matrix_arg arg_array[4];
     eqn_param.inputs = arg_array;
@@ -3778,13 +3805,13 @@ class SoftMaxFixUpTPP {
       float nmax = std::max(cmax[s2], omax[s2]);
       float oexp = expf(omax[s2] - nmax);
       float cexp = expf(cmax[s2] - nmax);
-      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float nsum = cexp * csum[s2] + oexp * osum[s2];
       float rsum = 1.0 / nsum;
       float oscale = osum[s2] * oexp * rsum;
       float cscale = csum[s2] * cexp * rsum;
-      arg_array[0].primary = &out[s2*S3];
+      arg_array[0].primary = &out[s2 * S3];
       arg_array[1].primary = &oscale;
-      arg_array[2].primary = &cur[s2*S3];
+      arg_array[2].primary = &cur[s2 * S3];
       arg_array[3].primary = &cscale;
       eqn_param.output.primary = (void*)&out[s2 * S3];
       eqn(&eqn_param);
@@ -3793,17 +3820,18 @@ class SoftMaxFixUpTPP {
     }
   }
 
-  void ref(T *cur, T* out, float *cmax, float *csum, float *omax, float *osum) {
+  void ref(T* cur, T* out, float* cmax, float* csum, float* omax, float* osum) {
     for (int s2 = 0; s2 < S2; s2++) {
       float nmax = std::max(cmax[s2], omax[s2]);
       float oexp = exp(omax[s2] - nmax);
       float cexp = exp(cmax[s2] - nmax);
-      float nsum = cexp*csum[s2] + oexp*osum[s2];
+      float nsum = cexp * csum[s2] + oexp * osum[s2];
       float rsum = 1.0 / nsum;
       float oscale = osum[s2] * oexp * rsum;
       float cscale = csum[s2] * cexp * rsum;
       for (int s3 = 0; s3 < S3; s3++) {
-        out[s2*S3+s3] = oscale * out[s2*S3+s3] + cscale * cur[s2*S3+s3];
+        out[s2 * S3 + s3] =
+            oscale * out[s2 * S3 + s3] + cscale * cur[s2 * S3 + s3];
       }
       omax[s2] = nmax;
       osum[s2] = nsum;
@@ -3826,12 +3854,7 @@ class SoftMaxFixUpTPP {
    protected:
     std::string hash_str() override {
       char hash[200];
-      snprintf(
-          hash,
-          200,
-          "softmax_fixup_eqn_t1%d_S3%d",
-          XsmmDtype<T>(),
-          S3);
+      snprintf(hash, 200, "softmax_fixup_eqn_t1%d_S3%d", XsmmDtype<T>(), S3);
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -3901,11 +3924,7 @@ class RMSNormFwdTPP {
             LIBXSMM_MELTW_FLAG_UNARY_REDUCE_ROWS,
             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_ADD),
         eqn(S1, S2, S3) {}
-  void operator()(
-      T* inp,
-      LT* gamma,
-      float* var,
-      T* out) {
+  void operator()(T* inp, LT* gamma, float* var, T* out) {
     LIBXSMM_ALIGNED(float tmp[S3], 64);
     const float c = 1.0 / ((float)S1 * S3);
     float v, s;
@@ -3928,10 +3947,7 @@ class RMSNormFwdTPP {
       eqn(&eqn_param);
     }
   }
-  void ref(T* pinp, 
-          LT* pgamma, 
-          float* var, 
-          T* pout) {
+  void ref(T* pinp, LT* pgamma, float* var, T* pout) {
     int s1, s2, s3;
     LIBXSMM_VLA_DECL(3, T, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, T, out, pout, S2, S3);
@@ -3953,7 +3969,7 @@ class RMSNormFwdTPP {
         for (s3 = 0; s3 < S3; s3++) {
           LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) =
               (LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3) * s) *
-                  LIBXSMM_VLA_ACCESS(2, gamma, s1, s3, S3);
+              LIBXSMM_VLA_ACCESS(2, gamma, s1, s3, S3);
         }
       }
     }
@@ -5440,7 +5456,11 @@ class FusedSplitAdamWTPP {
       } else if (eqn_no == 2) {
         // Equation for data_i (with decay)
         auto my_eqn2 = libxsmm_matrix_eqn_create();
-        meqn_push_unary_op(my_eqn2, LIBXSMM_MELTW_TYPE_UNARY_UNZIP, LIBXSMM_MELTW_FLAG_UNARY_NONE, LIBXSMM_DATATYPE_IMPLICIT);
+        meqn_push_unary_op(
+            my_eqn2,
+            LIBXSMM_MELTW_TYPE_UNARY_UNZIP,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_DATATYPE_IMPLICIT);
         if (use_wd == 1) {
           meqn_push_binary_op(
               my_eqn2,
@@ -5448,7 +5468,11 @@ class FusedSplitAdamWTPP {
               LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
         }
         meqn_push_binary_op(my_eqn2, LIBXSMM_MELTW_TYPE_BINARY_SUB);
-        meqn_push_binary_op(my_eqn2, LIBXSMM_MELTW_TYPE_BINARY_ZIP, LIBXSMM_MELTW_FLAG_BINARY_NONE, LIBXSMM_DATATYPE_IMPLICIT);
+        meqn_push_binary_op(
+            my_eqn2,
+            LIBXSMM_MELTW_TYPE_BINARY_ZIP,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_DATATYPE_IMPLICIT);
         meqn_push_arg(
             my_eqn2, N, 1, ld, 4, 0, LIBXSMM_DATATYPE_U16); // data_i lo
         meqn_push_arg(

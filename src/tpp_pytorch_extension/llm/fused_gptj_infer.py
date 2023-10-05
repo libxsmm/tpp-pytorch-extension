@@ -71,7 +71,7 @@ class GPTJBlock(BlockedModule):
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
     ]:
-        #print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
+        # print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
         # print("layer_past:", layer_past[0].shape if layer_past is not None else layer_past)
         # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
@@ -79,7 +79,11 @@ class GPTJBlock(BlockedModule):
             raise
         orig_hidden_states = hidden_states
         S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
+        hidden_states = self.get_blocked_tensor(
+            hidden_states,
+            self.blocked_input_signature,
+            [None, None, self.features_block_size],
+        )
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
         dummy_tensor_int = torch.Tensor().to(torch.long)
@@ -93,26 +97,28 @@ class GPTJBlock(BlockedModule):
         # print("position_ids:", position_ids)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
-            position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
+            position_ids = torch.arange(offset, offset + seq_len).repeat(
+                hidden_states.shape[0], 1
+            )
         add_tensor_or_empty(position_ids)
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
-        #print("AM: ", inputs[-2].shape, inputs[-2].dtype)
+        # print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
         # print("PHS:", hidden_states.shape)
         layer_past = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in layer_past
         ]
 
-        #print(f"attention_mask: {attention_mask.shape} {attention_mask}")
+        # print(f"attention_mask: {attention_mask.shape} {attention_mask}")
         outputs = self.cpp_block.forward(inputs, layer_past, use_cache)
         hs = outputs[0]
         # print("hs: ", hs.sum().item(), hs.shape)
         # print("HS: ", hs[:2,:2,:2])
         present = tuple(outputs[1:])
-        #print("K: ", k.shape)
-        #print("V: ", v.shape)
+        # print("K: ", k.shape)
+        # print("V: ", v.shape)
 
         hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
         # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
@@ -124,6 +130,7 @@ class GPTJBlock(BlockedModule):
             outputs = (hs,)
 
         return outputs  # hidden_states, present, (attentions)
+
 
 def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):
@@ -145,10 +152,13 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.model_parallel = False
     for m in self.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device='cpu'), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device="cpu"), **kwargs
+            )
 
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype)
@@ -179,7 +189,8 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
-def OptimizeModelForGPTJ(model, dtype, device='cpu'):
+
+def OptimizeModelForGPTJ(model, dtype, device="cpu"):
     set_pg()
 
     for m in model.modules():
@@ -191,15 +202,21 @@ def OptimizeModelForGPTJ(model, dtype, device='cpu'):
                 block(m)
     for m in model.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device=device), **kwargs
+            )
 
 
-transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(_reorder_cache)
+transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(
+    _reorder_cache
+)
 
 GPTJForCausalLM_forward = transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward
+
 
 def GPTJForCausalLM_forward_patched(
     self,
@@ -222,7 +239,9 @@ def GPTJForCausalLM_forward_patched(
         `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
         are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
     """
-    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
 
     transformer_outputs = self.transformer(
         input_ids,
@@ -263,7 +282,9 @@ def GPTJForCausalLM_forward_patched(
         shift_labels = labels[..., 1:].contiguous()
         # Flatten the tokens
         loss_fct = CrossEntropyLoss()
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
 
         loss = loss.to(hidden_states.dtype)
 
@@ -294,4 +315,7 @@ def GPTJForCausalLM_forward_patched(
     #         return_dict=return_dict,
     # )
 
-transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward = GPTJForCausalLM_forward_patched
+
+transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward = (
+    GPTJForCausalLM_forward_patched
+)

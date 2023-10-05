@@ -126,7 +126,8 @@ class BertEncoderLayer {
         use_at_vnni_local ? 1 : 0,
         F1)));
     auto loop_scheme = large_cache_opt ? "bA" : "AB";
-    auto qkv_loop = ThreadedLoop<2>({LoopSpecs{S1}, LoopSpecs{F1}}, loop_scheme);
+    auto qkv_loop =
+        ThreadedLoop<2>({LoopSpecs{S1}, LoopSpecs{F1}}, loop_scheme);
     {
       RECORD_SCOPE(qkv_gemm, {t_HS, t_W});
       qkv_loop(
@@ -331,8 +332,9 @@ class BertEncoderLayer {
     {
       RECORD_SCOPE(o_gemm, {t_in, t_wt});
       auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto ogemm_loop =
-          ThreadedLoop<3>({LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}}, loop_scheme);
+      auto ogemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}},
+          loop_scheme);
       bool parallelized_on_nk =
           large_cache_opt ? false : true; // ogemm_loop.is_parallel(2);
       ogemm_loop(
@@ -415,8 +417,9 @@ class BertEncoderLayer {
     {
       RECORD_SCOPE(i_gemm, {t_in, t_wt_V});
       auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-      auto gemm_loop =
-          ThreadedLoop<3>({LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}}, loop_scheme);
+      auto gemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}},
+          loop_scheme);
       gemm_loop(
           [&](int* ind) {
             int nc = ind[0], s1 = ind[1], nk = ind[2];
