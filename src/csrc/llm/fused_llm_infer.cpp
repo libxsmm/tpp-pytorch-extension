@@ -3312,7 +3312,7 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
     else
       large_cache_opt = false;
 
-    if (sparse_type == 0) {
+    if (sparse_type == 0 || B*S > 4) {
       auto t_null = t_HS.new_empty({0});
       auto t_res = t_HS;
       t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
