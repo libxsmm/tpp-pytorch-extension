@@ -197,7 +197,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         )
 
         if self.enable_profile and first_token == True:
-            tpx.print_debug_timers(detailed=False)
+            tpx.print_debug_timers(detailed=True)
             tpx.reset_debug_timers()
         return fixed_output
 
@@ -217,7 +217,7 @@ class _ModelFallbackWrapper(GenerationMixin):
             self.token_latencies = []
             output = [output, latencies,]
         if self.enable_profile:
-            tpx.print_debug_timers(detailed=False)
+            tpx.print_debug_timers(detailed=True)
             tpx.reset_debug_timers()
 
         if self.output_past_key_values == True:
