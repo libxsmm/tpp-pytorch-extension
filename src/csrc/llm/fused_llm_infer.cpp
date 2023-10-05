@@ -27,6 +27,7 @@ using namespace tpp;
 #include "tensor_helper.h"
 
 static int sparse_type = env2int("SPARSE_KERNELS", 0);
+static int measure_sparsity = env2int("MEASURE_SPARSITY", 0);
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
@@ -36,6 +37,7 @@ static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int SPMM_PACKED_BLOCK_SIZE = env2int("SPMM_PACKED_BLOCK_SIZE", 64);
 int spmm_use_flat_acts = env2int("SPMM_FLAT_ACTIVATIONS", 0);
+int layer = 0;
 
 static const char *GEMM_LOOP_SCHEME = getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
@@ -3239,6 +3241,19 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     if (my_rank == 0) {
       std::cout << "my_size=" << my_size << " N=" << N << " H=" << H << std::endl;
+      if (sparse_type > 0 && measure_sparsity > 0) {
+        printf("########################\n");
+        printf("Layer %d sparsity stats:\n", layer);
+        printf("Wq sparsity %.5g %%\n", 100.0-(100.0*t_Wq_compressed.nnz)/(1.0* t_Wq_compressed.n_dense_elts));
+        printf("Wk sparsity %.5g %%\n", 100.0-(100.0*t_Wk_compressed.nnz)/(1.0* t_Wk_compressed.n_dense_elts));
+        printf("Wv sparsity %.5g %%\n", 100.0-(100.0*t_Wv_compressed.nnz)/(1.0* t_Wv_compressed.n_dense_elts));
+        printf("Wp sparsity %.5g %%\n", 100.0-(100.0*t_Wp_compressed.nnz)/(1.0* t_Wp_compressed.n_dense_elts));
+        printf("Wg sparsity %.5g %%\n", 100.0-(100.0*t_Wg_compressed.nnz)/(1.0* t_Wg_compressed.n_dense_elts));
+        printf("Wu sparsity %.5g %%\n", 100.0-(100.0*t_Wu_compressed.nnz)/(1.0* t_Wu_compressed.n_dense_elts));
+        printf("Wd sparsity %.5g %%\n", 100.0-(100.0*t_Wd_compressed.nnz)/(1.0* t_Wd_compressed.n_dense_elts));
+        layer++;
+        printf("########################\n");
+      }
     }
   }
 
