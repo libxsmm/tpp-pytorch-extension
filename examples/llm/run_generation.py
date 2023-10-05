@@ -176,7 +176,7 @@ if args.use_tpp:
     elif model.config.architectures[0] == "OPTForCausalLM":
         from tpp_pytorch_extension.llm.fused_opt_infer import OptimizeModelForOPT
         OptimizeModelForOPT(model, dtype=amp_dtype, device=device)
-    elif model.config.architectures[0] == "LLaMAForCausalLM":
+    elif model.config.architectures[0] == "LlamaForCausalLM" or  model.config.architectures[0] == "LLaMAForCausalLM":
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
         OptimizeModelForLlama(model, dtype=amp_dtype, device=device)
     else:
