@@ -142,7 +142,8 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   DType *compressed_weight = NULL;
   unsigned int *bitmap = NULL;
   unsigned short *bitmap_array;
-
+  int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1 : 0;
+    
   /* Sparsify tensors for benchmarking purposes */
   if (sparse_pct > 0) {
     sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
@@ -177,11 +178,11 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   }
 
   column_offsets[0] = l_c;
-  if (v == 1) {
+  if (v == 1 || is_spr > 0) {
     for (l_i = 0; l_i < Nb; l_i++) {
       for (l_j = 0; l_j < Kb; l_j++) {
         DType *tmp = (DType*)&LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i, l_j, 0, 0, 0, Kb, bk, bn, v);
-        for (l_cur = 0; l_cur < bn*bk; l_cur += 16) {
+        for (l_cur = 0; l_cur < bn*bk*v; l_cur += 16) {
           unsigned short mask = (unsigned short)0;
           int l_b = 0;
           for (l_b = 0; l_b < 16; l_b++) {

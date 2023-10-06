@@ -2335,6 +2335,7 @@ class GemmTPP {
     }
     void* build_kernel() override {
       // float alpha = 1.0;
+      int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1 : 0;
       libxsmm_gemm_shape l_shape;
       libxsmm_bitfield l_flags = LIBXSMM_GEMM_FLAGS('N', 'N');
       libxsmm_bitfield l_prefetch_flags = 0;
@@ -2345,11 +2346,12 @@ class GemmTPP {
       if (p->b_compressed == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_DECOMPRESS_A_VIA_BITMASK;
       if (gemm_type != 0) {
-        if (p->b_vnni) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->b_vnni || is_spr) l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
         if (p->a_trans == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
       }
+          
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
 
