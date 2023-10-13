@@ -38,16 +38,16 @@ int threads = omp_get_max_threads();
     tensor_set_zero(1, K, t_grad_bias);
     float* bias_ptrs[threads];
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel  
+#pragma omp parallel
     {
       int tid = omp_get_thread_num();
       float prv_grad_bias[1][K];
       bias_ptrs[tid] = prv_grad_bias[0];
       set_zero_tpp(prv_grad_bias[0]);
-#pragma omp for 
+#pragma omp for
       for (int n = 0; n < N; n++) {
-          cvt_f32_tpp(grad_out[n], grad_out_f32[n]);
-          grad_bias_tpp(grad_out_f32[n], prv_grad_bias[0]);
+        cvt_f32_tpp(grad_out[n], grad_out_f32[n]);
+        grad_bias_tpp(grad_out_f32[n], prv_grad_bias[0]);
       }
 #pragma omp barrier
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);

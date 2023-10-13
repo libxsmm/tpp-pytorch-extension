@@ -24,9 +24,11 @@
 using namespace tpp;
 #include "tensor_helper.h"
 
-#define QKV_BLOCKSIZE 32
-#define A_BLOCKSIZE 32
-#define C_BLOCKSIZE 32
+#define TRI_BLOCKSIZE 32
+
+#define QKV_BLOCKSIZE 64
+#define A_BLOCKSIZE 64
+#define C_BLOCKSIZE 64
 
 REGISTER_SCOPE(alpha_q_gemm, "alpha_q_gemm");
 REGISTER_SCOPE(alpha_k_gemm, "alpha_k_gemm");
@@ -34,6 +36,12 @@ REGISTER_SCOPE(alpha_v_gemm, "alpha_v_gemm");
 
 REGISTER_SCOPE(alpha_a_gemm, "alpha_a_gemm");
 REGISTER_SCOPE(alpha_c_gemm, "alpha_c_gemm");
+
+REGISTER_SCOPE(proj_gemm, "proj_gemm");
+REGISTER_SCOPE(out_gemm, "out_gemm");
+REGISTER_SCOPE(gate_gemm, "gate_gemm");
+REGISTER_SCOPE(eq_bmm, "eq_gemm");
+REGISTER_SCOPE(layer_norm_input, "layer_norm_input");
 
 at::Tensor fused_gating_attention_fwd(
     at::Tensor& q_data,
@@ -59,7 +67,41 @@ at::Tensor fused_gating_attention_fwd(
   }
 }
 
+at::Tensor fused_traingle_multiplication_fwd(
+    at::Tensor& act,
+    at::Tensor& mask,
+    int equation_flag,
+    at::Tensor& layer_norm_input_weight,
+    at::Tensor& layer_norm_input_bias,
+    at::Tensor& left_projection_weight,
+    at::Tensor& left_projection_bias,
+    at::Tensor& right_projection_weight,
+    at::Tensor& right_projection_bias,
+    at::Tensor& left_gate_weight,
+    at::Tensor& left_gate_bias,
+    at::Tensor& right_gate_weight,
+    at::Tensor& right_gate_bias,
+    at::Tensor& center_layer_norm_weight,
+    at::Tensor& center_layer_norm_bias,
+    at::Tensor& output_projection_weight,
+    at::Tensor& output_projection_bias,
+    at::Tensor& gating_linear_weight,
+    at::Tensor& gating_linear_bias) {
+  GlobalPass _gp(FWD);
+  if (act.dtype() == at::kFloat) {
+    typedef float T;
+#include "fused_triangle_multiplication_fwd_tmpl.h"
+  } else {
+    typedef bfloat16 T;
+#include "fused_triangle_multiplication_fwd_tmpl_bf16.h"
+  }
+}
+
 // PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 REGISTER_SUBMODULE(_alpha_attention, m) {
   m.def("forward", &fused_gating_attention_fwd, "Gating attention forward");
+  m.def(
+      "trianglemulti_forward",
+      &fused_traingle_multiplication_fwd,
+      "Traingle Multiplication forward");
 }

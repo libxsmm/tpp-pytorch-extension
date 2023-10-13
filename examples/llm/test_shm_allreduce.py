@@ -1,4 +1,3 @@
-
 import torch
 import time
 import json
@@ -35,8 +34,10 @@ print(args)
 my_rank = 0
 my_size = 1
 
+
 def dist_init():
     import os
+
     global my_rank
     global my_size
     if int(os.environ.get("PMI_SIZE", "0")) > 1:
@@ -44,7 +45,9 @@ def dist_init():
             try:
                 import oneccl_bindings_for_pytorch
             except:
-                print("CCL backend requested but import oneccl_bindings_for_pytorch failed")
+                print(
+                    "CCL backend requested but import oneccl_bindings_for_pytorch failed"
+                )
                 raise
         elif args.dist_backend == "mpi":
             if not torch.distributed.is_mpi_available():
@@ -65,10 +68,14 @@ def dist_init():
         my_size = torch.distributed.get_world_size()
         print(f"My rank: {my_rank} size: {my_size}")
 
+
 orig_print = print
+
+
 def print_rank0(*args, **kwargs):
     if my_rank == 0:
         orig_print(*args, **kwargs)
+
 
 print = print_rank0
 

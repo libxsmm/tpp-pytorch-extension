@@ -131,7 +131,7 @@ class BertSelfAttention(BlockedModule):
 
     # __constants__ = ['bias', 'C', 'K']
 
-    def __init__(self, config):
+    def __init__(self, config, position_embedding_type=None):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(
             config, "embedding_size"
@@ -154,7 +154,7 @@ class BertSelfAttention(BlockedModule):
         self.key = DummyLinear(config.hidden_size, self.all_head_size)
         self.value = DummyLinear(config.hidden_size, self.all_head_size)
         self.is_decoder = config.is_decoder
-        self.position_embedding_type = getattr(
+        self.position_embedding_type = position_embedding_type or getattr(
             config, "position_embedding_type", "absolute"
         )
         assert (
@@ -300,8 +300,8 @@ class BertSelfAttention(BlockedModule):
 class BertSelfAttentionBF16(BertSelfAttention):
     r"""TPP Bert Self Attention BF16 Layer using libxsmm blocked GEMM"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, position_embedding_type=None):
+        super().__init__(config, position_embedding_type)
         if USE_BF16_PARAMS:
             self.query.weight.set_blocking_param(
                 (

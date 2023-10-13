@@ -70,8 +70,11 @@ auto gelu_out = GetVLAPtr<T>(t_gelu_out, {Nk, S2* Hk});
   }
 #else
   auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-  auto gemm_loop =
-      ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
+  // auto gemm_loop =
+  //    ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
+  auto gemm_loop = ThreadedLoop<3>(
+      {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}},
+      loop_scheme);
   gemm_loop(
       [&](int* ind) {
         int nc = ind[0], s1 = ind[1], nk = ind[2];

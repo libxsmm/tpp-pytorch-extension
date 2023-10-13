@@ -10,14 +10,14 @@
 
 RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
 
-at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias=at::empty(0);
+at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias = at::empty(0);
 int i = 0;
 // #define PRINT_T(x) std::cout << #x << "==: " << x.sizes() << std::endl
 
 t_in_mlp = inputs[i++]; // [N, C]
 t_wt = inputs[i++]; // [nk, nc, bc, bk]
 t_attn_3d = inputs[i++]; // [1, H, F]
-if(add_bias)
+if (add_bias)
   t_bias = inputs[i++]; // [K]
 
 auto in_sizes = t_in_mlp.sizes();
@@ -44,24 +44,21 @@ auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 
 auto t_out_mlp = t_in_mlp.new_empty({N, K}); // [N,  K]
 
-if(add_bias) {
+if (add_bias) {
   at::Tensor t_out_f32;
   if (t_out_mlp.dtype() == at::kFloat) {
     t_out_f32 = t_out_mlp;
-  }
-  else {
+  } else {
     t_out_f32 = at::empty({N, K});
   }
   auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
   auto bias = GetVLAPtr<float>(t_bias, {bk});
   auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
   auto out_f32 = GetVLAPtr<float>(t_out_f32, {bn, nk, bk});
 
-  auto brgemm_tpp = SCOPEIT(
-      (BrgemmTPP<
-       T,
-       float>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 1.0, 0, nc)));
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, float>(
+      bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
   auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(bn, bk, K), BIAS);
   auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
@@ -72,45 +69,42 @@ if(add_bias) {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(2)
       for (int n = 0; n < nn; n++) {
-	for (int k = 0; k < nk; k++) {
-	  cpy_bias_tpp(bias[k], out_f32[n][0][k]);
-	  brgemm_tpp(in[n][0][0], wt_V[k][0], out_f32[n][0][k], nc);
-	  cvt_tpp(out_f32[n][0][k], out[n][0][k]);
-	}
+        for (int k = 0; k < nk; k++) {
+          cpy_bias_tpp(bias[k], out_f32[n][0][k]);
+          brgemm_tpp(in[n][0][0], wt_V[k][0], out_f32[n][0][k], nc);
+          cvt_tpp(out_f32[n][0][k], out[n][0][k]);
+        }
       }
       if (rem > 0) {
-	auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
-	auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
-	auto out_f32 = GetVLAPtr<float>(t_out_f32, {nk, bk});
+        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
+        auto out_f32 = GetVLAPtr<float>(t_out_f32, {nk, bk});
 
-	auto brgemm_tpp = SCOPEITGEMM2((BrgemmTPP<T, float>(
-		rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
+        auto brgemm_tpp = SCOPEITGEMM2((BrgemmTPP<T, float>(
+            rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-	auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(1, bk, K), BIAS);
-	auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, bk, K, K)), EW_COPY);
+        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(1, bk, K), BIAS);
+        auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, bk, K, K)), EW_COPY);
 
 #pragma omp parallel for
-	for (int k = 0; k < nk; k++) {
-	  for (int r = 0; r < rem; r++)
-	    cpy_bias_tpp(bias[k], out_f32[nn * bn + r][k]);
-	  brgemm_tpp(in[nn * bn][0], wt_V[k][0], out_f32[nn * bn][k], nc);
-	  for (int r = 0; r < rem; r++) {
-	    cvt_tpp(out_f32[nn * bn + r][k], out[nn * bn + r][k]);
-	  }
-	}
+        for (int k = 0; k < nk; k++) {
+          for (int r = 0; r < rem; r++)
+            cpy_bias_tpp(bias[k], out_f32[nn * bn + r][k]);
+          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out_f32[nn * bn][k], nc);
+          for (int r = 0; r < rem; r++) {
+            cvt_tpp(out_f32[nn * bn + r][k], out[nn * bn + r][k]);
+          }
+        }
       }
     }
   }
-}
-else {
+} else {
   auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
   auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
 
-  auto brgemm_tpp = SCOPEIT(
-      (BrgemmTPP<
-       T,
-       T>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 0.0, 0, nc)));
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
 
   {
     RECORD_SCOPE(gao_gemm, {t_in_mlp, t_wt_V});
@@ -118,21 +112,21 @@ else {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(2)
       for (int n = 0; n < nn; n++) {
-	for (int k = 0; k < nk; k++) {
-	  brgemm_tpp(in[n][0][0], wt_V[k][0], out[n][0][k], nc);
-	}
+        for (int k = 0; k < nk; k++) {
+          brgemm_tpp(in[n][0][0], wt_V[k][0], out[n][0][k], nc);
+        }
       }
       if (rem > 0) {
-	auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
-	auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
+        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
 
-	auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
-		rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+            rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
 
 #pragma omp parallel for
-	for (int k = 0; k < nk; k++) {
-	  brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
-	}
+        for (int k = 0; k < nk; k++) {
+          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
+        }
       }
     }
   }
@@ -158,7 +152,7 @@ else
 auto in_attn = GetVLAPtr<T>(t_out_mlp, {H, F});
 auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
 auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
-//auto out_attn_f32 = GetVLAPtr<float>(t_out_attn_f32, {H}); // N, H
+// auto out_attn_f32 = GetVLAPtr<float>(t_out_attn_f32, {H}); // N, H
 
 #if 0
 auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, float>(H, F)), EW_MUL);
@@ -172,7 +166,7 @@ auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, T>(H, F)), EW_MUL);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
     for (int n = 0; n < N; n++) {
-      //mul_reduce_tpp(attn[0], in_attn[n][0], out_attn_f32[n]);
+      // mul_reduce_tpp(attn[0], in_attn[n][0], out_attn_f32[n]);
       mul_reduce_tpp(attn[0], in_attn[n][0], out_attn[n]);
     }
 #if 0

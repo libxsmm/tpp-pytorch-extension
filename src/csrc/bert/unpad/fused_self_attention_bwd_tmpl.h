@@ -280,7 +280,8 @@ auto t_Wv_TV = wt_tensor_for_bwd_compact(N, H, N, H, t_Wv);
 
 #ifndef NO_PARLOOPER
   auto loop_scheme = large_cache_opt ? "bA" : "AB";
-  auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+  // auto qkv_loop = ThreadedLoop<2>({{S1}, {N}}, loop_scheme);
+  auto qkv_loop = ThreadedLoop<2>({LoopSpecs{S1}, LoopSpecs{N}}, loop_scheme);
 #endif
   {
     RECORD_SCOPE(div_gemm, {t_dVL, t_Wv_TV});
@@ -393,7 +394,9 @@ auto t_Wv_TV = wt_tensor_for_bwd_compact(N, H, N, H, t_Wv);
       }
     }
 #else
-    auto qkvw_loop = ThreadedLoop<3>({{0, S1, BS, false}, {N}, {N}}, "aBC");
+    // auto qkvw_loop = ThreadedLoop<3>({{0, S1, BS, false}, {N}, {N}}, "aBC");
+    auto qkvw_loop = ThreadedLoop<3>(
+        {LoopSpecs{0, S1, BS, false}, LoopSpecs{N}, LoopSpecs{N}}, "aBC");
     qkvw_loop(
         [&](int* ind) {
           int s1 = ind[0], nk = ind[1], nc = ind[2];

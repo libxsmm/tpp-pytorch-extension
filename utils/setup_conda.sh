@@ -14,7 +14,7 @@ set -e
 ARCH=$(lscpu | grep Architecture | awk '{print $2}')
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 CONDA_INSTALL_DIR=`realpath ./miniconda3`
-ENV_NAME=pt200
+ENV_NAME=pt210
 
 while (( "$#" )); do
   case "$1" in
@@ -38,19 +38,24 @@ while (( "$#" )); do
   esac
 done
 
-if ! test -f Miniconda3-latest-Linux-${ARCH}.sh ; then 
+if ! test -f Miniconda3-latest-Linux-${ARCH}.sh ; then
   wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh
 fi
-if ! test -d ${CONDA_INSTALL_DIR} ; then 
+if ! test -d ${CONDA_INSTALL_DIR} ; then
 bash ./Miniconda3-latest-Linux-${ARCH}.sh -b -p ${CONDA_INSTALL_DIR}
+fi
+if ! test -d ${CONDA_INSTALL_DIR}/envs/${ENV_NAME} ; then
 ${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.9
+fi
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
 conda install -n base conda-libmamba-solver
-conda config --set solver libmamba
+# conda config --set solver libmamba
 
 if [ ${ARCH} == "x86_64" ] ; then
-  conda install -y pytorch==2.0.0 torchvision torchaudio cpuonly intel-openmp gperftools ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c pytorch -c intel -c conda-forge 
+  conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
+  conda install -y gperftools -c conda-forge
+  conda install -y pytorch==2.1.0 torchvision torchaudio cpuonly -c pytorch
 elif [ ${ARCH} == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
 conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
@@ -68,12 +73,13 @@ conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
 if [ ${ARCH} == "x86_64" ] ; then
   # for development (code formatting)
   conda install -y black=22.6.0 clang-format=5.0.1 -c sarcasm -c conda-forge
+  #conda install -y intel-openmp -c intel
 fi
 
-fi
-
-echo "Writing an env.sh file..."
-cat <<EOF > env.sh
+# ENV_FN_NAME=env_${ENV_NAME}.sh
+ENV_FN_NAME=env.sh
+echo "Writing an ${ENV_FN_NAME} file..."
+cat <<EOF > ${ENV_FN_NAME}
 #!/bin/bash
 
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
@@ -91,6 +97,6 @@ if [ \${ARCH} == "x86_64" ] ; then
   export LD_PRELOAD=\${CONDA_PREFIX}/lib/libtcmalloc.so:\${CONDA_PREFIX}/lib/libiomp5.so
 fi
 EOF
-chmod +x env.sh
-echo "env.sh file created..."
+chmod +x ${ENV_FN_NAME}
+echo "${ENV_FN_NAME} file created..."
 

@@ -245,7 +245,7 @@ class BertSelfAttention(BlockedModule):
 
     # __constants__ = ['bias', 'C', 'K']
 
-    def __init__(self, config):
+    def __init__(self, config, position_embedding_type=None):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(
             config, "embedding_size"
@@ -268,7 +268,7 @@ class BertSelfAttention(BlockedModule):
         self.key = DummyLinear(config.hidden_size, self.all_head_size)
         self.value = DummyLinear(config.hidden_size, self.all_head_size)
         self.is_decoder = config.is_decoder
-        self.position_embedding_type = getattr(
+        self.position_embedding_type = position_embedding_type or getattr(
             config, "position_embedding_type", "absolute"
         )
         assert (

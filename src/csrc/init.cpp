@@ -33,7 +33,8 @@ int globalScope = 0;
 long long hsh_key, hsh_ret;
 
 void reset_debug_timers() {
-  hsh_key = 0; hsh_ret = 0;
+  hsh_key = 0;
+  hsh_ret = 0;
 #pragma omp parallel
   {
     int tid = omp_get_thread_num();
@@ -80,7 +81,8 @@ void print_debug_timers(int tid, bool detailed) {
   // printf("%-20s", "####");
   printf("### ##: %-11s: ", "#KEY#");
   for (int t = 0; t < LAST_TIMER; t++) {
-    if (detailed) printf(" %7s", DebugTimerName(t));
+    if (detailed)
+      printf(" %7s", DebugTimerName(t));
   }
   printf(
       " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s\n",
@@ -100,10 +102,11 @@ void print_debug_timers(int tid, bool detailed) {
         double total = 0.0;
         printf("TID %2d: %-11s: ", i, scope.name.c_str());
         for (int t = 0; t < LAST_TIMER; t++) {
-          if (detailed) printf(" %7.1f", scope.detailed_timers[i][t] * 1e3);
+          if (detailed)
+            printf(" %7.1f", scope.detailed_timers[i][t] * 1e3);
           total += scope.detailed_timers[i][t];
         }
-        //printf(" %7.1f", scope.detailed_timers[i][LAST_TIMER] * 1e3);
+        // printf(" %7.1f", scope.detailed_timers[i][LAST_TIMER] * 1e3);
         long t_flops = 0;
         for (int f = 0; f < max_threads; f++)
           t_flops += scope.flops[f][0];
@@ -111,19 +114,21 @@ void print_debug_timers(int tid, bool detailed) {
           printf(
               " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f\n",
               total * 1e3,
-	      scope.detailed_timers[i][LAST_TIMER] * 1e3,
-	      scope.omp_timer * 1e3,
+              scope.detailed_timers[i][LAST_TIMER] * 1e3,
+              scope.omp_timer * 1e3,
               scope.master_timer * 1e3,
               scope.count,
               t_flops * 1e-9,
               t_flops * 100.0 / (scope.flops[i][0] * max_threads),
               t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM]);
         } else {
-          printf(" %8.1f  %8.1f  %8.1f  %8.1f  %5ld\n",
-	      total * 1e3,
-	      scope.detailed_timers[i][LAST_TIMER] * 1e3,
-	      scope.omp_timer * 1e3,
-              scope.master_timer * 1e3, scope.count);
+          printf(
+              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld\n",
+              total * 1e3,
+              scope.detailed_timers[i][LAST_TIMER] * 1e3,
+              scope.omp_timer * 1e3,
+              scope.master_timer * 1e3,
+              scope.count);
         }
       };
       for (auto& scope : get_pass_list())
@@ -132,7 +137,10 @@ void print_debug_timers(int tid, bool detailed) {
         print_scope(scope);
     }
   }
-  printf("Hash create: %.3f ms   Hash search: %.3f ms\n", hsh_key*ifreq*1e3, hsh_ret*ifreq*1e3);
+  printf(
+      "Hash create: %.3f ms   Hash search: %.3f ms\n",
+      hsh_key * ifreq * 1e3,
+      hsh_ret * ifreq * 1e3);
   printf.print();
 }
 

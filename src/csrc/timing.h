@@ -54,7 +54,12 @@ extern double pass_timers[MAX_THREADS][3][NUM_TIMERS];
 extern double master_pass_timers[3];
 struct Scope {
   Scope(std::string const& name)
-      : name(name), master_timer(0.0), omp_timer(0.0), detailed_timers{0.0}, flops{0.0}, count(0) {}
+      : name(name),
+        master_timer(0.0),
+        omp_timer(0.0),
+        detailed_timers{0.0},
+        flops{0.0},
+        count(0) {}
   const std::string name;
   double master_timer;
   double omp_timer;

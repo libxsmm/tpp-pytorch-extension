@@ -117,9 +117,7 @@ std::vector<at::Tensor> fused_mlp_bwd(
   }
 }
 
-at::Tensor attn_fwd(
-    long align,
-    std::vector<at::Tensor> inputs) {
+at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
@@ -130,9 +128,7 @@ at::Tensor attn_fwd(
   }
 }
 
-std::vector<at::Tensor> attn_bwd(
-    long align,
-    std::vector<at::Tensor> inputs) {
+std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
@@ -143,9 +139,7 @@ std::vector<at::Tensor> attn_bwd(
   }
 }
 
-at::Tensor gemm_attn_fwd(
-    long align,
-    std::vector<at::Tensor> inputs) {
+at::Tensor gemm_attn_fwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
@@ -331,11 +325,11 @@ REGISTER_SUBMODULE(_fused_gat, m) {
       &fused_gat_mlp_attn_bwd,
       "Tpp fused MLP-Attention backward");
   m.def("fused_mlp_fwd", &fused_mlp_fwd, "Tpp fused MLP forward");
-  m.def( "fused_mlp_bwd", &fused_mlp_bwd, "Tpp GAT fused MLP backward");
-  m.def( "attn_fwd", &attn_fwd, "Tpp Attention forward");
-  m.def( "attn_bwd", &attn_bwd, "Tpp Attention backward");
-  m.def( "gemm_attn_fwd", &gemm_attn_fwd, "Tpp GEMM Attention forward");
-  m.def( "gemm_attn_bwd", &gemm_attn_bwd, "Tpp GEMM Attention backward");
+  m.def("fused_mlp_bwd", &fused_mlp_bwd, "Tpp GAT fused MLP backward");
+  m.def("attn_fwd", &attn_fwd, "Tpp Attention forward");
+  m.def("attn_bwd", &attn_bwd, "Tpp Attention backward");
+  m.def("gemm_attn_fwd", &gemm_attn_fwd, "Tpp GEMM Attention forward");
+  m.def("gemm_attn_bwd", &gemm_attn_bwd, "Tpp GEMM Attention backward");
   m.def("gat_dropout_fwd", &gat_dropout_fwd, "Tpp Optimized Dropout FWD");
   m.def("gat_dropout_bwd", &gat_dropout_bwd, "Tpp Optimized Dropout BWD");
   m.def("leakyrelu_fwd", &leakyrelu_fwd, "Tpp Optimized Leaky Relu FWD");
