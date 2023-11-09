@@ -2076,6 +2076,16 @@ class SpmmTPP {
     return 2L * M * N * K;
   }
 
+  long bytes_AB_moved() {
+    auto dt_in = XsmmDtype<Tin>();
+    return (M * K + K * N) * LIBXSMM_TYPESIZE(dt_in);
+  }
+
+  long bytes_C_moved() {
+    auto dt_out = XsmmDtype<Tout>();
+    return M * N * LIBXSMM_TYPESIZE(dt_out);
+  }
+
   class SpmmKernel : public BaseTPP {
    public:
     SpmmKernel() {}
@@ -2280,6 +2290,16 @@ class GemmTPP {
 
   long flops() {
     return 2L * M * N * K;
+  }
+
+  long bytes_AB_moved() {
+    auto dt_in = XsmmDtype<Tin>();
+    return (M * K + K * N) * LIBXSMM_TYPESIZE(dt_in);
+  }
+
+  long bytes_C_moved() {
+    auto dt_out = XsmmDtype<Tout>();
+    return M * N * LIBXSMM_TYPESIZE(dt_out);
   }
 
   class GemmKernel : public BaseTPP {
@@ -2537,6 +2557,16 @@ class BrgemmTPP {
 
   long flops() {
     return 2L * M * N * K;
+  }
+
+  long bytes_AB_moved() {
+    auto dt_in = XsmmDtype<Tin>();
+    return (M * K + K * N) * LIBXSMM_TYPESIZE(dt_in);
+  }
+
+  long bytes_C_moved() {
+    auto dt_out = XsmmDtype<Tout>();
+    return M * N * LIBXSMM_TYPESIZE(dt_out);
   }
 
   class BrgemmKernel : public BaseTPP {

@@ -44,6 +44,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.bytes[tid][0] = 0; 
     }
     for (auto& scope : get_scope_list()) {
       if (scope.master_timer == 0.0)
@@ -52,6 +53,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.bytes[tid][0] = 0;
     }
   }
   for (auto& scope : get_pass_list()) {
@@ -83,7 +85,7 @@ void print_debug_timers(int tid, bool detailed) {
     if (detailed) printf(" %7s", DebugTimerName(t));
   }
   printf(
-      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s\n",
+      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s %6s\n",
       "Total",
       "ITotal",
       "OTotal",
@@ -91,7 +93,8 @@ void print_debug_timers(int tid, bool detailed) {
       "Count",
       "TotalGFS",
       "IMBL",
-      "TF/s");
+      "TF/s",
+      "GB/s");
   for (int i = 0; i < max_threads; i++) {
     if (tid == -1 || tid == i) {
       auto print_scope = [&](const Scope& scope) {
@@ -105,11 +108,14 @@ void print_debug_timers(int tid, bool detailed) {
         }
         //printf(" %7.1f", scope.detailed_timers[i][LAST_TIMER] * 1e3);
         long t_flops = 0;
-        for (int f = 0; f < max_threads; f++)
+        long t_bytes = 0;
+        for (int f = 0; f < max_threads; f++) {
           t_flops += scope.flops[f][0];
+          t_bytes += scope.bytes[f][0];
+        }
         if (t_flops > 0.0) {
           printf(
-              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f\n",
+              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f %6.3f\n",
               total * 1e3,
 	      scope.detailed_timers[i][LAST_TIMER] * 1e3,
 	      scope.omp_timer * 1e3,
@@ -117,7 +123,8 @@ void print_debug_timers(int tid, bool detailed) {
               scope.count,
               t_flops * 1e-9,
               t_flops * 100.0 / (scope.flops[i][0] * max_threads),
-              t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM]);
+              t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM],
+              t_bytes /(1024.0*1024.0*1024.0 * scope.detailed_timers[i][BRGEMM]));
         } else {
           printf(" %8.1f  %8.1f  %8.1f  %8.1f  %5ld\n",
 	      total * 1e3,

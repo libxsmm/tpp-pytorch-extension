@@ -2378,7 +2378,7 @@ inline at::Tensor attn(
             //float *AS = GAS[tid]; //FSk];
             //auto t0 = getTime();
             {
-              ScopedTimer t_(BRGEMM, 2 * FSk * H);
+              ScopedTimer t_(BRGEMM, 2 * FSk * H, (FSk + H ) * sizeof(T) + H * FSk * sizeof(float));
               float tmp_QL[H];
               cvt_b2f_tpp(QL[b][n][0], tmp_QL);
               for (int sk = 0; sk < FSk; sk++) {
@@ -2410,7 +2410,7 @@ inline at::Tensor attn(
             //printf("post softmax b: %d n: %d\n", b, n);
             {
               float tmp_CL[H];
-              ScopedTimer t_(BRGEMM, 2 * FSk * H);
+              ScopedTimer t_(BRGEMM, 2 * FSk * H, (FSk + H ) * sizeof(T) + H * FSk * sizeof(float) );
               zero_tpp(tmp_CL);
               for (int sk = 0; sk < FSk; sk++) {
                 //printf("bmm2: b: %d n: %d sk: %d \n", b, n, sk);

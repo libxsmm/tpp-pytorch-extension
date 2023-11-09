@@ -54,12 +54,13 @@ extern double pass_timers[MAX_THREADS][3][NUM_TIMERS];
 extern double master_pass_timers[3];
 struct Scope {
   Scope(std::string const& name)
-      : name(name), master_timer(0.0), omp_timer(0.0), detailed_timers{0.0}, flops{0.0}, count(0) {}
+      : name(name), master_timer(0.0), omp_timer(0.0), detailed_timers{0.0}, flops{0.0}, bytes{0.0}, count(0) {}
   const std::string name;
   double master_timer;
   double omp_timer;
   double detailed_timers[MAX_THREADS][NUM_TIMERS];
   double flops[MAX_THREADS][8];
+  double bytes[MAX_THREADS][8];
   long count;
 };
 
@@ -106,26 +107,31 @@ inline void TimerEnd() {
 
 class ScopedTimer {
  public:
-  ScopedTimer(DebugTimer t, long f = 0) : type(t), flops(f), start(getTime()) {}
+  ScopedTimer(DebugTimer t, long f = 0, long b = 0) : type(t), flops(f), bytes(b), start(getTime()) {}
   ~ScopedTimer() {
     auto time = getTime() - start;
     int tid = omp_get_thread_num();
     auto& pass = get_pass_list()[globalPass];
     pass.detailed_timers[tid][type] += time;
-    if (type == BRGEMM)
+    if (type == BRGEMM) {
       pass.flops[tid][0] += flops;
+      pass.bytes[tid][0] += bytes;
+    }
     if (globalPass == 0 && tid == 0)
       pass.master_timer += time;
 
     auto& scope = get_scope_list()[globalScope];
     scope.detailed_timers[tid][type] += time;
-    if (type == BRGEMM)
+    if (type == BRGEMM) {
       scope.flops[tid][0] += flops;
+      scope.bytes[tid][0] += bytes;
+    }
     if (globalScope == 0 && tid == 0)
       scope.master_timer += time;
   }
   DebugTimer type;
   long flops;
+  long bytes;
   double start;
 };
 
