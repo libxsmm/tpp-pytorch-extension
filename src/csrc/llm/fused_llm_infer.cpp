@@ -26,6 +26,16 @@
 using namespace tpp;
 #include "tensor_helper.h"
 
+#define S_FIRST_KVC
+
+static long get_batch_dim_in_kv_cache() {
+#ifdef S_FIRST_KVC
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
@@ -1345,7 +1355,11 @@ inline at::Tensor attn(
       offset);
   auto FSk = offset + Sk;
   auto FSk_aligned = (FSk + 0x3FL) & ~0x3FL;
+#ifdef S_FIRST_KVC
+  auto CSk = t_KL_cache.size(0);
+#else
   auto CSk = t_KL_cache.size(2);
+#endif
   // printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
 
@@ -1354,10 +1368,13 @@ inline at::Tensor attn(
   auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
-  // auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  // auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+#ifdef S_FIRST_KVC
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
+#else
   auto KL_C = GetVLAPtr<T>(t_KL_cache, {N, CSk, H});
   auto VL_C = GetVLAPtr<T>(t_VL_cache, {N, CSk, H});
+#endif
 
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
@@ -1381,8 +1398,8 @@ inline at::Tensor attn(
         // auto t00 = getTime();
         TimerStart();
 #pragma omp for collapse(2) nowait
-        for (int b = 0; b < B; b++) {
-          for (int n = 0; n < N; n++) {
+        for (int n = 0; n < N; n++) {
+          for (int b = 0; b < B; b++) {
             float AS[FSk_aligned];
             // float *AS = GAS[tid]; //FSk];
             // auto t0 = getTime();
@@ -1395,13 +1412,19 @@ inline at::Tensor attn(
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
                   // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-                  // dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+#ifdef S_FIRST_KVC
+                  dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+#else
                   dot_tpp(tmp_QL, KL_C[bid][n][sk], &AS[sk]);
+#endif
                 } else {
                   // printf("b: %d n: %d sk: %d \n", b, n, sk);
                   dot_tpp(tmp_QL, KL[b][n][0], &AS[sk]);
-                  // cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+#else
                   cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+#endif
                 }
                 AS[sk] *= one_by_sqrt_H;
                 if (am_valid) {
@@ -1426,12 +1449,18 @@ inline at::Tensor attn(
                 // if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]);
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
-                  // scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
+#ifdef S_FIRST_KVC
+                  scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
+#else
                   scale_add_tpp(VL_C[bid][n][sk], tmp_CL, AS[sk]);
+#endif
                 } else {
                   scale_add_tpp(VL[b][n][0], tmp_CL, AS[sk]);
-                  // cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+#else
                   cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+#endif
                 }
               }
               cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
@@ -1457,19 +1486,26 @@ inline at::Tensor attn(
     RECORD_OMP_TIME();
     {
 #pragma omp parallel for collapse(3)
-      for (int b = 0; b < B; b++) {
-        for (int n = 0; n < N; n++) {
+      for (int n = 0; n < N; n++) {
+        for (int b = 0; b < B; b++) {
           for (int sk = 0; sk < FSk; sk++) {
             AS[b][n][sk] = 0.0f;
             if (sk < offset) {
               int bid = beam_idx[b][sk];
               // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-              // dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
+#ifdef S_FIRST_KVC
+              dot_tpp(XL[b][n], KL_C[sk][bid][n], &AS[b][n][sk]);
+#else
               dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
+#endif
             } else {
               // printf("b: %d n: %d sk: %d \n", b, n, sk);
               dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
+#ifdef S_FIRST_KVC
+              cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+#else
               cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+#endif
             }
             AS[b][n][sk] *= one_by_sqrt_H;
             if (am_valid) {
@@ -1479,8 +1515,8 @@ inline at::Tensor attn(
         }
       }
 #pragma omp parallel for collapse(2)
-      for (int b = 0; b < B; b++) {
-        for (int n = 0; n < N; n++) {
+      for (int n = 0; n < N; n++) {
+        for (int b = 0; b < B; b++) {
           for (int sk = FSk; sk < FSk_aligned; sk++) {
             // pad AS to align for softmax
             AS[b][n][sk] = -1e9f;
@@ -1490,10 +1526,18 @@ inline at::Tensor attn(
           for (int sk = 0; sk < FSk; sk++) {
             if (sk < offset) {
               int bid = beam_idx[b][sk];
+#ifdef S_FIRST_KVC
+              scale_add_tpp(VL_C[sk][bid][n], XL[b][n], AS[b][n][sk]);
+#else
               scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
+#endif
             } else {
               scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
+#ifdef S_FIRST_KVC
+              cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+#else
               cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+#endif
             }
           }
         }
@@ -1736,6 +1780,7 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (csz > 0) {
       offset = t_key_past.size(2);
     }
+    // TPP_ASSERT(S == 1, "S must be 1");
 
     t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
     t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
@@ -1760,16 +1805,26 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (offset == 0) {
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
       auto capacity = S + KV_CACHE_INC_SIZE;
+#ifdef S_FIRST_KVC
+      t_key_past = t_KL.new_zeros({capacity, B, N, H});
+      t_value_past = t_VL.new_zeros({capacity, B, N, H});
+#else
       t_key_past = t_KL.new_zeros({B, N, capacity, H});
       t_value_past = t_VL.new_zeros({B, N, capacity, H});
+#endif
       // t_beam_idx = t_beam_idx.new_zeros({capacity, B});
       t_beam_idx =
           at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
       // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() <<
       // std::endl;
       t_offset = t_offset + S;
+#ifdef S_FIRST_KVC
+      t_key_past.slice(0, 0, S, 1).copy_(t_KL.permute({2, 0, 1, 3}));
+      t_value_past.slice(0, 0, S, 1).copy_(t_VL.permute({2, 0, 1, 3}));
+#else
       t_key_past.slice(2, 0, S, 1).copy_(t_KL);
       t_value_past.slice(2, 0, S, 1).copy_(t_VL);
+#endif
       t_CL = t_CL.view({B, N, S, H})
                  .permute({0, 2, 1, 3})
                  .contiguous()
@@ -1778,12 +1833,25 @@ struct LLMBlock : torch::CustomClassHolder {
       // printf("old offset = %d, new_offset = %ld\n", offset,
       // t_offset.item<long>());
     } else {
+#ifdef S_FIRST_KVC
+      auto capacity = t_key_past.size(0);
+#else
       auto capacity = t_key_past.size(2);
+#endif
       if (capacity <= offset) {
         printf(
             "Warning: Reallocating kv cache, consider increasing KV_CACHE_INC_SIZE (%d)\n",
             KV_CACHE_INC_SIZE);
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
+#ifdef S_FIRST_KVC
+        auto t_key_past_new = t_key_past.new_empty({new_capacity, B, N, H});
+        t_key_past_new.slice(0, 0, offset, 1).copy_(t_key_past);
+        t_key_past = t_key_past_new;
+
+        auto t_value_past_new = t_value_past.new_empty({new_capacity, B, N, H});
+        t_value_past_new.slice(0, 0, offset, 1).copy_(t_value_past);
+        t_value_past = t_value_past_new;
+#else
         auto t_key_past_new = t_key_past.new_empty({B, N, new_capacity, H});
         t_key_past_new.slice(2, 0, offset, 1).copy_(t_key_past);
         t_key_past = t_key_past_new;
@@ -1791,6 +1859,7 @@ struct LLMBlock : torch::CustomClassHolder {
         auto t_value_past_new = t_value_past.new_empty({B, N, new_capacity, H});
         t_value_past_new.slice(2, 0, offset, 1).copy_(t_value_past);
         t_value_past = t_value_past_new;
+#endif
 
         auto t_beam_idx_new =
             at::arange(B).unsqueeze(0).expand({new_capacity, B}).contiguous();
@@ -1821,10 +1890,16 @@ struct LLMBlock : torch::CustomClassHolder {
                  .view({B, S, N * H});
       t_offset = t_offset + 1;
       S = t_offset.item<long>();
+#ifdef S_FIRST_KVC
+      t_KL = t_key_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
+      t_VL = t_value_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
+#else
       t_KL = t_key_past.slice(2, 0, S, 1);
       t_VL = t_value_past.slice(2, 0, S, 1);
+#endif
       // printf("old offset = %d, new_offset = %ld\n", offset,
       // t_offset.item<long>());
+      // std::cout << "t_key_past = " << t_key_past.sizes() << std::endl;
       return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
     }
   }
@@ -2311,6 +2386,7 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_add2_scale", &fc_add2_scale_wrap, "TPP fc_add2_scale");
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
+  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.def(
       "apply_rotary_pos_emb_gptj",
       &apply_rotary_pos_emb_gptj_wrap,
@@ -2332,6 +2408,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_add2_scale", &fc_add2_scale_wrap);
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
+  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
