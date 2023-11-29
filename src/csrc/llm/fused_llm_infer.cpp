@@ -49,6 +49,8 @@ REGISTER_LOCAL_SCOPE(qkv_gemm_compressed, "qkv_gemm_bm");
 REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
+REGISTER_LOCAL_SCOPE(ac_gemm21, "ac_gemm21");
+REGISTER_LOCAL_SCOPE(ac_gemm22, "ac_gemm22");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(o_spmm, "o_spmm");
 REGISTER_LOCAL_SCOPE(o_gemm_compressed, "o_gemm_bm");
@@ -2363,7 +2365,7 @@ inline at::Tensor attn(
   auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
     SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
-  if (FSk <= 256) {
+  if (FSk <= 2560) {
     RECORD_OMP_TIME();
     {
 #pragma omp parallel
@@ -2372,8 +2374,8 @@ inline at::Tensor attn(
         //auto t00 = getTime();
         TimerStart();
 #pragma omp for collapse(2) nowait
-        for (int b = 0; b < B; b++) {
           for (int n = 0; n < N; n++) {
+        for (int b = 0; b < B; b++) {
             float AS[FSk_aligned];
             //float *AS = GAS[tid]; //FSk];
             //auto t0 = getTime();
@@ -2445,9 +2447,14 @@ inline at::Tensor attn(
 
     RECORD_OMP_TIME();
     {
-#pragma omp parallel for collapse(3)
-      for (int b = 0; b < B; b++) {
+      {
+      RECORD_SCOPE(ac_gemm21, {});
+#pragma omp parallel
+      {
+        TimerStart();
+#pragma omp for collapse(3)
         for (int n = 0; n < N; n++) {
+      for (int b = 0; b < B; b++) {
           for (int sk = 0; sk < FSk; sk++) {
             AS[b][n][sk] = 0.0f;
             if (sk < offset) {
@@ -2467,9 +2474,17 @@ inline at::Tensor attn(
           }
         }
       }
-#pragma omp parallel for collapse(2)
-      for (int b = 0; b < B; b++) {
+        TimerEnd();
+      }
+    }
+      {
+      RECORD_SCOPE(ac_gemm22, {});
+#pragma omp parallel
+      {
+        TimerStart();
+#pragma omp for collapse(2)
         for (int n = 0; n < N; n++) {
+      for (int b = 0; b < B; b++) {
           for (int sk = FSk; sk < FSk_aligned; sk++) {
             // pad AS to align for softmax
             AS[b][n][sk] = -1e9f;
@@ -2486,6 +2501,9 @@ inline at::Tensor attn(
             }
           }
         }
+      }
+        TimerEnd();
+      }
       }
     }
     t_CL = t_XL.to(t_CL.dtype());
