@@ -340,6 +340,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.profile:
             prof.step()
         print(gen_text, len(gen_ids), flush=True)
+        print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
             if args.token_latency:
