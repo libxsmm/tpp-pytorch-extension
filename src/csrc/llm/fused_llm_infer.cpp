@@ -26,7 +26,7 @@
 using namespace tpp;
 #include "tensor_helper.h"
 
-#define S_FIRST_KVC
+// #define S_FIRST_KVC
 
 static long get_batch_dim_in_kv_cache() {
 #ifdef S_FIRST_KVC
@@ -52,6 +52,8 @@ REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
+REGISTER_LOCAL_SCOPE(ac_gemm21, "ac_gemm21");
+REGISTER_LOCAL_SCOPE(ac_gemm22, "ac_gemm22");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
@@ -1389,7 +1391,10 @@ inline at::Tensor attn(
   auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
       SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
-  if (FSk <= 256) {
+  auto nThreads = omp_get_max_threads();
+  float tasks_per_thread = ((float)B * N) / nThreads;
+  auto thr_eff = tasks_per_thread / ceilf(tasks_per_thread);
+  if (FSk <= 256 || thr_eff >= 0.75) {
     RECORD_OMP_TIME();
     {
 #pragma omp parallel
@@ -1483,63 +1488,80 @@ inline at::Tensor attn(
     auto XL = GetVLAPtr<float>(t_XL, {N, H});
     auto AS = GetVLAPtr<float>(t_AS, {N, FSk_aligned});
 
-    RECORD_OMP_TIME();
     {
-#pragma omp parallel for collapse(3)
-      for (int n = 0; n < N; n++) {
-        for (int b = 0; b < B; b++) {
-          for (int sk = 0; sk < FSk; sk++) {
-            AS[b][n][sk] = 0.0f;
-            if (sk < offset) {
-              int bid = beam_idx[b][sk];
-              // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
+      {
+        RECORD_SCOPE(ac_gemm21, {});
+        RECORD_OMP_TIME();
+#pragma omp parallel
+        {
+          TimerStart();
+#pragma omp for collapse(3)
+          for (int n = 0; n < N; n++) {
+            for (int b = 0; b < B; b++) {
+              for (int sk = 0; sk < FSk; sk++) {
+                AS[b][n][sk] = 0.0f;
+                if (sk < offset) {
+                  int bid = beam_idx[b][sk];
+                  // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
 #ifdef S_FIRST_KVC
-              dot_tpp(XL[b][n], KL_C[sk][bid][n], &AS[b][n][sk]);
+                  dot_tpp(XL[b][n], KL_C[sk][bid][n], &AS[b][n][sk]);
 #else
-              dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
+                  dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
 #endif
-            } else {
-              // printf("b: %d n: %d sk: %d \n", b, n, sk);
-              dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
+                } else {
+                  // printf("b: %d n: %d sk: %d \n", b, n, sk);
+                  dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
 #ifdef S_FIRST_KVC
-              cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
+                  cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
 #else
-              cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+                  cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
 #endif
-            }
-            AS[b][n][sk] *= one_by_sqrt_H;
-            if (am_valid) {
-              AS[b][n][sk] += AM[b][sk];
+                }
+                AS[b][n][sk] *= one_by_sqrt_H;
+                if (am_valid) {
+                  AS[b][n][sk] += AM[b][sk];
+                }
+              }
             }
           }
+          TimerEnd();
         }
       }
-#pragma omp parallel for collapse(2)
-      for (int n = 0; n < N; n++) {
-        for (int b = 0; b < B; b++) {
-          for (int sk = FSk; sk < FSk_aligned; sk++) {
-            // pad AS to align for softmax
-            AS[b][n][sk] = -1e9f;
-          }
-          softmax_fwd_tpp(AS[b][n], AS[b][n]);
-          zero_tpp(XL[b][n]);
-          for (int sk = 0; sk < FSk; sk++) {
-            if (sk < offset) {
-              int bid = beam_idx[b][sk];
+      {
+        RECORD_SCOPE(ac_gemm22, {});
+        RECORD_OMP_TIME();
+#pragma omp parallel
+        {
+          TimerStart();
+#pragma omp for collapse(2)
+          for (int n = 0; n < N; n++) {
+            for (int b = 0; b < B; b++) {
+              for (int sk = FSk; sk < FSk_aligned; sk++) {
+                // pad AS to align for softmax
+                AS[b][n][sk] = -1e9f;
+              }
+              softmax_fwd_tpp(AS[b][n], AS[b][n]);
+              zero_tpp(XL[b][n]);
+              for (int sk = 0; sk < FSk; sk++) {
+                if (sk < offset) {
+                  int bid = beam_idx[b][sk];
 #ifdef S_FIRST_KVC
-              scale_add_tpp(VL_C[sk][bid][n], XL[b][n], AS[b][n][sk]);
+                  scale_add_tpp(VL_C[sk][bid][n], XL[b][n], AS[b][n][sk]);
 #else
-              scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
+                  scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
 #endif
-            } else {
-              scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
+                } else {
+                  scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
 #ifdef S_FIRST_KVC
-              cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
+                  cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
 #else
-              cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+                  cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
 #endif
+                }
+              }
             }
           }
+          TimerEnd();
         }
       }
     }
