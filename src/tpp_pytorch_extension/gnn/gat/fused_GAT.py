@@ -65,7 +65,7 @@ class DummyLinear(BlockedModule):
 class GATMLPAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, fuse_bias, *inputs):
-        
+
         if fuse_bias:
             (mlp_inp, wt, attn, bias) = inputs
         else:
@@ -74,9 +74,7 @@ class GATMLPAttentionFunction(torch.autograd.Function):
             align, 1 if fuse_bias else 0, inputs
         )
 
-        ctx.save_for_backward(
-            mlp_out, attn, mlp_inp, wt
-        )  # attn_input = mlp_out
+        ctx.save_for_backward(mlp_out, attn, mlp_inp, wt)  # attn_input = mlp_out
         ctx.align = align
         ctx.fuse_bias = fuse_bias
 
@@ -87,9 +85,12 @@ class GATMLPAttentionFunction(torch.autograd.Function):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
         if ctx.fuse_bias:
-            grad_inp, grad_wt, grad_attn, grad_bias = fused_gat_cpp.fused_gat_mlp_attn_bwd(
-                ctx.align, 1, inputs
-            )
+            (
+                grad_inp,
+                grad_wt,
+                grad_attn,
+                grad_bias,
+            ) = fused_gat_cpp.fused_gat_mlp_attn_bwd(ctx.align, 1, inputs)
         else:
             grad_inp, grad_wt, grad_attn = fused_gat_cpp.fused_gat_mlp_attn_bwd(
                 ctx.align, 0, inputs
@@ -99,17 +100,18 @@ class GATMLPAttentionFunction(torch.autograd.Function):
         else:
             return (None, None, grad_inp, grad_wt, grad_attn)
 
+
 class GATMLPFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, fuse_bias, *inputs):
-        
+
         if fuse_bias:
             (inp, wt, bias) = inputs
         else:
             (inp, wt) = inputs
         out = fused_gat_cpp.fused_mlp_fwd(align, fuse_bias, inputs)
 
-        ctx.save_for_backward(inp, wt) 
+        ctx.save_for_backward(inp, wt)
         ctx.align = align
         ctx.fuse_bias = fuse_bias
 
@@ -121,19 +123,20 @@ class GATMLPFunction(torch.autograd.Function):
         inputs += ctx.saved_tensors
         if ctx.fuse_bias:
             grad_inp, grad_wt, grad_bias = fused_gat_cpp.fused_mlp_bwd(
-                    ctx.align, ctx.fuse_bias, inputs
+                ctx.align, ctx.fuse_bias, inputs
             )
             return (None, None, grad_inp, grad_wt, grad_bias)
         else:
             grad_inp, grad_wt = fused_gat_cpp.fused_mlp_bwd(
-                    ctx.align, ctx.fuse_bias, inputs
+                ctx.align, ctx.fuse_bias, inputs
             )
             return (None, None, grad_inp, grad_wt)
+
 
 class GATAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, *inputs):
-        
+
         inp, attn = inputs
         out = fused_gat_cpp.attn_fwd(align, inputs)
 
@@ -148,6 +151,7 @@ class GATAttentionFunction(torch.autograd.Function):
         inputs += ctx.saved_tensors
         grad_inp, grad_attn = fused_gat_cpp.attn_bwd(ctx.align, inputs)
         return (None, grad_inp, grad_attn)
+
 
 class DropoutFunction(torch.autograd.Function):
     @staticmethod
@@ -226,6 +230,7 @@ class LeakyReLU(nn.Module):
         output = LeakyReLUFn.apply(self.alpha, input)
         return output
 
+
 class ReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp):
@@ -242,6 +247,7 @@ class ReLUFn(torch.autograd.Function):
 
         return grad_inp
 
+
 class ReLU(nn.Module):
     __constants__ = ["inplace"]
 
@@ -252,6 +258,7 @@ class ReLU(nn.Module):
     def forward(self, inp):
         output = ReLUFn.apply(inp)
         return output
+
 
 class FusedBiasReLUFn(torch.autograd.Function):
     @staticmethod
@@ -270,6 +277,7 @@ class FusedBiasReLUFn(torch.autograd.Function):
 
         return (grad_inp, grad_bias)
 
+
 class FusedBiasReLU(nn.Module):
     __constants__ = ["inplace"]
 
@@ -280,6 +288,7 @@ class FusedBiasReLU(nn.Module):
     def forward(self, inp, bias):
         output = FusedBiasReLUFn.apply(inp, bias)
         return output
+
 
 class FusedReLUDropFn(torch.autograd.Function):
     @staticmethod
@@ -335,6 +344,7 @@ class AddBiasFn(torch.autograd.Function):
 
         return (grad_outs[0], grad_bias)
 
+
 class AddBias(nn.Module):
     def __init__(self):
         super(AddBias, self).__init__()
@@ -342,6 +352,7 @@ class AddBias(nn.Module):
     def forward(self, inp, bias):
         output = AddBiasFn.apply(inp, bias)
         return output
+
 
 class GATConvOpt(BlockedModule):
     r"""
@@ -449,7 +460,8 @@ class GATConvOpt(BlockedModule):
                 self.bk = kbf
                 break
         self.fc_src = DummyLinear(
-            self._in_src_feats, out_feats * num_heads, #bias=False,
+            self._in_src_feats,
+            out_feats * num_heads,  # bias=False,
         )
         self.fc_src.weight.set_blocking_param(
             (
@@ -458,7 +470,8 @@ class GATConvOpt(BlockedModule):
             )
         )
         self.fc_dst = DummyLinear(
-            self._in_dst_feats, out_feats * num_heads, #bias=False
+            self._in_dst_feats,
+            out_feats * num_heads,  # bias=False
         )
         self.fc_dst.weight.set_blocking_param(
             (
@@ -466,7 +479,7 @@ class GATConvOpt(BlockedModule):
                 [0, 2, 3, 1],
             )
         )
-        
+
         self.attn_l = BlockedParameter(
             torch.FloatTensor(size=(1, num_heads, out_feats))
         )
@@ -494,23 +507,24 @@ class GATConvOpt(BlockedModule):
         else:
             self.register_buffer("res_fc", None)
 
-
         self.fuse_src_bias = True if self.fc_src.bias is not None else False
         self.fuse_dst_bias = True if self.fc_dst.bias is not None else False
 
         self.fuse_bias = False
         if bias and (not self.fuse_src_bias or not self.fuse_dst_bias):
-            self.bias = BlockedParameter(torch.FloatTensor(size=(num_heads * out_feats,)))
+            self.bias = BlockedParameter(
+                torch.FloatTensor(size=(num_heads * out_feats,))
+            )
             self.fuse_bias = True
         else:
-            self.register_buffer('bias', None)
+            self.register_buffer("bias", None)
 
         self.act_drop = None
         self.activation = None
         if activation is not None and feat_drop > 0.0:
             self.act_drop = FusedReLUDrop(feat_drop)
         elif activation is not None and feat_drop == 0.0:
-            self.activation = ReLU() 
+            self.activation = ReLU()
 
         self.use_bf16 = False
         self.reset_parameters()
@@ -548,7 +562,6 @@ class GATConvOpt(BlockedModule):
         nn.init.xavier_normal_(self.attn_r, gain=gain)
         if self.bias is not None:
             nn.init.constant_(self.bias, 0)
-
 
     def set_allow_zero_in_degree(self, set_value):
         r"""
@@ -621,11 +634,7 @@ class GATConvOpt(BlockedModule):
                 h_src = feat[0]
                 h_dst = feat[1]
 
-                inputs_src = [
-                    h_src,
-                    self.fc_src.weight,
-                    self.attn_l
-                ]
+                inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.fuse_bias:
@@ -635,7 +644,8 @@ class GATConvOpt(BlockedModule):
                 align = self.align if (N > self.align or N == 0) else N
 
                 el, feat_src_ = GATMLPAttentionFunction.apply(
-                    align, self.fuse_dst_bias or self.fuse_bias,
+                    align,
+                    self.fuse_dst_bias or self.fuse_bias,
                     *inputs_src,
                 )
                 feat_src = feat_src_.view(
@@ -655,7 +665,8 @@ class GATConvOpt(BlockedModule):
                 align = self.align if (N > self.align or N == 0) else N
 
                 feat_dst_ = GATMLPFunction.apply(
-                    align, self.fuse_dst_bias or self.fuse_bias,
+                    align,
+                    self.fuse_dst_bias or self.fuse_bias,
                     *inputs_dst,
                 )  #
                 feat_dst = feat_dst_.view(
@@ -666,7 +677,10 @@ class GATConvOpt(BlockedModule):
 
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
 
-                inputs_src = [ h_src, self.fc_src.weight, ]
+                inputs_src = [
+                    h_src,
+                    self.fc_src.weight,
+                ]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.bias is not None:
@@ -676,13 +690,14 @@ class GATConvOpt(BlockedModule):
                 align = self.align if (N > self.align or N == 0) else N
 
                 el, feat_src_ = GATMLPAttentionFunction.apply(
-                    align, self.fuse_src_bias or self.fuse_bias,
+                    align,
+                    self.fuse_src_bias or self.fuse_bias,
                     *inputs_src,
                 )
                 feat_src = feat_src.view(
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
-                feat_dst = feat_src 
+                feat_dst = feat_src
 
                 if graph.is_block:
                     feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
@@ -694,7 +709,9 @@ class GATConvOpt(BlockedModule):
             inputs_dst = [feat_dst, self.attn_r]
             N = feat_dst.size(0)
             align = self.align if (N > self.align or N == 0) else N
-            er = GATAttentionFunction.apply(align, *inputs_dst).view(-1, self._num_heads, 1)
+            er = GATAttentionFunction.apply(align, *inputs_dst).view(
+                -1, self._num_heads, 1
+            )
 
             graph.srcdata.update({"ft": feat_src, "el": el})
             graph.dstdata.update({"er": er})
@@ -770,4 +787,3 @@ class GATConvOptBF16(GATConvOpt):
             self.attn_r.data = self.attn_r.to(torch.bfloat16)
 
         self.use_bf16 = True
-

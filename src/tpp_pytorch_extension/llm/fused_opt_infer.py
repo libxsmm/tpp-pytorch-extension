@@ -40,6 +40,7 @@ from .llm_common import (
     get_layer_past_and_offset,
 )
 
+
 class OPTDecoderLayer(BlockedModule):
     def __init__(self, config):
         super().__init__()
@@ -60,7 +61,9 @@ class OPTDecoderLayer(BlockedModule):
         )
         self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
         self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
-        self.final_layer_norm = nn.LayerNorm(self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine)
+        self.final_layer_norm = nn.LayerNorm(
+            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
+        )
 
     def forward(
         self,
@@ -74,7 +77,7 @@ class OPTDecoderLayer(BlockedModule):
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]],
     ]:
-        #print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
+        # print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
         # print("layer_past:", layer_past[0].shape if layer_past is not None else layer_past)
         # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
@@ -82,7 +85,11 @@ class OPTDecoderLayer(BlockedModule):
             raise
         orig_hidden_states = hidden_states
         S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
+        hidden_states = self.get_blocked_tensor(
+            hidden_states,
+            self.blocked_input_signature,
+            [None, None, self.features_block_size],
+        )
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
 
@@ -96,11 +103,12 @@ class OPTDecoderLayer(BlockedModule):
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
-        #print("AM: ", inputs[-2].shape, inputs[-2].dtype)
+        # print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
         # print("PHS:", hidden_states.shape)
         past_key_value = [
-            i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
+            i.to(self.layer_dtype) if i.is_floating_point() else i
+            for i in past_key_value
         ]
 
         outputs = self.cpp_block.forward(inputs, past_key_value, use_cache)
@@ -117,6 +125,7 @@ class OPTDecoderLayer(BlockedModule):
             outputs = (hs,)
 
         return outputs  # hidden_states, present, (attentions)
+
 
 def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.opt.modeling_opt.OPTDecoderLayer):
@@ -138,24 +147,33 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.model_parallel = False
     for m in self.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device='cpu'), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device="cpu"), **kwargs
+            )
 
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype)
     block(self)
     if not hasattr(self, "cpp_block"):
         params = [
-            self.self_attn_layer_norm.weight, self.self_attn_layer_norm.bias,
-            self.final_layer_norm.weight, self.final_layer_norm.bias,
+            self.self_attn_layer_norm.weight,
+            self.self_attn_layer_norm.bias,
+            self.final_layer_norm.weight,
+            self.final_layer_norm.bias,
         ]
         params += [
-            self.self_attn.q_proj.weight, self.self_attn.q_proj.bias,
-            self.self_attn.k_proj.weight, self.self_attn.k_proj.bias,
-            self.self_attn.v_proj.weight, self.self_attn.v_proj.bias,
-            self.self_attn.out_proj.weight, self.self_attn.out_proj.bias,
+            self.self_attn.q_proj.weight,
+            self.self_attn.q_proj.bias,
+            self.self_attn.k_proj.weight,
+            self.self_attn.k_proj.bias,
+            self.self_attn.v_proj.weight,
+            self.self_attn.v_proj.bias,
+            self.self_attn.out_proj.weight,
+            self.self_attn.out_proj.bias,
         ]
         params += [self.fc1.weight, self.fc1.bias]
         params += [self.fc2.weight, self.fc2.bias]
@@ -169,7 +187,8 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
-def OptimizeModelForOPT(model, dtype, device='cpu'):
+
+def OptimizeModelForOPT(model, dtype, device="cpu"):
     set_pg()
 
     for m in model.modules():
@@ -180,15 +199,21 @@ def OptimizeModelForOPT(model, dtype, device='cpu'):
             block(m)
     for m in model.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device=device), **kwargs
+            )
 
 
-transformers.models.opt.modeling_opt.OPTForCausalLM._reorder_cache = staticmethod(_reorder_cache)
+transformers.models.opt.modeling_opt.OPTForCausalLM._reorder_cache = staticmethod(
+    _reorder_cache
+)
 
 OPTForCausalLM_forward = transformers.models.opt.modeling_opt.OPTForCausalLM.forward
+
 
 def OPTForCausalLM_forward_patched(
     self,
@@ -217,4 +242,7 @@ def OPTForCausalLM_forward_patched(
         return_dict=return_dict,
     )
 
-transformers.models.opt.modeling_opt.OPTForCausalLM.forward = OPTForCausalLM_forward_patched
+
+transformers.models.opt.modeling_opt.OPTForCausalLM.forward = (
+    OPTForCausalLM_forward_patched
+)

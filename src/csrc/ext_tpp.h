@@ -146,16 +146,17 @@ class ScopedTPP<tpp::SpmmTPP<Tin, Tout>, impl> {
   void operator()(
       Tin* A,
       const tensor_bcsc_t& B,
-      unsigned long long B_n_cols,    
+      unsigned long long B_n_cols,
       unsigned long long B_col_offs,
       Tout* C,
       bool no_tile_cfg = false) {
-    ScopedTimer _t(BRGEMM, func.flops(), func.bytes_C_moved() + func.bytes_AB_moved());
+    ScopedTimer _t(
+        BRGEMM, func.flops(), func.bytes_C_moved() + func.bytes_AB_moved());
     if (impl == 0) {
       func(A, B, B_n_cols, B_col_offs, C, no_tile_cfg);
     } /*else if (impl == 1) {
       func.ref(A, B, C, count, no_tile_cfg);
-    } */else {
+    } */ else {
       printf("invalid impl requested\n");
       exit(1);
     }
@@ -184,7 +185,10 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout>, impl> {
       Tout* C,
       long count,
       bool no_tile_cfg = false) {
-    ScopedTimer _t(BRGEMM, func.flops() * count, func.bytes_C_moved() + func.bytes_AB_moved() * count);
+    ScopedTimer _t(
+        BRGEMM,
+        func.flops() * count,
+        func.bytes_C_moved() + func.bytes_AB_moved() * count);
     if (impl == 0) {
       func(A, B, C, count, no_tile_cfg);
     } else if (impl == 1) {
@@ -218,7 +222,8 @@ class ScopedTPP<tpp::GemmTPP<Tin, Tout>, impl> {
       Tout* C,
       char* B_bitmap,
       bool no_tile_cfg = false) {
-    ScopedTimer _t(BRGEMM, func.flops(), func.bytes_C_moved() + func.bytes_AB_moved());
+    ScopedTimer _t(
+        BRGEMM, func.flops(), func.bytes_C_moved() + func.bytes_AB_moved());
     if (impl == 0) {
       func(A, B, C, B_bitmap, no_tile_cfg);
     } else {

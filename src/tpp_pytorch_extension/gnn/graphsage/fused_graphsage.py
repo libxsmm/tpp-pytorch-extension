@@ -139,7 +139,6 @@ class DropoutFunction(torch.autograd.Function):
 
 
 class SAGEConvOpt(BlockedModule):
-
     def __init__(
         self,
         in_feats,
@@ -217,7 +216,7 @@ class SAGEConvOpt(BlockedModule):
             )
         )
 
-        if bias: 
+        if bias:
             self.apply_bias = True
 
             if self.fc_self is not None:
@@ -408,7 +407,7 @@ class SAGEConvOpt(BlockedModule):
                     h_neigh,
                     self.fc_self.weight,
                     self.fc_neigh.weight,
-                    self.fc_self.bias
+                    self.fc_self.bias,
                 ]
                 N = h_self.size(0)
                 align = self.align if (N > self.align or N == 0) else N

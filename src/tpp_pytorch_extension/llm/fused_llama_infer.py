@@ -39,6 +39,7 @@ from .llm_common import (
     get_layer_past_and_offset,
 )
 
+
 class LlamaDecoderLayer(BlockedModule):
     def __init__(self, config):
         super().__init__()
@@ -50,7 +51,9 @@ class LlamaDecoderLayer(BlockedModule):
             hidden_act=config.hidden_act,
         )
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = LlamaRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -60,7 +63,9 @@ class LlamaDecoderLayer(BlockedModule):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -80,7 +85,11 @@ class LlamaDecoderLayer(BlockedModule):
             raise
         orig_hidden_states = hidden_states
         S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(hidden_states, self.blocked_input_signature, [None, None, self.features_block_size])
+        hidden_states = self.get_blocked_tensor(
+            hidden_states,
+            self.blocked_input_signature,
+            [None, None, self.features_block_size],
+        )
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
 
@@ -89,19 +98,22 @@ class LlamaDecoderLayer(BlockedModule):
 
         discrete_kv = getattr(self, "discrete_kv", True)
         past_key_value, offset = get_layer_past_and_offset(past_key_value, discrete_kv)
-        
+
         add_tensor_or_empty(attention_mask)
         if position_ids is None:
             seq_len = hidden_states.shape[1]
-            position_ids = torch.arange(offset, offset+seq_len).repeat(hidden_states.shape[0], 1)
+            position_ids = torch.arange(offset, offset + seq_len).repeat(
+                hidden_states.shape[0], 1
+            )
 
         add_tensor_or_empty(position_ids)
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
-        
+
         past_key_value = [
-            i.to(self.layer_dtype) if i.is_floating_point() else i for i in past_key_value
+            i.to(self.layer_dtype) if i.is_floating_point() else i
+            for i in past_key_value
         ]
 
         outputs = self.cpp_block.forward(inputs, past_key_value, use_cache)
@@ -150,6 +162,7 @@ class LlamaDecoderLayer(BlockedModule):
 
         return outputs
 
+
 def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
     if not isinstance(self, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
         return
@@ -171,10 +184,13 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
         self.model_parallel = False
     for m in self.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device='cpu'), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device="cpu"), **kwargs
+            )
 
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype)
@@ -189,13 +205,24 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
             self.self_attn.o_proj.weight,
         ]
         params += [self.post_attention_layernorm.weight]
-        params += [self.mlp.gate_proj.weight,
-                   self.mlp.up_proj.weight,
-                   self.mlp.down_proj.weight,
-                  ]       # since bias is False
-        
+        params += [
+            self.mlp.gate_proj.weight,
+            self.mlp.up_proj.weight,
+            self.mlp.down_proj.weight,
+        ]  # since bias is False
+
         if hasattr(self.self_attn, "rotary_emb"):
-            embed_positions = torch.cat(self.self_attn.rotary_emb(self.self_attn.q_proj.weight, self.self_attn.max_position_embeddings), dim=0).view([2, self.self_attn.max_position_embeddings, -1]).to(torch.float)
+            embed_positions = (
+                torch.cat(
+                    self.self_attn.rotary_emb(
+                        self.self_attn.q_proj.weight,
+                        self.self_attn.max_position_embeddings,
+                    ),
+                    dim=0,
+                )
+                .view([2, self.self_attn.max_position_embeddings, -1])
+                .to(torch.float)
+            )
         else:
             raise NotImplementedError("Requires self.self_attn.rotary_emb")
         params += [embed_positions]
@@ -209,8 +236,9 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
             self.self_attn.head_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
-        
-def OptimizeModelForLlama(model, dtype, device='cpu'):
+
+
+def OptimizeModelForLlama(model, dtype, device="cpu"):
     set_pg()
 
     for m in model.modules():
@@ -221,15 +249,21 @@ def OptimizeModelForLlama(model, dtype, device='cpu'):
             block(m)
     for m in model.modules():
         for name in m._parameters.keys():
-            if m._parameters[name] is None or not m._parameters[name].is_meta: continue
+            if m._parameters[name] is None or not m._parameters[name].is_meta:
+                continue
             param_cls = type(m._parameters[name])
             kwargs = m._parameters[name].__dict__
-            m._parameters[name] = param_cls(torch.empty_like(m._parameters[name], device=device), **kwargs)
+            m._parameters[name] = param_cls(
+                torch.empty_like(m._parameters[name], device=device), **kwargs
+            )
+
 
 def UpdateLLamaModel(model):
     for m in model.modules():
         if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
             m.cpp_block.update_sparse_copy()
 
-transformers.models.llama.modeling_llama.LlamaForCausalLM._reorder_cache = staticmethod(_reorder_cache)
 
+transformers.models.llama.modeling_llama.LlamaForCausalLM._reorder_cache = staticmethod(
+    _reorder_cache
+)

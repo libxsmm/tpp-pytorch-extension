@@ -13,26 +13,24 @@
 
 #include "utils.h"
 
-template<typename DType>
-int l_ullcompare( const void* a , const void* b ) {
-  const unsigned long long aull = *( const unsigned long long* )a;
-  const unsigned long long bull = *( const unsigned long long* )b;
-  if ( aull < bull ) {
+template <typename DType>
+int l_ullcompare(const void* a, const void* b) {
+  const unsigned long long aull = *(const unsigned long long*)a;
+  const unsigned long long bull = *(const unsigned long long*)b;
+  if (aull < bull) {
     return -1;
-  } else if( aull > bull ) {
+  } else if (aull > bull) {
     return 1;
   } else {
     return 0;
   }
 }
 
-template<typename DType>
-void l_shuffle_array(unsigned long long *array, int n) {
-  if (n > 1)
-  {
+template <typename DType>
+void l_shuffle_array(unsigned long long* array, int n) {
+  if (n > 1) {
     int i;
-    for (i = 0; i < n - 1; i++)
-    {
+    for (i = 0; i < n - 1; i++) {
       int j = i + rand() / (RAND_MAX / (n - i) + 1);
       unsigned long long t = array[j];
       array[j] = array[i];
@@ -41,23 +39,40 @@ void l_shuffle_array(unsigned long long *array, int n) {
   }
 }
 
-template<typename DType>
-int l_is_dense_grid_point(unsigned long long grid_point_id, int n_dense_grid_points, unsigned long long *grid_point_array) {
+template <typename DType>
+int l_is_dense_grid_point(
+    unsigned long long grid_point_id,
+    int n_dense_grid_points,
+    unsigned long long* grid_point_array) {
   unsigned long long key = grid_point_id;
-  unsigned long long *found_ptr = (unsigned long long*) bsearch(&key, grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
+  unsigned long long* found_ptr = (unsigned long long*)bsearch(
+      &key,
+      grid_point_array,
+      n_dense_grid_points,
+      sizeof(unsigned long long),
+      l_ullcompare<DType>);
   return ((found_ptr == NULL) ? 0 : 1);
 }
 
-template<typename DType>
-void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int sparse_block_bk, int sparse_block_bn, double sparse_frac) {
-  int N = Nb*bn;
-  int K = Kb*bk*v;
+template <typename DType>
+void sparsify_weight_tensor(
+    DType* dense_wt_ptr,
+    int Nb,
+    int Kb,
+    int bk,
+    int bn,
+    int v,
+    int sparse_block_bk,
+    int sparse_block_bn,
+    double sparse_frac) {
+  int N = Nb * bn;
+  int K = Kb * bk * v;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
   unsigned long long i;
   long long l_i, l_j, in, ik;
   if (sparse_block_bn == 1 && sparse_block_bk == 1) {
-    for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
-      for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
+    for (l_i = 0; l_i < N / sparse_block_bn; l_i++) {
+      for (l_j = 0; l_j < K / sparse_block_bk; l_j++) {
         float tmp = (float)libxsmm_rng_f64();
         if (tmp <= sparse_frac) {
           long long l_ui = l_i * sparse_block_bn;
@@ -65,35 +80,68 @@ void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn,
           long long l_di = 0, l_dj = 0;
           for (l_di = 0; l_di < sparse_block_bn; l_di++) {
             for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
-              in = l_ui+l_di;
-              ik = l_uj+l_dj;
-              LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+              in = l_ui + l_di;
+              ik = l_uj + l_dj;
+              LIBXSMM_VLA_ACCESS(
+                  5,
+                  l_wt_dense,
+                  in / bn,
+                  ik / (bk * v),
+                  (ik % (bk * v)) / v,
+                  in % bn,
+                  (ik % (bk * v)) % v,
+                  Kb,
+                  bk,
+                  bn,
+                  v) = (DType)0;
             }
           }
         }
       }
     }
   } else {
-    unsigned long long n_grid_points = (N/sparse_block_bn) * (K/sparse_block_bk);
-    unsigned long long *grid_point_array = (unsigned long long *) malloc(n_grid_points * sizeof(unsigned long long));
-    unsigned long long n_dense_grid_points = (unsigned long long) ((double)(1.0-sparse_frac) * n_grid_points);
+    unsigned long long n_grid_points =
+        (N / sparse_block_bn) * (K / sparse_block_bk);
+    unsigned long long* grid_point_array =
+        (unsigned long long*)malloc(n_grid_points * sizeof(unsigned long long));
+    unsigned long long n_dense_grid_points =
+        (unsigned long long)((double)(1.0 - sparse_frac) * n_grid_points);
     for (i = 0; i < n_grid_points; i++) {
       grid_point_array[i] = (unsigned long long)i;
     }
-    /* Pemute array of n grid points and consider densifying on the ones with id <= n_dense_grid_points */
+    /* Pemute array of n grid points and consider densifying on the ones with id
+     * <= n_dense_grid_points */
     l_shuffle_array<DType>(grid_point_array, n_grid_points);
-    qsort(grid_point_array, n_dense_grid_points, sizeof(unsigned long long), l_ullcompare<DType>);
-    for ( l_i = 0; l_i < N/sparse_block_bn; l_i++ ) {
-      for ( l_j = 0; l_j < K/sparse_block_bk; l_j++ ) {
-        if (l_is_dense_grid_point<DType>(l_i * (K/sparse_block_bk) + l_j, n_dense_grid_points, grid_point_array) == 0) {
+    qsort(
+        grid_point_array,
+        n_dense_grid_points,
+        sizeof(unsigned long long),
+        l_ullcompare<DType>);
+    for (l_i = 0; l_i < N / sparse_block_bn; l_i++) {
+      for (l_j = 0; l_j < K / sparse_block_bk; l_j++) {
+        if (l_is_dense_grid_point<DType>(
+                l_i * (K / sparse_block_bk) + l_j,
+                n_dense_grid_points,
+                grid_point_array) == 0) {
           long long l_ui = l_i * sparse_block_bn;
           long long l_uj = l_j * sparse_block_bk;
           long long l_di = 0, l_dj = 0;
           for (l_di = 0; l_di < sparse_block_bn; l_di++) {
             for (l_dj = 0; l_dj < sparse_block_bk; l_dj++) {
-              in = l_ui+l_di;
-              ik = l_uj+l_dj;
-              LIBXSMM_VLA_ACCESS(5, l_wt_dense, in/bn, ik/(bk*v), (ik%(bk*v))/v, in%bn, (ik%(bk*v))%v, Kb, bk, bn, v) = (DType)0;
+              in = l_ui + l_di;
+              ik = l_uj + l_dj;
+              LIBXSMM_VLA_ACCESS(
+                  5,
+                  l_wt_dense,
+                  in / bn,
+                  ik / (bk * v),
+                  (ik % (bk * v)) / v,
+                  in % bn,
+                  (ik % (bk * v)) % v,
+                  Kb,
+                  bk,
+                  bn,
+                  v) = (DType)0;
             }
           }
         }
@@ -103,50 +151,76 @@ void sparsify_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn,
   }
 }
 
-template<typename DType>
-double measure_sparsity_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v) {
+template <typename DType>
+double measure_sparsity_from_blocked_weight_tensor(
+    DType* dense_wt_ptr,
+    int Nb,
+    int Kb,
+    int bk,
+    int bn,
+    int v) {
   unsigned int n_entries = 0;
   unsigned int nnz = 0;
   double res = 0.0;
-  int N = Nb*bn;
-  int K = Kb*bk*v;
+  int N = Nb * bn;
+  int K = Kb * bk * v;
   int l_i, l_j;
   DType val;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
 
-  for ( l_i = 0; l_i < N; l_i++ ) {
-    for ( l_j = 0; l_j < K; l_j++ ) {
-      val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i/bn, l_j/(bk*v), (l_j%(bk*v))/v, l_i%bn, (l_j%(bk*v))%v, Kb, bk, bn, v);
+  for (l_i = 0; l_i < N; l_i++) {
+    for (l_j = 0; l_j < K; l_j++) {
+      val = LIBXSMM_VLA_ACCESS(
+          5,
+          l_wt_dense,
+          l_i / bn,
+          l_j / (bk * v),
+          (l_j % (bk * v)) / v,
+          l_i % bn,
+          (l_j % (bk * v)) % v,
+          Kb,
+          bk,
+          bn,
+          v);
       if ((val != 0) && (val != -0)) {
         nnz++;
       }
       n_entries++;
     }
   }
-  
-  res = 100.0*(1.0-((double)1.0*nnz)/((double)n_entries));
+
+  res = 100.0 * (1.0 - ((double)1.0 * nnz) / ((double)n_entries));
   return res;
 }
 
-template<typename DType>
-void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, tensor_compressed_t *compressed_wt) {
-  long long  nnz = 0;
-  int N = Nb*bn;
-  int K = Kb*bk*v;
-  int l_i = 0, l_j = 0, l_ii = 0, l_jj = 0, l_v = 0, l_c = 0, l_cur = 0, l_bm = 0;
+template <typename DType>
+void create_compressed_from_blocked_weight_tensor(
+    DType* dense_wt_ptr,
+    int Nb,
+    int Kb,
+    int bk,
+    int bn,
+    int v,
+    tensor_compressed_t* compressed_wt) {
+  long long nnz = 0;
+  int N = Nb * bn;
+  int K = Kb * bk * v;
+  int l_i = 0, l_j = 0, l_ii = 0, l_jj = 0, l_v = 0, l_c = 0, l_cur = 0,
+      l_bm = 0;
   DType val;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
   auto sparse_pct = env2int("SPFRAC", 0);
-  double sparse_frac = (double) (1.0*sparse_pct/100.0);
-  long long *column_offsets = NULL;
-  DType *compressed_weight = NULL;
-  unsigned int *bitmap = NULL;
-  unsigned short *bitmap_array;
+  double sparse_frac = (double)(1.0 * sparse_pct / 100.0);
+  long long* column_offsets = NULL;
+  DType* compressed_weight = NULL;
+  unsigned int* bitmap = NULL;
+  unsigned short* bitmap_array;
   int is_spr = (libxsmm_cpuid(NULL) == LIBXSMM_X86_AVX512_SPR) ? 1 : 0;
-    
+
   /* Sparsify tensors for benchmarking purposes */
   if (sparse_pct > 0) {
-    sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
+    sparsify_weight_tensor<DType>(
+        dense_wt_ptr, Nb, Kb, bk, bn, v, 1, 1, sparse_frac);
   }
 
   /* First pass to count number of non-zeros */
@@ -158,22 +232,26 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   }
 
   /* Allocate compressedC structures */
-  if (compressed_wt->data) libxsmm_free(compressed_wt->data);
-  if (compressed_wt->bitmap) libxsmm_free(compressed_wt->bitmap);
-  if (compressed_wt->column_offsets) libxsmm_free(compressed_wt->column_offsets);
+  if (compressed_wt->data)
+    libxsmm_free(compressed_wt->data);
+  if (compressed_wt->bitmap)
+    libxsmm_free(compressed_wt->bitmap);
+  if (compressed_wt->column_offsets)
+    libxsmm_free(compressed_wt->column_offsets);
 
-  bitmap  = (unsigned int*) libxsmm_aligned_malloc( (N*K)/8, 64 );
-  column_offsets  = (long long*) libxsmm_aligned_malloc( Nb*sizeof(long long), 64 );
-  compressed_weight    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );
+  bitmap = (unsigned int*)libxsmm_aligned_malloc((N * K) / 8, 64);
+  column_offsets =
+      (long long*)libxsmm_aligned_malloc(Nb * sizeof(long long), 64);
+  compressed_weight = (DType*)libxsmm_aligned_malloc(nnz * sizeof(DType), 64);
   bitmap_array = (unsigned short*)bitmap;
 
-  # pragma omp parallel for
+#pragma omp parallel for
   for (l_i = 0; l_i < nnz; l_i++) {
     compressed_weight[l_i] = (DType)1;
   }
 
-  # pragma omp parallel for
-  for (l_i = 0; l_i < (N*K)/16; l_i++) {
+#pragma omp parallel for
+  for (l_i = 0; l_i < (N * K) / 16; l_i++) {
     bitmap_array[l_i] = (unsigned short)0;
   }
 
@@ -181,52 +259,56 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   if (v == 1 || is_spr > 0) {
     for (l_i = 0; l_i < Nb; l_i++) {
       for (l_j = 0; l_j < Kb; l_j++) {
-        DType *tmp = (DType*)&LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i, l_j, 0, 0, 0, Kb, bk, bn, v);
-        for (l_cur = 0; l_cur < bn*bk*v; l_cur += 16) {
+        DType* tmp = (DType*)&LIBXSMM_VLA_ACCESS(
+            5, l_wt_dense, l_i, l_j, 0, 0, 0, Kb, bk, bn, v);
+        for (l_cur = 0; l_cur < bn * bk * v; l_cur += 16) {
           unsigned short mask = (unsigned short)0;
           int l_b = 0;
           for (l_b = 0; l_b < 16; l_b++) {
-            DType cur_data = tmp[l_cur+l_b];
+            DType cur_data = tmp[l_cur + l_b];
             if ((cur_data != 0) && (cur_data != -0)) {
               mask |= (unsigned short)((unsigned short)1 << l_b);
               compressed_weight[l_c] = cur_data;
               l_c++;
-            } 
+            }
           }
           bitmap_array[l_bm] = mask;
           l_bm++;
         }
       }
-      if (l_i + 1 < Nb) column_offsets[l_i+1] = l_c;  
+      if (l_i + 1 < Nb)
+        column_offsets[l_i + 1] = l_c;
     }
   } else {
     for (l_i = 0; l_i < Nb; l_i++) {
       for (l_j = 0; l_j < Kb; l_j++) {
         /* Undo vnni format to tmp buf */
-        DType tmp[bn*bk*v];
+        DType tmp[bn * bk * v];
         for (l_jj = 0; l_jj < bk; l_jj++) {
-          for (l_ii = 0; l_ii < bn; l_ii++) {   
+          for (l_ii = 0; l_ii < bn; l_ii++) {
             for (l_v = 0; l_v < v; l_v++) {
-              tmp[(l_jj*v+l_v)*bn + l_ii] = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_i, l_j, l_jj, l_ii, l_v, Kb, bk, bn, v);
+              tmp[(l_jj * v + l_v) * bn + l_ii] = LIBXSMM_VLA_ACCESS(
+                  5, l_wt_dense, l_i, l_j, l_jj, l_ii, l_v, Kb, bk, bn, v);
             }
           }
         }
-        for (l_cur = 0; l_cur < bn*bk*v; l_cur += 16) {
+        for (l_cur = 0; l_cur < bn * bk * v; l_cur += 16) {
           unsigned short mask = (unsigned short)0;
           int l_b = 0;
           for (l_b = 0; l_b < 16; l_b++) {
-            DType cur_data = tmp[l_cur+l_b];
+            DType cur_data = tmp[l_cur + l_b];
             if ((cur_data != 0) && (cur_data != -0)) {
               mask |= (unsigned short)((unsigned short)1 << l_b);
               compressed_weight[l_c] = cur_data;
               l_c++;
-            } 
+            }
           }
           bitmap_array[l_bm] = mask;
           l_bm++;
         }
       }
-      if (l_i + 1 < Nb) column_offsets[l_i+1] = l_c;
+      if (l_i + 1 < Nb)
+        column_offsets[l_i + 1] = l_c;
     }
   }
 
@@ -234,7 +316,7 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   compressed_wt->bitmap = (char*)bitmap;
   compressed_wt->column_offsets = (long long*)column_offsets;
   compressed_wt->nnz = nnz;
-  compressed_wt->n_dense_elts = N*K;
+  compressed_wt->n_dense_elts = N * K;
   compressed_wt->sizes[0] = Nb;
   compressed_wt->sizes[1] = Kb;
   compressed_wt->sizes[2] = bk;
@@ -242,35 +324,51 @@ void create_compressed_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, i
   compressed_wt->sizes[4] = v;
 }
 
-template<typename DType>
-void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb, int bk, int bn, int v, int bcsc_bk, int bcsc_bn, int N_target_blocks, tensor_bcsc_t *sparse_wt) {
+template <typename DType>
+void create_bcsc_from_blocked_weight_tensor(
+    DType* dense_wt_ptr,
+    int Nb,
+    int Kb,
+    int bk,
+    int bn,
+    int v,
+    int bcsc_bk,
+    int bcsc_bn,
+    int N_target_blocks,
+    tensor_bcsc_t* sparse_wt) {
   int nnz = 0, l_zero_block = 0;
-  int N = Nb*bn;
-  int K = Kb*bk*v;
+  int N = Nb * bn;
+  int K = Kb * bk * v;
   unsigned int l_val_idx = 0;
   unsigned int l_nz_block_id = 0;
-  unsigned int *l_colptr;
-  unsigned int *l_rowidx;
-  DType        *l_data, val;
-  unsigned int *Nblocks_offsets = (unsigned int*)libxsmm_aligned_malloc(sizeof(unsigned int) * N_target_blocks, 64);
-  int l_i, l_j, l_di, l_dj, l_ui, l_uj, l_ii, l_jj, total_nnz_processed, nnz_entries_per_block, all_done = 0, n_blocks = 0;
+  unsigned int* l_colptr;
+  unsigned int* l_rowidx;
+  DType *l_data, val;
+  unsigned int* Nblocks_offsets = (unsigned int*)libxsmm_aligned_malloc(
+      sizeof(unsigned int) * N_target_blocks, 64);
+  int l_i, l_j, l_di, l_dj, l_ui, l_uj, l_ii, l_jj, total_nnz_processed,
+      nnz_entries_per_block, all_done = 0, n_blocks = 0;
   LIBXSMM_VLA_DECL(5, DType, l_wt_dense, dense_wt_ptr, Kb, bk, bn, v);
-  int l_blocking_step = (bn + bcsc_bn - 1)/bcsc_bn;
+  int l_blocking_step = (bn + bcsc_bn - 1) / bcsc_bn;
   auto sparse_pct = env2int("SPFRAC", 0);
-  double sparse_frac = (double) (1.0*sparse_pct/100.0);
+  double sparse_frac = (double)(1.0 * sparse_pct / 100.0);
 
   if (bn % bcsc_bn != 0) {
-    printf("WARNING: end up with assymetric logical blocks because bn is %d and bcsc_bn is %d...\n", bn, bcsc_bn);
+    printf(
+        "WARNING: end up with assymetric logical blocks because bn is %d and bcsc_bn is %d...\n",
+        bn,
+        bcsc_bn);
   }
-  
+
   /* Sparsify tensors for benchmarking purposes */
   if (sparse_pct > 0) {
-    sparsify_weight_tensor<DType>(dense_wt_ptr, Nb, Kb, bk, bn, v, bcsc_bk, bcsc_bn, sparse_frac);
+    sparsify_weight_tensor<DType>(
+        dense_wt_ptr, Nb, Kb, bk, bn, v, bcsc_bk, bcsc_bn, sparse_frac);
   }
 
   /* First pass to count number of non-zeros */
-  for ( l_i = 0; l_i < N/bcsc_bn; l_i++ ) {
-    for ( l_j = 0; l_j < K/bcsc_bk; l_j++ ) {
+  for (l_i = 0; l_i < N / bcsc_bn; l_i++) {
+    for (l_j = 0; l_j < K / bcsc_bk; l_j++) {
       l_ui = l_i * bcsc_bn;
       l_uj = l_j * bcsc_bk;
       l_zero_block = 1;
@@ -279,7 +377,18 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
         for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
           l_ii = l_ui + l_di;
           l_jj = l_uj + l_dj;
-          val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+          val = LIBXSMM_VLA_ACCESS(
+              5,
+              l_wt_dense,
+              l_ii / bn,
+              l_jj / (bk * v),
+              (l_jj % (bk * v)) / v,
+              l_ii % bn,
+              (l_jj % (bk * v)) % v,
+              Kb,
+              bk,
+              bn,
+              v);
           if ((val != 0) && (val != -0)) {
             l_zero_block = 0;
           }
@@ -292,26 +401,32 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   }
 
   /* Allocate BCSC structures */
-  if (sparse_wt->data) libxsmm_free(sparse_wt->data);
-  if (sparse_wt->colptr) libxsmm_free(sparse_wt->colptr);
-  if (sparse_wt->rowidx) libxsmm_free(sparse_wt->rowidx);
-  if (sparse_wt->Nblocks_offsets) libxsmm_free(sparse_wt->Nblocks_offsets);
+  if (sparse_wt->data)
+    libxsmm_free(sparse_wt->data);
+  if (sparse_wt->colptr)
+    libxsmm_free(sparse_wt->colptr);
+  if (sparse_wt->rowidx)
+    libxsmm_free(sparse_wt->rowidx);
+  if (sparse_wt->Nblocks_offsets)
+    libxsmm_free(sparse_wt->Nblocks_offsets);
 
-  l_colptr  = (unsigned int*) libxsmm_aligned_malloc( (N/bcsc_bn+1)*sizeof(unsigned int), 64 );
-  l_rowidx  = (unsigned int*) libxsmm_aligned_malloc( nnz/(bcsc_bk*bcsc_bn)*sizeof(unsigned int),   64 );
-  l_data    = (DType*) libxsmm_aligned_malloc( nnz*sizeof(DType), 64 );
+  l_colptr = (unsigned int*)libxsmm_aligned_malloc(
+      (N / bcsc_bn + 1) * sizeof(unsigned int), 64);
+  l_rowidx = (unsigned int*)libxsmm_aligned_malloc(
+      nnz / (bcsc_bk * bcsc_bn) * sizeof(unsigned int), 64);
+  l_data = (DType*)libxsmm_aligned_malloc(nnz * sizeof(DType), 64);
 
-  # pragma omp parallel for
+#pragma omp parallel for
   for (l_i = 0; l_i < nnz; l_i++) {
     l_data[l_i] = (DType)1;
   }
 
   /* Second pass to create BCSC */
   l_nz_block_id = 0;
-  l_colptr[N/bcsc_bn] = nnz/(bcsc_bk*bcsc_bn);
-  for ( l_i = 0; l_i < N/bcsc_bn; l_i++ ) {
+  l_colptr[N / bcsc_bn] = nnz / (bcsc_bk * bcsc_bn);
+  for (l_i = 0; l_i < N / bcsc_bn; l_i++) {
     l_colptr[l_i] = l_nz_block_id;
-    for ( l_j = 0; l_j < K/bcsc_bk; l_j++ ) {
+    for (l_j = 0; l_j < K / bcsc_bk; l_j++) {
       l_ui = l_i * bcsc_bn;
       l_uj = l_j * bcsc_bk;
       l_zero_block = 1;
@@ -320,7 +435,18 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
         for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
           l_ii = l_ui + l_di;
           l_jj = l_uj + l_dj;
-          val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+          val = LIBXSMM_VLA_ACCESS(
+              5,
+              l_wt_dense,
+              l_ii / bn,
+              l_jj / (bk * v),
+              (l_jj % (bk * v)) / v,
+              l_ii % bn,
+              (l_jj % (bk * v)) % v,
+              Kb,
+              bk,
+              bn,
+              v);
           if ((val != 0) && (val != -0)) {
             l_zero_block = 0;
           }
@@ -332,12 +458,23 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
           for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
             l_ii = l_ui + l_di;
             l_jj = l_uj + l_dj;
-            val = LIBXSMM_VLA_ACCESS(5, l_wt_dense, l_ii/bn, l_jj/(bk*v), (l_jj%(bk*v))/v, l_ii%bn, (l_jj%(bk*v))%v, Kb, bk, bn, v);
+            val = LIBXSMM_VLA_ACCESS(
+                5,
+                l_wt_dense,
+                l_ii / bn,
+                l_jj / (bk * v),
+                (l_jj % (bk * v)) / v,
+                l_ii % bn,
+                (l_jj % (bk * v)) % v,
+                Kb,
+                bk,
+                bn,
+                v);
             l_data[l_val_idx] = val;
             l_val_idx++;
           }
         }
-        l_nz_block_id++;  
+        l_nz_block_id++;
       }
     }
   }
@@ -345,13 +482,18 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   /* Convert the BCSC to be in VNNI4T if need be */
   if ((v == 4) && (sizeof(DType) == 2) && (bcsc_bk > v)) {
     l_di = 0;
-    l_dj = 0;  
-    for ( l_i = 0; l_i < nnz/(bcsc_bk*bcsc_bn); l_i++) {
-      DType tmp_block[bcsc_bk*bcsc_bn];
-      memcpy(tmp_block, &l_data[l_i*(bcsc_bk*bcsc_bn)], (bcsc_bk*bcsc_bn)*sizeof(DType));
+    l_dj = 0;
+    for (l_i = 0; l_i < nnz / (bcsc_bk * bcsc_bn); l_i++) {
+      DType tmp_block[bcsc_bk * bcsc_bn];
+      memcpy(
+          tmp_block,
+          &l_data[l_i * (bcsc_bk * bcsc_bn)],
+          (bcsc_bk * bcsc_bn) * sizeof(DType));
       for (l_di = 0; l_di < bcsc_bn; l_di++) {
         for (l_dj = 0; l_dj < bcsc_bk; l_dj++) {
-          l_data[l_i*(bcsc_bk*bcsc_bn) + (l_dj/v) * (bcsc_bn * v) + l_di * v + l_dj % v] = tmp_block[l_di * bcsc_bk + l_dj];    
+          l_data
+              [l_i * (bcsc_bk * bcsc_bn) + (l_dj / v) * (bcsc_bn * v) +
+               l_di * v + l_dj % v] = tmp_block[l_di * bcsc_bk + l_dj];
         }
       }
     }
@@ -359,16 +501,17 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
 
   /* Logically partition the sparse BCSC matrix  */
   total_nnz_processed = 0;
-  nnz_entries_per_block = (nnz+N_target_blocks-1)/N_target_blocks;
+  nnz_entries_per_block = (nnz + N_target_blocks - 1) / N_target_blocks;
   all_done = 0;
   l_i = 0;
   l_j = 0;
   Nblocks_offsets[0] = 0;
   while (all_done == 0) {
     int nnz_so_far = 0;
-    while ((nnz_so_far < nnz_entries_per_block) && (l_j < N/bcsc_bn)) {
-      if (l_j + l_blocking_step <= N/bcsc_bn) {
-        nnz_so_far += (l_colptr[l_j+l_blocking_step] - l_colptr[l_j]) * bcsc_bk * bcsc_bn;
+    while ((nnz_so_far < nnz_entries_per_block) && (l_j < N / bcsc_bn)) {
+      if (l_j + l_blocking_step <= N / bcsc_bn) {
+        nnz_so_far += (l_colptr[l_j + l_blocking_step] - l_colptr[l_j]) *
+            bcsc_bk * bcsc_bn;
         l_j += l_blocking_step;
       } else {
         /* Should not happen  */
@@ -377,13 +520,13 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
     total_nnz_processed += nnz_so_far;
     l_i++;
     if (total_nnz_processed < nnz) {
-      Nblocks_offsets[l_i] = l_j*bcsc_bn;
-      if (l_j >= N/bcsc_bn) {
-        all_done = 1; 
+      Nblocks_offsets[l_i] = l_j * bcsc_bn;
+      if (l_j >= N / bcsc_bn) {
+        all_done = 1;
       }
     } else {
       Nblocks_offsets[l_i] = N;
-      all_done = 1; 
+      all_done = 1;
     }
   }
   n_blocks = l_i;
@@ -394,7 +537,7 @@ void create_bcsc_from_blocked_weight_tensor(DType *dense_wt_ptr, int Nb, int Kb,
   sparse_wt->Nblocks_offsets = Nblocks_offsets;
   sparse_wt->n_blocks = n_blocks;
   sparse_wt->nnz = nnz;
-  sparse_wt->n_dense_elts = N*K;
+  sparse_wt->n_dense_elts = N * K;
   sparse_wt->bcsc_bn = bcsc_bn;
   sparse_wt->bcsc_bk = bcsc_bk;
   sparse_wt->bcsc_blocks_in_bn = l_blocking_step;
@@ -951,28 +1094,32 @@ inline at::Tensor act_tensor_trans_n2v_flat(
   RECORD_SCOPE(a_vnni, {input});
   const int BS = get_vnni_block_size(input.dtype());
   TPP_ASSERT(bc % BS == 0, "Uneven number for S2\n");
-  long Nup = ((N+bn-1)/bn)*bn;
-  long Nblocks = Nup/bn;
-  auto output = input.new_empty({Nblocks, C/bc, bc/BS, bn, BS});
+  long Nup = ((N + bn - 1) / bn) * bn;
+  long Nblocks = Nup / bn;
+  auto output = input.new_empty({Nblocks, C / bc, bc / BS, bn, BS});
   auto rem = (N % bn == 0) ? bn : (N % bn);
 
-  auto out = GetVLAPtr<bfloat16>(output, {C/bc, bn*bc});
-  auto in = GetVLAPtr<bfloat16>(input, {C/bc, bc});
+  auto out = GetVLAPtr<bfloat16>(output, {C / bc, bn * bc});
+  auto in = GetVLAPtr<bfloat16>(input, {C / bc, bc});
 
   auto xpose_n2v_tpp = SCOPEIT(
-      XformExtTPP<bfloat16>(bn, bc, bc, bn, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+      XformExtTPP<bfloat16>(
+          bn, bc, bc, bn, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+      VNNI);
   auto xpose_n2v_tpp_rem = SCOPEIT(
-      XformExtTPP<bfloat16>(rem, bc, bc, rem, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true), VNNI);
+      XformExtTPP<bfloat16>(
+          rem, bc, bc, rem, C, bn, XformTPP::XFORM_XPOSE_N2V_TPP, true),
+      VNNI);
 
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for
-    for (int nc = 0; nc < C/bc; nc++) {
+    for (int nc = 0; nc < C / bc; nc++) {
       for (int nb = 0; nb < Nblocks; nb++) {
-        if (nb == Nblocks-1) {
-          xpose_n2v_tpp_rem(in[nb*bn][nc], out[nb][nc]);
+        if (nb == Nblocks - 1) {
+          xpose_n2v_tpp_rem(in[nb * bn][nc], out[nb][nc]);
         } else {
-          xpose_n2v_tpp(in[nb*bn][nc], out[nb][nc]);
+          xpose_n2v_tpp(in[nb * bn][nc], out[nb][nc]);
         }
       }
     }

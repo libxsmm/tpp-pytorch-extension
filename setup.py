@@ -180,8 +180,8 @@ setup(
                 xsmm_include,
                 "{}/src/csrc".format(cwd),
             ],
-            #library_dirs=[xsmm_lib],
-            #libraries=["xsmm"],
+            # library_dirs=[xsmm_lib],
+            # libraries=["xsmm"],
         )
     ],
     cmdclass={"build_ext": BuildExtension, "build_clib": BuildMakeLib},
