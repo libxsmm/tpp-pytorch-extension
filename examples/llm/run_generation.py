@@ -23,7 +23,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 try:
     import tpp_pytorch_extension as tpx
-    from tpp_pytorch_extension.llm.llm_commom import (
+    from tpp_pytorch_extension.llm.llm_common import (
         jit_trace_model,
         optimize_for_first_token,
     )
@@ -204,6 +204,10 @@ if args.use_tpp:
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
         OptimizeModelForLlama(model, dtype=amp_dtype, device=device)
+    elif model.config.architectures[0] == "LlamaForCausalLM":
+        from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
+
+        OptimizeModelForLlama(model, dtype=amp_dtype, device=device)
     else:
         print(type(model.config.architectures))
         print(model.config.architectures)
@@ -249,7 +253,7 @@ generate_kwargs = dict(
 if args.use_tpp:
     cpp_profile = True
     if args.jit:
-        model = tpx.llm.llm_common.jit_trace_model(
+        model = jit_trace_model(
             model,
             tokenizer,
             generate_kwargs["num_beams"],
@@ -257,13 +261,17 @@ if args.use_tpp:
             enable_profile=cpp_profile,
         )
     else:
-        model = tpx.llm.llm_common.optimize_for_first_token(
+        model = optimize_for_first_token(
             model, generate_kwargs["num_beams"], enable_profile=cpp_profile
         )
 
     # generate_kwargs["jit"] = True
 if args.token_latency:
-    generate_kwargs["token_latency"] = True
+    if args.use_tpp:
+        generate_kwargs["token_latency"] = True
+    else:
+        print("Warning: --token-latnecy is ignored when not using TPP (--use-tpp)")
+        args.token_latency = False
 # if args.use_tpp:
 #    generate_kwargs["TP_number"] = my_size
 
@@ -282,7 +290,11 @@ if tokenizer.pad_token == "":
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
-generate_kwargs["output_past_key_values"] = True
+output_past_key_values = False
+if args.use_tpp and output_past_key_values == True:
+    generate_kwargs["output_past_key_values"] = True
+else:
+    output_past_key_values = False
 
 
 def trace_handler(prof):
@@ -317,7 +329,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         output = model.generate(
             **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
         )
-        if generate_kwargs["output_past_key_values"] == True:
+        if output_past_key_values == True:
             output, pkv = output
         gen_ids = output[0] if args.token_latency else output
         gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
@@ -331,6 +343,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.profile:
             prof.step()
         print(gen_text, len(gen_ids), flush=True)
+        print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
             if args.token_latency:

@@ -139,8 +139,11 @@ auto layer_norm_fwd_tpp =
   }
 #else
   auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-  auto ogemm_loop =
-      ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
+  // auto ogemm_loop =
+  //    ThreadedLoop<3>({{0, Nc, Ncb, false}, {S1}, {Nk}}, loop_scheme);
+  auto ogemm_loop = ThreadedLoop<3>(
+      {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{S1}, LoopSpecs{Nk}},
+      loop_scheme);
   bool parallelized_on_nk =
       large_cache_opt ? false : true; // ogemm_loop.is_parallel(2);
   ogemm_loop(

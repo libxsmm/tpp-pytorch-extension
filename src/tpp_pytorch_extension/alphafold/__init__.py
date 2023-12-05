@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2022 Intel Corporation - All rights reserved.                 #
+# Copyright (c) 2023 Intel Corporation - All rights reserved.                 #
 #                                                                             #
 # For information on the license, see the LICENSE file.                       #
 # Further information: https://github.com/libxsmm/tpp-pytorch-extension/      #
@@ -9,3 +9,4 @@
 ###############################################################################
 
 from . import Alpha_Attention
+from . import Alpha_TriangleMultiplication

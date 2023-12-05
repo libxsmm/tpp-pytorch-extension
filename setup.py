@@ -24,13 +24,20 @@ cwd = os.path.dirname(os.path.realpath(__file__))
 use_parlooper = True
 
 libxsmm_root = os.path.join(cwd, "libxsmm")
-
 if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
 
 xsmm_makefile = os.path.join(libxsmm_root, "Makefile")
 xsmm_include = os.path.join(libxsmm_root, "include")
 xsmm_lib = os.path.join(libxsmm_root, "lib")
+
+parlooper_root = os.path.join(cwd, "parlooper")
+if "PARLOOPER_ROOT" in os.environ:
+    parlooper_root = os.getenv("PARLOOPER_ROOT")
+
+parlooper_makefile = os.path.join(parlooper_root, "Makefile")
+parlooper_include = os.path.join(parlooper_root, "include")
+parlooper_lib = os.path.join(parlooper_root, "lib")
 
 if not os.path.exists(xsmm_makefile):
     raise IOError(
@@ -74,11 +81,14 @@ class BuildMakeLib(Command):
             ("debug", "debug"),
             ("force", "force"),
         )
-
-        self.build_clib = self.build_temp + "/libxsmm/lib"
+        # When building multiple third party libraries, we have to put the created lbiraries all in one place
+        # (pointed to as self.build_clib) because only this path is added to the link line for extensions
+        self.final_common_libs_dir = "third_party_libs"  # at the level of build_temp
+        self.build_clib = self.build_temp + "/" + self.final_common_libs_dir
         self.libraries = self.distribution.libraries
 
     def run(self):
+        pathlib.Path(self.build_clib).mkdir(parents=True, exist_ok=True)
         if not self.libraries:
             return
         self.build_libraries(self.libraries)
@@ -97,14 +107,20 @@ class BuildMakeLib(Command):
 
     def build_libraries(self, libraries):
         for (lib_name, makefile, build_args) in libraries:
-            # build_dir = pathlib.Path('.'.join([self.build_temp, lib_name]))
-            build_dir = pathlib.Path(self.build_temp + "/libxsmm")
+            build_dir = pathlib.Path(self.build_temp + "/" + lib_name)
             build_dir.mkdir(parents=True, exist_ok=True)
+            check_call(["make", "-f", makefile] + build_args, cwd=str(build_dir))
+            # NOTE: neither can use a wildcard here nor mv (since for the second library directory will already exist)
+            # This copying/hard linking assumes that the libraries are putting libraries under their respective /lib subfolder
             check_call(
-                ["make", "-f", makefile, "lib/libxsmm.a"] + build_args,
-                cwd=str(build_dir),
+                ["cp", "-alf", lib_name + "/lib/.", self.final_common_libs_dir],
+                cwd=str(self.build_temp),
             )
-            check_call(["rm", "-f", "lib/libxsmm.so"], cwd=str(build_dir))
+            # remove dynamic libraries to force static linking
+            check_call(
+                ["rm", "-f", "libxsmm.so", "libparlooper.so"],
+                cwd=str(self.build_clib),
+            )
 
 
 sources = [
@@ -132,8 +148,8 @@ sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 # DLRM sources
 sources += glob.glob("src/csrc/dlrm/*.cpp")
 
-
 extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
+
 if platform.processor() != "aarch64":
     extra_compile_args.append("-march=native")
 
@@ -169,17 +185,27 @@ setup(
     # install_requires=["torch>=1.4.0"],
     scripts=["utils/run_dist.sh", "utils/run_dist_ht.sh"],
     libraries=[
-        ("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j", "STATIC=1"])
+        ("xsmm", xsmm_makefile, ["CC=gcc", "CXX=g++", "AVX=2", "-j", "STATIC=1"]),
+        (
+            "parlooper",
+            parlooper_makefile,
+            [
+                "CC=gcc",
+                "CXX=g++",
+                "AVX=2",
+                "-j",
+                "ROOTDIR = " + parlooper_root,
+                "LIBXSMM_ROOT=" + libxsmm_root,
+                "PARLOOPER_COMPILER=gcc",
+            ],
+        ),
     ],
     ext_modules=[
         CppExtension(
             "tpp_pytorch_extension._C",
             sources,
             extra_compile_args=extra_compile_args,
-            include_dirs=[
-                xsmm_include,
-                "{}/src/csrc".format(cwd),
-            ],
+            include_dirs=[xsmm_include, parlooper_include, "{}/src/csrc".format(cwd)],
             # library_dirs=[xsmm_lib],
             # libraries=["xsmm"],
         )
