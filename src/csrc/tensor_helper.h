@@ -12,6 +12,7 @@
 #define _TENSOR_HELPER_H_
 
 #include "utils.h"
+#include <numa.h>
 
 template <typename DType>
 int l_ullcompare(const void* a, const void* b) {
@@ -319,11 +320,11 @@ void create_compressed_from_blocked_weight_tensor(
     if (1.0 * (total_so_far + cur_size) <= 0.76 * nnz) {
       /* Allocate on numa node 0 */
       data_ptrs[l_i] =
-          (DType*)libxsmm_aligned_malloc(cur_size * sizeof(DType), 64);
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), 0);
     } else {
-      /* Allocate on numa node 1 */
+      /* Allocate on numa node 2 */
       data_ptrs[l_i] =
-          (DType*)libxsmm_aligned_malloc(cur_size * sizeof(DType), 64);
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), 2);
     }
     total_so_far += cur_size;
   }
