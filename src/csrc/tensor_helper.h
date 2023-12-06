@@ -317,14 +317,17 @@ void create_compressed_from_blocked_weight_tensor(
   long long total_so_far = 0;
   for (l_i = 0; l_i < Nb; l_i++) {
     long long cur_size = column_offsets[l_i];
+    int current_cpu = sched_getcpu();
+    int local_node = numa_node_of_cpu(current_cpu);
+    //printf("Local node is %d\n", local_node);
     if (1.0 * (total_so_far + cur_size) <= 0.76 * nnz) {
       /* Allocate on numa node 0 */
       data_ptrs[l_i] =
-          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), 0);
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node);
     } else {
       /* Allocate on numa node 2 */
       data_ptrs[l_i] =
-          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), 2);
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node+2);
     }
     total_so_far += cur_size;
   }
