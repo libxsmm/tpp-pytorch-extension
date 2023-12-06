@@ -785,7 +785,7 @@ inline void fc_mul_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -802,7 +802,7 @@ inline void fc_mul_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -1011,7 +1011,7 @@ inline void fc_add_scale_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -1028,7 +1028,7 @@ inline void fc_add_scale_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -1426,7 +1426,7 @@ inline void fc_add2_scale_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -1444,7 +1444,7 @@ inline void fc_add2_scale_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -1811,7 +1811,7 @@ inline void fc_gelu_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -1828,7 +1828,7 @@ inline void fc_gelu_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -2031,7 +2031,7 @@ inline void fc_silu_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -2048,7 +2048,7 @@ inline void fc_silu_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -2481,7 +2481,7 @@ inline void qkv_gemm_compressed(
             }
             gemm_tpp(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 true);
@@ -2495,7 +2495,7 @@ inline void qkv_gemm_compressed(
             }
             gemm_tpp_rem(
                 in[s1][nc],
-                (T*)t_wt.data + t_wt.column_offsets[nk],
+                *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
                 (char*)t_wt.bitmap + nk * C * (Hk / 8),
                 false);
@@ -3313,6 +3313,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
       libxsmm_free(t_Wo_bcsc.colptr);
       libxsmm_free(t_Wo_bcsc.Nblocks_offsets);
     } else if (sparse_type == 2) {
+#if 0
       libxsmm_free(t_Wo_compressed.data);
       libxsmm_free(t_Wo_compressed.column_offsets);
       libxsmm_free(t_Wo_compressed.bitmap);
@@ -3331,6 +3332,7 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
       libxsmm_free(t_Wp_compressed.data);
       libxsmm_free(t_Wp_compressed.column_offsets);
       libxsmm_free(t_Wp_compressed.bitmap);
+#endif
     } else {
     }
   }
@@ -3746,6 +3748,7 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
 
   ~LlamaDecoderLayer() {
     if (sparse_type == 2) {
+#if 0
       libxsmm_free(t_Wg_compressed.data);
       libxsmm_free(t_Wg_compressed.column_offsets);
       libxsmm_free(t_Wg_compressed.bitmap);
@@ -3767,6 +3770,7 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
       libxsmm_free(t_Wp_compressed.data);
       libxsmm_free(t_Wp_compressed.column_offsets);
       libxsmm_free(t_Wp_compressed.bitmap);
+#endif
     } else {
     }
   }

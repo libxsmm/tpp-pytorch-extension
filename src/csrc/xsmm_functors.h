@@ -53,6 +53,7 @@ typedef struct tensor_bcsc_t {
 
 typedef struct tensor_compressed_t {
   void* data;
+  void* data_ptrs;
   char* bitmap;
   long long* column_offsets;
   long long n_cols;
