@@ -75,8 +75,8 @@ void reset_debug_timers() {
 
 void print_debug_timers(int tid, bool detailed) {
   int my_rank = guess_mpi_rank();
-  if (my_rank != 0)
-    return;
+  //if (my_rank != 0)
+  //  return;
   int max_threads = omp_get_max_threads();
   constexpr int maxlen = 10000;
   SafePrint<maxlen> printf;

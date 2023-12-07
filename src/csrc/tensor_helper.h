@@ -319,7 +319,9 @@ void create_compressed_from_blocked_weight_tensor(
     long long cur_size = column_offsets[l_i];
     int current_cpu = sched_getcpu();
     int local_node = numa_node_of_cpu(current_cpu);
+    int cxl_offset = env2int("CXL_OFFSET", 2);
     //printf("Local node is %d\n", local_node);
+#if 1
     if (1.0 * (total_so_far + cur_size) <= 0.76 * nnz) {
       /* Allocate on numa node 0 */
       data_ptrs[l_i] =
@@ -327,8 +329,31 @@ void create_compressed_from_blocked_weight_tensor(
     } else {
       /* Allocate on numa node 2 */
       data_ptrs[l_i] =
-          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node+2);
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node+cxl_offset);
     }
+#else
+    float tmp_num;
+    int block_on_cxl = 0;
+    if (l_i % 4 == 0) {
+      tmp_num = (float)libxsmm_rng_f64();
+      if (tmp_num < 0.25) {
+        block_on_cxl = 0;
+      } else if (tmp_num < 0.5) {
+        block_on_cxl = 1;
+      } else if (tmp_num < 0.75) {
+        block_on_cxl = 2;
+      } else {
+        block_on_cxl = 3;
+      }
+    }
+    if (l_i % 4 == block_on_cxl) {
+      data_ptrs[l_i] =
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node+cxl_offset);
+    } else {
+      data_ptrs[l_i] =
+          (DType*)numa_alloc_onnode(cur_size * sizeof(DType), local_node);  
+    }
+#endif
     total_so_far += cur_size;
   }
 
