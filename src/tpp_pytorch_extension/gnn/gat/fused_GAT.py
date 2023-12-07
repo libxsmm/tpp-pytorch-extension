@@ -446,7 +446,7 @@ class GATConvOpt(BlockedModule):
         self.bc = self._in_dst_feats
         self.bk = num_heads * self._out_feats
         self.res = False
-        self.align = 32
+        self.align = 64
         self.fdp = feat_drop
         self.adp = attn_drop
         print("Use opt_mlp code---------------")
