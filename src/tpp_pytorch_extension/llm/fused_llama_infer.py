@@ -193,7 +193,9 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
             )
 
         if isinstance(m, torch.nn.Linear):
-            FixLinear(m, bk, bc, layer_dtype)
+            bk1 = bk
+            if m.weight.shape[0] < 2048: bk1 = 8
+            FixLinear(m, bk1, bc, layer_dtype)
     block(self)
 
     if not hasattr(self, "cpp_block"):
