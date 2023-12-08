@@ -787,7 +787,7 @@ inline void fc_mul_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
@@ -804,7 +804,7 @@ inline void fc_mul_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -1013,7 +1013,7 @@ inline void fc_add_scale_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               sadd_tpp(in1[s1][nk], out[s1][nk], scale);
@@ -1030,7 +1030,7 @@ inline void fc_add_scale_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -1428,7 +1428,7 @@ inline void fc_add2_scale_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
@@ -1446,7 +1446,7 @@ inline void fc_add2_scale_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -1813,7 +1813,7 @@ inline void fc_gelu_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
@@ -1830,7 +1830,7 @@ inline void fc_gelu_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -2033,7 +2033,7 @@ inline void fc_silu_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk *((C * Hk) / 8),
                 true);
             if (!(nc + Ncb < Nc)) { // last nc iter
               silu_fwd_tpp(out[s1][nk], out[s1][nk]);
@@ -2050,7 +2050,7 @@ inline void fc_silu_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
             if (!(nc + Ncb < Nc)) { // last nc iter
@@ -2483,7 +2483,7 @@ inline void qkv_gemm_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 true);
           } else {
             if (nc == 0) {
@@ -2497,7 +2497,7 @@ inline void qkv_gemm_compressed(
                 in[s1][nc],
                 *((T**)t_wt.data_ptrs + nk),
                 out[s1][nk],
-                (char*)t_wt.bitmap + nk * C * (Hk / 8),
+                (char*)t_wt.bitmap + nk * ((C * Hk) / 8),
                 false);
             gemm_tpp.config();
           }
