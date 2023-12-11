@@ -2514,6 +2514,234 @@ inline void qkv_gemm_compressed(
 }
 
 template <typename T, typename Tout = T>
+inline void qkv_unified_gemm_compressed(
+    at::Tensor t_in,
+    const tensor_compressed_t& t_wt_q,
+    const tensor_compressed_t& t_wt_k,
+    const tensor_compressed_t& t_wt_v,
+    at::Tensor t_bias_q,
+    at::Tensor t_bias_k,
+    at::Tensor t_bias_v,
+    at::Tensor t_out_q,
+    at::Tensor t_out_k,
+    at::Tensor t_out_v) {
+  RECORD_SCOPE(qkv_gemm_compressed, {t_in});
+  auto in_sizes = t_in.sizes();
+  auto out_q_sizes = t_out_q.sizes();
+  auto out_k_sizes = t_out_k.sizes();
+  auto out_v_sizes = t_out_v.sizes();
+  auto BS = out_q_sizes[0] * out_q_sizes[1];
+#if 0
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+#endif
+  auto C = in_sizes[2];
+  auto Ncq = t_wt_q.sizes[1];
+  auto Nck = t_wt_k.sizes[1];
+  auto Ncv = t_wt_v.sizes[1];
+
+  auto Hcq = C / Ncq;
+  auto Hck = C / Nck;
+  auto Hcv = C / Ncv;
+
+  auto Nkq = t_wt_q.sizes[0];
+  auto Hkq = t_wt_q.sizes[3];
+  auto Kq = Nkq * Hkq;
+
+  auto Nkk = t_wt_k.sizes[0];
+  auto Hkk = t_wt_k.sizes[3];
+  auto Kk = Nkk * Hkk;
+
+  auto Nkv = t_wt_v.sizes[0];
+  auto Hkv = t_wt_v.sizes[3];
+  auto Kv = Nkv * Hkv;
+
+  auto in = GetVLAPtr<T>(t_in, {Ncq, Hcq});
+  auto bias_q = GetVLAPtr<T>(t_bias_q, {Hkq});
+  auto bias_k = GetVLAPtr<T>(t_bias_k, {Hkk});
+  auto bias_v = GetVLAPtr<T>(t_bias_v, {Hkv});
+
+  auto out_q = GetVLAPtr<Tout>(t_out_q, {Nkq, Hkq});
+  auto out_k = GetVLAPtr<Tout>(t_out_k, {Nkk, Hkk});
+  auto out_v = GetVLAPtr<Tout>(t_out_v, {Nkv, Hkv});
+
+  auto Ncb = Ncq;
+  auto BSb = 64L;
+  auto rem = BS % BSb;
+
+  bool with_bias_q = (t_bias_q.numel() > 0);
+  bool with_bias_k = (t_bias_k.numel() > 0);
+  bool with_bias_v = (t_bias_v.numel() > 0);
+
+  auto copy_bias_tpp_q = SCOPEIT(CpyBiasTPP<T>(BSb, Hkq, Kq), BIAS);
+  auto copy_bias_tpp_rem_q = SCOPEIT(CpyBiasTPP<T>(rem, Hkq, Kq), BIAS);
+  auto zero_tpp_q = SCOPEIT(SetZeroTPP<Tout>(BSb, Hkq, Kq), EW_ZERO);
+  auto zero_tpp_rem_q = SCOPEIT(SetZeroTPP<Tout>(rem, Hkq, Kq), EW_ZERO);
+
+  auto copy_bias_tpp_k = SCOPEIT(CpyBiasTPP<T>(BSb, Hkk, Kk), BIAS);
+  auto copy_bias_tpp_rem_k = SCOPEIT(CpyBiasTPP<T>(rem, Hkk, Kk), BIAS);
+  auto zero_tpp_k = SCOPEIT(SetZeroTPP<Tout>(BSb, Hkk, Kk), EW_ZERO);
+  auto zero_tpp_rem_k = SCOPEIT(SetZeroTPP<Tout>(rem, Hkk, Kk), EW_ZERO);
+
+  auto copy_bias_tpp_v = SCOPEIT(CpyBiasTPP<T>(BSb, Hkv, Kv), BIAS);
+  auto copy_bias_tpp_rem_v = SCOPEIT(CpyBiasTPP<T>(rem, Hkv, Kv), BIAS);
+  auto zero_tpp_v = SCOPEIT(SetZeroTPP<Tout>(BSb, Hkv, Kv), EW_ZERO);
+  auto zero_tpp_rem_v = SCOPEIT(SetZeroTPP<Tout>(rem, Hkv, Kv), EW_ZERO);
+
+  auto gemm_tpp_q =
+      SCOPEITGEMM((GemmTPP<T, Tout>(BSb, Hkq, C, C, Hkq, Kq, 1.0, 0, 1)));
+  auto gemm_tpp_rem_q =
+      SCOPEITGEMM((GemmTPP<T, Tout>(rem, Hkq, C, C, Hkq, Kq, 1.0, 0, 1)));
+
+  auto gemm_tpp_k =
+      SCOPEITGEMM((GemmTPP<T, Tout>(BSb, Hkk, C, C, Hkk, Kk, 1.0, 0, 1)));
+  auto gemm_tpp_rem_k =
+      SCOPEITGEMM((GemmTPP<T, Tout>(rem, Hkk, C, C, Hkk, Kk, 1.0, 0, 1)));
+
+  auto gemm_tpp_v =
+      SCOPEITGEMM((GemmTPP<T, Tout>(BSb, Hkv, C, C, Hkv, Kv, 1.0, 0, 1)));
+  auto gemm_tpp_rem_v =
+      SCOPEITGEMM((GemmTPP<T, Tout>(rem, Hkv, C, C, Hkv, Kv, 1.0, 0, 1)));
+
+  auto N_least = LIBXSMM_MIN(LIBXSMM_MIN(Nkq, Nkv), Nkk);
+
+  {
+    RECORD_OMP_TIME();
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto gemm_loop = ThreadedLoop<3>(
+        {LoopSpecs{0, Ncq, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{N_least}},
+        loop_scheme);
+    gemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], __nk = ind[2];
+          int nk = 0;
+          int _nk = 0;
+          bool is_rem = (s1 + BSb > BS);
+
+          // q gemm
+          auto q_trips = Nkq/N_least;
+          for (_nk = 0; _nk < q_trips; _nk++) {
+            nk = __nk * q_trips + _nk;
+            if (!is_rem) {
+              if (nc == 0) {
+                if (with_bias_q) {
+                  copy_bias_tpp_q(bias_q[nk], out_q[s1][nk]);
+                } else {
+                  zero_tpp_q(out_q[s1][nk]);
+                }
+              }
+              gemm_tpp_q(
+                  in[s1][nc],
+                  *((T**)t_wt_q.data_ptrs + nk),
+                  out_q[s1][nk],
+                  (char*)t_wt_q.bitmap + nk * ((C * Hkq) / 8),
+                  true);
+            } else {
+              if (nc == 0) {
+                if (with_bias_q) {
+                  copy_bias_tpp_rem_q(bias_q[nk], out_q[s1][nk]);
+                } else {
+                  zero_tpp_rem_q(out_q[s1][nk]);
+                }
+              }
+              gemm_tpp_rem_q(
+                  in[s1][nc],
+                  *((T**)t_wt_q.data_ptrs + nk),
+                  out_q[s1][nk],
+                  (char*)t_wt_q.bitmap + nk * ((C * Hkq) / 8),
+                  false);
+              gemm_tpp_q.config();
+            }
+          }
+
+          // k gemm
+          auto k_trips = Nkk/N_least;
+          for (_nk = 0; _nk < k_trips; _nk++) {
+            nk = __nk * k_trips + _nk;
+            if (!is_rem) {
+              if (nc == 0) {
+                if (with_bias_k) {
+                  copy_bias_tpp_k(bias_k[nk], out_k[s1][nk]);
+                } else {
+                  zero_tpp_k(out_k[s1][nk]);
+                }
+              }
+              gemm_tpp_k(
+                  in[s1][nc],
+                  *((T**)t_wt_k.data_ptrs + nk),
+                  out_k[s1][nk],
+                  (char*)t_wt_k.bitmap + nk * ((C * Hkk) / 8),
+                  true);
+            } else {
+              if (nc == 0) {
+                if (with_bias_k) {
+                  copy_bias_tpp_rem_k(bias_k[nk], out_k[s1][nk]);
+                } else {
+                  zero_tpp_rem_k(out_k[s1][nk]);
+                }
+              }
+              gemm_tpp_rem_k(
+                  in[s1][nc],
+                  *((T**)t_wt_k.data_ptrs + nk),
+                  out_k[s1][nk],
+                  (char*)t_wt_k.bitmap + nk * ((C * Hkk) / 8),
+                  false);
+              gemm_tpp_k.config();
+            }
+          }
+     
+
+          // v gemm
+          auto v_trips = Nkv/N_least;
+          for (_nk = 0; _nk < v_trips; _nk++) {
+            nk = __nk * v_trips + _nk;
+            if (!is_rem) {
+              if (nc == 0) {
+                if (with_bias_v) {
+                  copy_bias_tpp_v(bias_v[nk], out_v[s1][nk]);
+                } else {
+                  zero_tpp_v(out_v[s1][nk]);
+                }
+              }
+              gemm_tpp_v(
+                  in[s1][nc],
+                  *((T**)t_wt_v.data_ptrs + nk),
+                  out_v[s1][nk],
+                  (char*)t_wt_v.bitmap + nk * ((C * Hkv) / 8),
+                  true);
+            } else {
+              if (nc == 0) {
+                if (with_bias_v) {
+                  copy_bias_tpp_rem_v(bias_v[nk], out_v[s1][nk]);
+                } else {
+                  zero_tpp_rem_v(out_v[s1][nk]);
+                }
+              }
+              gemm_tpp_rem_v(
+                  in[s1][nc],
+                  *((T**)t_wt_v.data_ptrs + nk),
+                  out_v[s1][nk],
+                  (char*)t_wt_v.bitmap + nk * ((C * Hkv) / 8),
+                  false);
+              gemm_tpp_v.config();
+            }
+          }
+
+        },
+        [&]() {
+          TimerStart();
+          gemm_tpp_q.config();
+        },
+        [&]() {
+          gemm_tpp_q.release();
+          TimerEnd();
+        });
+  }
+}
+
+template <typename T, typename Tout = T>
 inline at::Tensor qkv_gemm(
     at::Tensor t_in,
     at::Tensor t_wt,
@@ -2536,6 +2764,29 @@ inline at::Tensor qkv_gemm_compressed(
   auto t_out = t_in.new_empty(sizes);
   qkv_gemm_compressed<T, Tout>(t_in, t_wt, t_bias, t_out);
   return t_out;
+}
+
+template <typename T, typename Tout = T>
+inline void qkv_unified_gemm_compressed(
+    at::Tensor t_in,
+    tensor_compressed_t& t_wt_q,
+    tensor_compressed_t& t_wt_k,
+    tensor_compressed_t& t_wt_v,
+    at::Tensor t_bias_q,
+    at::Tensor t_bias_k,
+    at::Tensor t_bias_v,
+    at::Tensor *t_outs) {
+  auto sizes = t_in.sizes().vec();
+  sizes[2] = t_wt_q.sizes[0] * t_wt_q.sizes[3];
+  auto t_out_q = t_in.new_empty(sizes);
+  sizes[2] = t_wt_k.sizes[0] * t_wt_k.sizes[3];
+  auto t_out_k = t_in.new_empty(sizes);
+  sizes[2] = t_wt_v.sizes[0] * t_wt_v.sizes[3];
+  auto t_out_v = t_in.new_empty(sizes);
+  qkv_unified_gemm_compressed<T, Tout>(t_in, t_wt_q, t_wt_k, t_wt_v, t_bias_q, t_bias_k, t_bias_v, t_out_q, t_out_k, t_out_v);
+  t_outs[0] = t_out_q;
+  t_outs[1] = t_out_k;
+  t_outs[2] = t_out_v;
 }
 
 template <typename T, typename Tout = T>
@@ -3848,11 +4099,21 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
       auto t_null = t_HS.new_empty({0});
       auto t_res = t_HS;
       t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
+#if 0
       auto t_QL = qkv_gemm_compressed<T>(t_HS, t_Wq_compressed, t_null);
       apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
       auto t_KL = qkv_gemm_compressed<T>(t_HS, t_Wk_compressed, t_null);
       apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
       auto t_VL = qkv_gemm_compressed<T>(t_HS, t_Wv_compressed, t_null);
+#else
+      at::Tensor t_qkv_outs[3];
+      qkv_unified_gemm_compressed<T>(t_HS, t_Wq_compressed, t_Wk_compressed, t_Wv_compressed, t_null, t_null, t_null, t_qkv_outs);
+      auto t_QL = t_qkv_outs[0];
+      auto t_KL = t_qkv_outs[1];
+      auto t_VL = t_qkv_outs[2];
+      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H); 
+#endif
       auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
       auto t_CL = outputs[0];
       auto t_SO = fc_add_scale_compressed<T>(
