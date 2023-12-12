@@ -311,7 +311,7 @@ auto trans_tpp = SCOPEIT(
       int BF;
 
 #if 1
-      upd_n_weight_copies = K * C < 16384 ? threads : threads/2;
+      upd_n_weight_copies = K * C < 16384 ? threads : threads / 2;
       BF = 256;
 #else
       BF = atoi(getenv("BF"));

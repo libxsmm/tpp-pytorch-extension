@@ -677,11 +677,7 @@ class GATConvOpt(BlockedModule):
 
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
                 h_src = feat
-                inputs_src = [
-                    h_src,
-                    self.fc_src.weight,
-                    self.attn_l
-                ]
+                inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.bias is not None:
