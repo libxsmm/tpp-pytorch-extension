@@ -1604,7 +1604,7 @@ inline at::Tensor attn(
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
   long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  const long Skb = (!inline_trans ? 512 : SK_BLOCK_SIZE);
+  const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
   long krem = Sk % Skb;
   int pad = Sk_pad - Sk;
 

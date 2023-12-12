@@ -366,10 +366,10 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         if self.bias is not None:
             self.bias.block()
 
-    def parallelize(self, dim, rank, size):
+    def parallelize(self, dim, rank, size, block_size=1):
         if size <= 1:
             return
-        ShardLinear(self, dim, rank, size)
+        ShardLinear(self, dim, rank, size, block_size)
         self.model_parallel = True
         self.parallel_dim = dim
         self.parallel_rank = rank
@@ -409,7 +409,12 @@ class BlockedLayerNorm(BlockedModule, torch.nn.LayerNorm):
 
 
 def FixLinear(
-    self, bk=None, bc=None, layer_dtype=global_layer_dtype, parallel_dim=None
+    self,
+    bk=None,
+    bc=None,
+    layer_dtype=global_layer_dtype,
+    parallel_dim=None,
+    block_size=1,
 ):
     if not isinstance(self, torch.nn.Linear):
         return
@@ -418,7 +423,7 @@ def FixLinear(
     self.__class__ = BlockedLinear
     self.model_parallel = False
     if parallel_dim is not None:
-        self.parallelize(parallel_dim, get_rank(), get_size())
+        self.parallelize(parallel_dim, get_rank(), get_size(), block_size=block_size)
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
