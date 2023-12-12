@@ -81,7 +81,7 @@ void print_debug_timers(int tid, bool detailed) {
   // printf("%-20s", "####");
   printf("### ##: %-11s: ", "#KEY#");
   for (int t = 0; t < LAST_TIMER; t++) {
-    if (detailed)
+    if (detailed || t == 0)
       printf(" %7s", DebugTimerName(t));
   }
   printf(
@@ -102,7 +102,7 @@ void print_debug_timers(int tid, bool detailed) {
         double total = 0.0;
         printf("TID %2d: %-11s: ", i, scope.name.c_str());
         for (int t = 0; t < LAST_TIMER; t++) {
-          if (detailed)
+          if (detailed || t == 0)
             printf(" %7.1f", scope.detailed_timers[i][t] * 1e3);
           total += scope.detailed_timers[i][t];
         }
