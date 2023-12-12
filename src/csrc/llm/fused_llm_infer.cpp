@@ -2082,6 +2082,155 @@ inline at::Tensor fc_silu_compressed(
 }
 
 template <typename T>
+inline void fc_silu_mul_fused_compressed(
+    at::Tensor t_in,
+    const tensor_compressed_t& t_wt_g,
+    const tensor_compressed_t& t_wt_u,
+    at::Tensor t_bias_g,
+    at::Tensor t_bias_u,
+    at::Tensor t_out_g,
+    at::Tensor t_out_u) {
+  RECORD_SCOPE(i_gemm_compressed, {t_in});
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+#if 0
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+#endif
+  auto C = in_sizes[2];
+  auto Nc = t_wt_g.sizes[1];
+  auto Hc = C / Nc;
+  auto Nk = t_wt_g.sizes[0];
+  auto Hk = t_wt_g.sizes[3];
+  auto K = Nk * Hk;
+
+  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+  auto bias_g = GetVLAPtr<T>(t_bias_g, {Hk});
+  auto out_g = GetVLAPtr<T>(t_out_g, {Nk, Hk});
+  auto bias_u = GetVLAPtr<T>(t_bias_u, {Hk});
+  auto out_u = GetVLAPtr<T>(t_out_u, {Nk, Hk});
+
+  auto Ncb = Nc;
+  auto BSb = 64L;
+  auto rem = BS % 64;
+
+  bool with_bias_g = (t_bias_g.numel() > 0);
+  bool with_bias_u = (t_bias_u.numel() > 0);
+  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
+  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
+
+  auto gemm_tpp = SCOPEITGEMM((GemmTPP<T, T>(BSb, Hk, C, C, Hk, K, 1.0, 0, 1)));
+  auto gemm_tpp_rem =
+      SCOPEITGEMM((GemmTPP<T, T>(rem, Hk, C, C, Hk, K, 1.0, 0, 1)));
+
+  auto silu_fwd_tpp = SCOPEIT(SiLUFwdTPP<T>(BSb, Hk, K, K), ACT);
+  auto silu_fwd_tpp_rem = SCOPEIT(SiLUFwdTPP<T>(rem, Hk, K, K), ACT);
+
+  auto mul_tpp = SCOPEIT((MulTPP<T, T>(BSb, Hk, K, K)), EW_MUL);
+  auto mul_tpp_rem = SCOPEIT((MulTPP<T, T>(rem, Hk, K, K)), EW_MUL);
+
+  {
+    RECORD_OMP_TIME();
+    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
+    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    auto igemm_loop = ThreadedLoop<3>(
+        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{Nk}},
+        loop_scheme);
+    igemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          bool is_rem = (s1 + BSb > BS);
+          if (!is_rem) {
+            if (nc == 0) {
+              if (with_bias_g) {
+                copy_bias_tpp(bias_g[nk], out_g[s1][nk]);
+              } else {
+                zero_tpp(out_g[s1][nk]);
+              }
+              if (with_bias_u) {
+                copy_bias_tpp(bias_u[nk], out_u[s1][nk]);
+              } else {
+                zero_tpp(out_u[s1][nk]);
+              }        
+            }
+            gemm_tpp(
+                in[s1][nc],
+                *((T**)t_wt_g.data_ptrs + nk),
+                out_g[s1][nk],
+                (char*)t_wt_g.bitmap + nk *((C * Hk) / 8),
+                true);
+            gemm_tpp(
+                in[s1][nc],
+                *((T**)t_wt_u.data_ptrs + nk),
+                out_u[s1][nk],
+                (char*)t_wt_u.bitmap + nk *((C * Hk) / 8),
+                true);
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              silu_fwd_tpp(out_g[s1][nk], out_g[s1][nk]);
+              mul_tpp(out_g[s1][nk], out_u[s1][nk], out_u[s1][nk]);            
+            }
+          } else {
+            if (nc == 0) {
+              if (with_bias_g) {
+                copy_bias_tpp_rem(bias_g[nk], out_g[s1][nk]);
+              } else {
+                zero_tpp_rem(out_g[s1][nk]);
+              }
+              if (with_bias_u) {
+                copy_bias_tpp_rem(bias_u[nk], out_u[s1][nk]);
+              } else {
+                zero_tpp_rem(out_u[s1][nk]);
+              }         
+            }
+            gemm_tpp_rem(
+                in[s1][nc],
+                *((T**)t_wt_g.data_ptrs + nk),
+                out_g[s1][nk],
+                (char*)t_wt_g.bitmap + nk * ((C * Hk) / 8),
+                false);
+            gemm_tpp_rem(
+                in[s1][nc],
+                *((T**)t_wt_u.data_ptrs + nk),
+                out_u[s1][nk],
+                (char*)t_wt_u.bitmap + nk * ((C * Hk) / 8),
+                false);
+            gemm_tpp.config();
+            if (!(nc + Ncb < Nc)) { // last nc iter
+              silu_fwd_tpp_rem(out_g[s1][nk], out_g[s1][nk]);
+              mul_tpp_rem(out_g[s1][nk], out_u[s1][nk], out_u[s1][nk]);             
+            }
+          }
+        },
+        [&]() {
+          TimerStart();
+          gemm_tpp.config();
+        },
+        [&]() {
+          gemm_tpp.release();
+          TimerEnd();
+        });
+  }
+}
+
+template <typename T>
+inline at::Tensor fc_silu_mul_fused_compressed(
+    at::Tensor t_in,
+    tensor_compressed_t& t_wt_g,
+    tensor_compressed_t& t_wt_u,
+    at::Tensor t_bias_g,
+    at::Tensor t_bias_u ) {
+  auto sizes = t_in.sizes().vec();
+  sizes[2] = t_wt_g.sizes[0] * t_wt_g.sizes[3];
+  auto t_out_g = t_in.new_empty(sizes);
+  auto t_out_u = t_in.new_empty(sizes);
+  fc_silu_mul_fused_compressed<T>(t_in, t_wt_g, t_wt_u, t_bias_g, t_bias_u, t_out_g, t_out_u);
+  return t_out_u;
+}
+
+template <typename T>
 inline void fc_relu(
     at::Tensor t_in,
     at::Tensor t_wt,
@@ -4123,8 +4272,12 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
       }
       t_res = t_SO;
       t_HS = llama_rms_norm<T, LT>(t_SO, t_Gpa, eps);
+#if 0
       auto t_I = fc_silu_compressed<T>(t_HS, t_Wg_compressed, t_null);
       t_I = fc_mul_compressed<T>(t_HS, t_I, t_Wu_compressed, t_null);
+#else
+      auto t_I = fc_silu_mul_fused_compressed<T>(t_HS, t_Wg_compressed, t_Wu_compressed, t_null, t_null);
+#endif
       auto t_Out = fc_add_scale_compressed<T>(
           t_I, t_res, t_Wd_compressed, t_null, scale);
       if (my_size > 1) {
