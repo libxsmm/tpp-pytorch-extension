@@ -340,11 +340,17 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.profile:
             prof.step()
         print(gen_text, len(gen_ids), flush=True)
-        print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
+        if i < num_warmup or not args.token_latency:
+            print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
             if args.token_latency:
                 total_list.append(output[1])
+                first = output[1][0]
+                rest = output[1][1:]
+                sum_rest = sum(rest)
+                print("Iteration: %d, Time: %.6f sec  first: %.3f s  sum next: %.3f s  avg next: %.4f s" % (i, toc - tic, first, sum_rest, sum_rest/len(rest)), flush=True)
+
 
 print("\n", "-" * 10, "Summary:", "-" * 10)
 latency = total_time / (num_iter - num_warmup)
@@ -360,6 +366,6 @@ if args.token_latency:
     p90_latency = average_2n[int(len(average_2n) * 0.9)]
     p99_latency = average_2n[int(len(average_2n) * 0.99)]
     print("First token average latency: %.3f sec." % first_latency)
-    print("Average 2... latency: %.3f sec." % average_2n_latency)
-    print("P90 2... latency: %.3f sec." % p90_latency)
-    print("P99 2... latency: %.3f sec." % p99_latency)
+    print("Average 2... latency: %.4f sec." % average_2n_latency)
+    print("P90 2... latency: %.4f sec." % p90_latency)
+    print("P99 2... latency: %.4f sec." % p99_latency)
