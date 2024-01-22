@@ -73,7 +73,7 @@ conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
 if [ ${ARCH} == "x86_64" ] ; then
   # for development (code formatting)
   conda install -y black=22.6.0 clang-format=5.0.1 -c sarcasm -c conda-forge
-  #conda install -y intel-openmp -c intel
+  conda install -y intel-openmp -c intel
 fi
 
 # ENV_FN_NAME=env_${ENV_NAME}.sh

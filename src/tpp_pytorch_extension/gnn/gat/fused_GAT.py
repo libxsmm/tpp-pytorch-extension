@@ -61,6 +61,51 @@ class DummyLinear(BlockedModule):
         raise NotImplemented
         return input
 
+class LinearOut(BlockedModule):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOut, self).__init__()
+        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = BlockedParameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+        self.bk = out_features
+        self.bc = 64
+        self.weight.set_blocking_param(
+            (
+                [self.bk, self.bc],
+                [0, 2, 3, 1],
+            )
+        )
+
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            nn.init.constant_(self.bias, 0)
+
+    def maybe_block_params(self):
+        self.weight.block()
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
+
+class LinearOutBF16(LinearOut):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOutBF16, self).__init__(in_features, out_features)
+        self.weight.set_blocking_param(
+            (
+                [self.bk, [self.bc // 2, 2]],
+                [0, 2, 3, 1, 4],
+                torch.bfloat16,
+            )
+        )
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
 
 class GATMLPAttentionFunction(torch.autograd.Function):
     @staticmethod
@@ -449,7 +494,6 @@ class GATConvOpt(BlockedModule):
         self.align = 64
         self.fdp = feat_drop
         self.adp = attn_drop
-        print("Use opt_mlp code---------------")
         for cbf in [50, 32, 16]:
             if self._in_dst_feats % cbf == 0:
                 self.bc = cbf
@@ -645,7 +689,7 @@ class GATConvOpt(BlockedModule):
 
                 el, feat_src_ = GATMLPAttentionFunction.apply(
                     align,
-                    self.fuse_dst_bias or self.fuse_bias,
+                    self.fuse_src_bias or self.fuse_bias,
                     *inputs_src,
                 )
                 feat_src = feat_src_.view(
