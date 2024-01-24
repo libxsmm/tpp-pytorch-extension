@@ -378,10 +378,13 @@ class FusedReLUDrop(nn.Module):
         output = FusedReLUDropFn.apply(self.p, input, self.training)
         return output
 
+
 class FusedLeakyReLUDropFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, alpha, p, inp, training):
-        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(alpha, p, inp, training)
+        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(
+            alpha, p, inp, training
+        )
         if training:
             ctx.save_for_backward(inp, rmask, dpmask)
             ctx.alpha = alpha
@@ -396,12 +399,15 @@ class FusedLeakyReLUDropFn(torch.autograd.Function):
         grad_inp = fused_gat_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
         return (None, None, grad_inp, None)
 
+
 class FusedLeakyReLUDrop(nn.Module):
     __constants__ = ["alpha", "p", "inplace"]
     p: float
     inplace: bool
 
-    def __init__(self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False) -> None:
+    def __init__(
+        self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False
+    ) -> None:
         super(FusedLeakyReLUDrop, self).__init__()
         self.inplace = False  # inplace
         if p < 0 or p > 1:
@@ -826,7 +832,7 @@ class GATConvOpt(BlockedModule):
                 rst = self.act_drop(rst)
             elif self.activation is not None:
                 rst = self.activation(rst)
-                #rst = self.feat_drop(rst)
+                # rst = self.feat_drop(rst)
 
             if get_attention:
                 return rst, graph.edata["a"]

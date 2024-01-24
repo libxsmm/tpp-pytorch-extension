@@ -295,7 +295,11 @@ at::Tensor relu_drop_bwd(float p, std::vector<at::Tensor> inputs) {
 
 // ######################################## Fused Dropout with LeakyReLU
 // ################################################
-std::vector<at::Tensor> leaky_relu_drop_fwd(float alpha, float p, at::Tensor inp, bool training) {
+std::vector<at::Tensor> leaky_relu_drop_fwd(
+    float alpha,
+    float p,
+    at::Tensor inp,
+    bool training) {
   GlobalPass _gp(FWD);
   if (inp.dtype() == at::kFloat) {
     typedef float T;
@@ -306,7 +310,10 @@ std::vector<at::Tensor> leaky_relu_drop_fwd(float alpha, float p, at::Tensor inp
   }
 }
 
-at::Tensor leaky_relu_drop_bwd(float alpha, float p, std::vector<at::Tensor> inputs) {
+at::Tensor leaky_relu_drop_bwd(
+    float alpha,
+    float p,
+    std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
@@ -369,6 +376,12 @@ REGISTER_SUBMODULE(_fused_gat, m) {
   m.def("add_bias_bwd", &add_bias_bwd, "Tpp Optimized GradBias BWD");
   m.def("relu_drop_fwd", &relu_drop_fwd, "Fused ReLU + Dropout FWD");
   m.def("relu_drop_bwd", &relu_drop_bwd, "Fused Relu + Dropout BWD");
-  m.def("leaky_relu_drop_fwd", &leaky_relu_drop_fwd, "Fused Leaky ReLU + Dropout FWD");
-  m.def("leaky_relu_drop_bwd", &leaky_relu_drop_bwd, "Fused Leaky Relu + Dropout BWD");
+  m.def(
+      "leaky_relu_drop_fwd",
+      &leaky_relu_drop_fwd,
+      "Fused Leaky ReLU + Dropout FWD");
+  m.def(
+      "leaky_relu_drop_bwd",
+      &leaky_relu_drop_bwd,
+      "Fused Leaky Relu + Dropout BWD");
 }

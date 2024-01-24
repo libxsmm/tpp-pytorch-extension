@@ -37,14 +37,16 @@ auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(BS, p), DROPOUT);
     long n;
 #pragma omp parallel for lastprivate(n)
     for (n = 0; n < ALIGNDOWN(N, BS); n += BS) {
-      leaky_relu_bwd_tpp(&grad_out[n], &grad_in[n], &inp[i], &lrelu_mask[n / 16]);
+      leaky_relu_bwd_tpp(
+          &grad_out[n], &grad_in[n], &inp[i], &lrelu_mask[n / 16]);
       dropout_bwd_tpp(&grad_in[n], &grad_in[n], &dp_mask[n / 16]);
     }
 
     if (n < N) {
       auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(N - n, true), ACT);
       auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(N - n, p), DROPOUT);
-      leaky_relu_bwd_tpp(&grad_out[n], &grad_in[n], &inp[n], &lrelu_mask[n / 16]);
+      leaky_relu_bwd_tpp(
+          &grad_out[n], &grad_in[n], &inp[n], &lrelu_mask[n / 16]);
       dropout_bwd_tpp(&grad_in[n], &grad_in[n], &dp_mask[n / 16]);
     }
   }
