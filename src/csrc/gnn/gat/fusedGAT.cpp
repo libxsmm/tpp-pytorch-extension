@@ -55,8 +55,10 @@ REGISTER_SCOPE(ga_fused_din, "ga_fused_din");
 REGISTER_SCOPE(gao_gemm_attn, "gao_gemm_attn");
 REGISTER_SCOPE(gadi_gemm_attn, "gadi_gemm_attn");
 REGISTER_SCOPE(gadw_gemm_attn, "gadw_gemm_attn");
-REGISTER_SCOPE(gao_relu_drop, "go_relu_drop");
-REGISTER_SCOPE(gado_relu_drop, "gdo_relu_drop");
+REGISTER_SCOPE(gao_relu_drop, "gao_relu_drop");
+REGISTER_SCOPE(gado_relu_drop, "gado_relu_drop");
+REGISTER_SCOPE(gao_lrelu_drop, "gao_lrelu_drop");
+REGISTER_SCOPE(gado_lrelu_drop, "gado_lrelu_drop");
 
 // ######################################## FUSED GAT MLP & ATTENTION
 // ################################################
@@ -241,6 +243,7 @@ at::Tensor relu_bwd(std::vector<at::Tensor> inputs) {
 #include "relu_bwd.h"
   }
 }
+
 // ######################################## Fused Bias Add with ReLU
 // ################################################
 
@@ -287,6 +290,30 @@ at::Tensor relu_drop_bwd(float p, std::vector<at::Tensor> inputs) {
   } else {
     typedef bfloat16 T;
 #include "relu_drop_bwd.h"
+  }
+}
+
+// ######################################## Fused Dropout with LeakyReLU
+// ################################################
+std::vector<at::Tensor> leaky_relu_drop_fwd(float alpha, float p, at::Tensor inp, bool training) {
+  GlobalPass _gp(FWD);
+  if (inp.dtype() == at::kFloat) {
+    typedef float T;
+#include "leaky_relu_drop_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "leaky_relu_drop_fwd.h"
+  }
+}
+
+at::Tensor leaky_relu_drop_bwd(float alpha, float p, std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "leaky_relu_drop_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "leaky_relu_drop_bwd.h"
   }
 }
 
@@ -342,4 +369,6 @@ REGISTER_SUBMODULE(_fused_gat, m) {
   m.def("add_bias_bwd", &add_bias_bwd, "Tpp Optimized GradBias BWD");
   m.def("relu_drop_fwd", &relu_drop_fwd, "Fused ReLU + Dropout FWD");
   m.def("relu_drop_bwd", &relu_drop_bwd, "Fused Relu + Dropout BWD");
+  m.def("leaky_relu_drop_fwd", &leaky_relu_drop_fwd, "Fused Leaky ReLU + Dropout FWD");
+  m.def("leaky_relu_drop_bwd", &leaky_relu_drop_bwd, "Fused Leaky Relu + Dropout BWD");
 }
