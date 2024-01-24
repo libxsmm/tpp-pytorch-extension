@@ -1557,6 +1557,10 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
+  // cached for first token
+  at::Tensor t_Wq_1, t_Wk_1, t_Wv_1, t_Wp_1;
+  at::Tensor t_Wi_1, t_Wo_1;
+  bool first_token_remapped = false;
   float eps;
   long N, H;
   long max_positions, rotary_dim;
@@ -1596,6 +1600,17 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     }
   }
 
+  template <typename T>
+  void remap_for_first_token() {
+    t_Wq_1 = wt_tensor_for_first_token<T>(t_Wq);
+    t_Wk_1 = wt_tensor_for_first_token<T>(t_Wk);
+    t_Wv_1 = wt_tensor_for_first_token<T>(t_Wv);
+    t_Wp_1 = wt_tensor_for_first_token<T>(t_Wp);
+    t_Wi_1 = wt_tensor_for_first_token<T>(t_Wi);
+    t_Wo_1 = wt_tensor_for_first_token<T>(t_Wo);
+    first_token_remapped = true;
+  }
+
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
       std::vector<at::Tensor> t_cache,
@@ -1622,6 +1637,25 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
       large_cache_opt = true;
     else
       large_cache_opt = false;
+
+    auto t_Wq = this->t_Wq;
+    auto t_Wk = this->t_Wk;
+    auto t_Wv = this->t_Wv;
+    auto t_Wp = this->t_Wp;
+    auto t_Wi = this->t_Wi;
+    auto t_Wo = this->t_Wo;
+
+    if (B * S > FT_OPT_SIZE) {
+      if (!first_token_remapped)
+        remap_for_first_token<T>();
+
+      t_Wq = this->t_Wq_1;
+      t_Wk = this->t_Wk_1;
+      t_Wv = this->t_Wv_1;
+      t_Wp = this->t_Wp_1;
+      t_Wi = this->t_Wi_1;
+      t_Wo = this->t_Wo_1;
+    }
 
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
