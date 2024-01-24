@@ -333,9 +333,9 @@ class BaseTPP {
         fprintf(stderr, "Unable to get JIT kernel for %s\n", hash.c_str());
         exit(1);
       }
-      //printf("TPP: %s @ %p\n", hash.c_str(), kernel);
+      // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
       kernel_cache[hash] = kernel;
-      //printf("Hash size = %ld\n", (long)kernel_cache.size());
+      // printf("Hash size = %ld\n", (long)kernel_cache.size());
     }
     auto t2 = __rdtsc();
     hsh_key += t1 - t0;

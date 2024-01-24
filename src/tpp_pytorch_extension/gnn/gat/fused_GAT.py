@@ -61,6 +61,7 @@ class DummyLinear(BlockedModule):
         raise NotImplemented
         return input
 
+
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
         super(LinearOut, self).__init__()
@@ -92,6 +93,7 @@ class LinearOut(BlockedModule):
         raise NotImplemented
         return input
 
+
 class LinearOutBF16(LinearOut):
     def __init__(self, in_features, out_features, bias=True):
         super(LinearOutBF16, self).__init__(in_features, out_features)
@@ -106,6 +108,7 @@ class LinearOutBF16(LinearOut):
     def forward(self, input):
         raise NotImplemented
         return input
+
 
 class GATMLPAttentionFunction(torch.autograd.Function):
     @staticmethod

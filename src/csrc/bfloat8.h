@@ -12,8 +12,8 @@
 #define _TPP_BFLOAT8_H_
 
 #ifndef PYTORCH_SUPPORTS_BFLOAT8
-#include <libxsmm_utils.h>
 #include <libxsmm.h>
+#include <libxsmm_utils.h>
 
 namespace at {
 

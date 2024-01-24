@@ -349,7 +349,11 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
                 first = output[1][0]
                 rest = output[1][1:]
                 sum_rest = sum(rest)
-                print("Iteration: %d, Time: %.6f sec  first: %.3f s  sum next: %.3f s  avg next: %.4f s" % (i, toc - tic, first, sum_rest, sum_rest/len(rest)), flush=True)
+                print(
+                    "Iteration: %d, Time: %.6f sec  first: %.3f s  sum next: %.3f s  avg next: %.4f s"
+                    % (i, toc - tic, first, sum_rest, sum_rest / len(rest)),
+                    flush=True,
+                )
 
 
 print("\n", "-" * 10, "Summary:", "-" * 10)

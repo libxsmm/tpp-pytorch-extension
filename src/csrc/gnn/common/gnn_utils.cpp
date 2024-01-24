@@ -88,26 +88,22 @@ at::Tensor gather_features(const long alignN, std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
     if (inputs[1].dtype() == at::kLong) {
-       typedef long Tind;
+      typedef long Tind;
 #include "gather.h"
-    }
-    else if (inputs[1].dtype() == at::kInt) {
+    } else if (inputs[1].dtype() == at::kInt) {
       typedef int Tind;
 #include "gather.h"
     }
-  } 
-  else if (inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
     if (inputs[1].dtype() == at::kLong) {
-       typedef long Tind;
+      typedef long Tind;
 #include "gather.h"
-    }
-    else if (inputs[1].dtype() == at::kInt) {
+    } else if (inputs[1].dtype() == at::kInt) {
       typedef int Tind;
 #include "gather.h"
     }
-  } 
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }

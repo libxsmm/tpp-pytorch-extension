@@ -24,8 +24,7 @@
   auto out = GetVLAPtr<T>(t_out, {bn, E});
   auto idx = GetVLAPtr<Tind>(t_idx, {bn});
 
-  auto gather_tpp =
-      SCOPEIT((EmbeddingFwdTPP<T, Tind, T>(bn, E, E, E)), ROW_GT);
+  auto gather_tpp = SCOPEIT((EmbeddingFwdTPP<T, Tind, T>(bn, E, E, E)), ROW_GT);
 
   {
     RECORD_SCOPE(gather, {t_in, t_idx});
