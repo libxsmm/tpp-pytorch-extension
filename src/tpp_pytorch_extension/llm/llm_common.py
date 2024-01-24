@@ -32,6 +32,7 @@ from transformers import (
     GenerationMixin,
 )
 import tpp_pytorch_extension as tpx
+from tpp_pytorch_extension.utils.omp_signal import omp_debug_signal
 
 USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
@@ -256,6 +257,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         if self.enable_profile and first_token == True:
             tpx.print_debug_timers(detailed=False)
             tpx.reset_debug_timers()
+            omp_debug_signal()
         return fixed_output
 
     # @torch.no_grad()
@@ -279,6 +281,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         if self.enable_profile:
             tpx.print_debug_timers(detailed=False)
             tpx.reset_debug_timers()
+            omp_debug_signal()
 
         if self.output_past_key_values == True:
             saved_input_ids = self.saved_input_ids
@@ -303,6 +306,7 @@ class _ModelFallbackWrapper(GenerationMixin):
             self.saved_input_ids = input_ids
         if self.token_latency == True:
             self.token_latencies.append(time.time())
+            if len(self.token_latencies) < 3: omp_debug_signal()
 
         return self._default.prepare_inputs_for_generation(
             input_ids,

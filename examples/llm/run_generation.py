@@ -27,6 +27,7 @@ try:
         jit_trace_model,
         optimize_for_first_token,
     )
+    from tpp_pytorch_extension.utils.omp_signal import enable_debug as enable_omp_debug
 except:
     pass
 
@@ -90,6 +91,9 @@ parser.add_argument("--load-sharded-model", action="store_true")
 parser.add_argument("--save-sharded-model", action="store_true")
 args = parser.parse_args()
 print(args)
+
+if True:
+    enable_omp_debug()
 
 my_rank = 0
 my_size = 1
