@@ -11,10 +11,10 @@
 #include "timing.h"
 #include "xsmm_functors.h"
 
-//#define NO_TPP_FWD
-//#define NO_TPP_BWD
-//#define NO_TPP_UPD
-//#define NO_TPP_DOT
+// #define NO_TPP_FWD
+// #define NO_TPP_BWD
+// #define NO_TPP_UPD
+// #define NO_TPP_DOT
 
 using namespace tpp;
 using namespace torch::autograd;

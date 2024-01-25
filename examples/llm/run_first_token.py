@@ -71,19 +71,14 @@ parser.add_argument(
     help="input tokens length if needed from prompt.json",
 )
 parser.add_argument(
-    "--max-new-tokens", default=32, type=int, help="output max new tokens"
-)
-parser.add_argument(
     "--prompt", default=None, type=str, help="input prompt for self-defined if needed"
 )
-parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
 parser.add_argument("--jit", action="store_true")
 parser.add_argument("--num-iter", default=10, type=int, help="num iter")
 parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
 parser.add_argument("--batch-size", default=1, type=int, help="batch size")
-parser.add_argument("--token-latency", action="store_true", help="get token latency")
 parser.add_argument("--profile", action="store_true")
 parser.add_argument("--dist-backend", default="mpi", type=str)
 parser.add_argument("--load-sharded-model", action="store_true")
@@ -243,34 +238,18 @@ else:
 input_size = tokenizer(prompt, return_tensors="pt").input_ids.size(dim=1)
 print("---- Prompt size:", input_size)
 
-# generate args
-generate_kwargs = dict(
-    do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4
-)
 if args.use_tpp:
     cpp_profile = True
     if args.jit:
         model = jit_trace_model(
             model,
             tokenizer,
-            generate_kwargs["num_beams"],
+            1,
             indirect_kv=True,
             enable_profile=cpp_profile,
         )
     else:
-        model = optimize_for_first_token(
-            model, generate_kwargs["num_beams"], enable_profile=cpp_profile
-        )
-
-    # generate_kwargs["jit"] = True
-if args.token_latency:
-    if args.use_tpp:
-        generate_kwargs["token_latency"] = True
-    else:
-        print("Warning: --token-latnecy is ignored when not using TPP (--use-tpp)")
-        args.token_latency = False
-# if args.use_tpp:
-#    generate_kwargs["TP_number"] = my_size
+        model = optimize_for_first_token(model, 1, enable_profile=cpp_profile)
 
 # start
 total_time = 0.0
@@ -287,11 +266,6 @@ if tokenizer.pad_token == "":
 tokenizer.padding_side = "left"
 total_list = []
 record_shapes = True
-output_past_key_values = False
-if args.use_tpp and output_past_key_values == True:
-    generate_kwargs["output_past_key_values"] = True
-else:
-    output_past_key_values = False
 
 
 def trace_handler(prof):
@@ -301,7 +275,9 @@ def trace_handler(prof):
     )
     # prof.export_chrome_trace("my_trace.log" + str(prof.step_num) + ".json")
     try:
-        prof.profiler.print_op_timings(prof.profiler, prefix="llm_time_" + str(my_rank))
+        prof.profiler.print_op_timings(
+            prof.profiler, prefix="first_token_time_" + str(my_rank)
+        )
     except:
         pass
 
@@ -319,57 +295,16 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
     for i in range(num_iter):
         tic = time.time()
         inputs = tokenizer(prompt, return_tensors="pt", padding=True).to(device)
-        # inputs = tokenizer(prompt, return_tensors="pt", padding=False).to(device)
-        # input_ids = inputs.input_ids.to(device)
-        # print(type(inputs))
 
-        output = model.generate(
-            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
-        )
-        if output_past_key_values == True:
-            output, pkv = output
-        gen_ids = output[0] if args.token_latency else output
-        gen_text = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
-        if args.device == "xpu":
-            torch.xpu.synchronize()
-        elif args.device == "cuda":
-            torch.cuda.synchronize()
-        elif args.device == "hpu":
-            gen_ids.to("cpu")
+        ret = model(**inputs, past_key_values=None)
         toc = time.time()
         if args.profile:
             prof.step()
-        print(gen_text, len(gen_ids), flush=True)
-        if i < num_warmup or not args.token_latency:
-            print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
+        print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
         if i >= num_warmup:
             total_time += toc - tic
-            if args.token_latency:
-                total_list.append(output[1])
-                first = output[1][0]
-                rest = output[1][1:]
-                sum_rest = sum(rest)
-                print(
-                    "Iteration: %d, Time: %.6f sec  first: %.3f s  sum next: %.3f s  avg next: %.4f s"
-                    % (i, toc - tic, first, sum_rest, sum_rest / len(rest)),
-                    flush=True,
-                )
 
 
 print("\n", "-" * 10, "Summary:", "-" * 10)
 latency = total_time / (num_iter - num_warmup)
 print("Inference latency: %.3f sec." % latency)
-if args.token_latency:
-    import numpy as np
-    from itertools import chain
-
-    first_latency = np.mean([x[0] for x in total_list])
-    average_2n = list(chain(*[x[1:] for x in total_list]))
-    average_2n.sort()
-    average_2n_latency = np.mean(average_2n)
-    p90_latency = average_2n[int(len(average_2n) * 0.9)]
-    p99_latency = average_2n[int(len(average_2n) * 0.99)]
-    print("First token average latency: %.3f sec." % first_latency)
-    print("Average 2... latency: %.4f sec." % average_2n_latency)
-    print("P90 2... latency: %.4f sec." % p90_latency)
-    print("P99 2... latency: %.4f sec." % p99_latency)

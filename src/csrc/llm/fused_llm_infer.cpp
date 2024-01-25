@@ -27,6 +27,16 @@ using namespace tpp;
 #include "shm_coll.h"
 #include "tensor_helper.h"
 
+// #define S_FIRST_KVC
+
+static long get_batch_dim_in_kv_cache() {
+#ifdef S_FIRST_KVC
+  return 1;
+#else
+  return 0;
+#endif
+}
+
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
@@ -44,6 +54,8 @@ REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
+REGISTER_LOCAL_SCOPE(ac_gemm21, "ac_gemm21");
+REGISTER_LOCAL_SCOPE(ac_gemm22, "ac_gemm22");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
@@ -342,7 +354,7 @@ inline void rms_norm(
 
 template <typename T, typename LT = T>
 inline at::Tensor llama_rms_norm(at::Tensor t_in, at::Tensor t_wt, float eps) {
-  RECORD_SCOPE(lnorm, {t_in, t_wt});
+  // RECORD_SCOPE(lnorm, {t_in, t_wt});
 
   // auto orig_dt = t_in.dtype();
   // auto t_var = t_in.to(at::kFloat).pow(2).mean(-1, true);
@@ -356,6 +368,129 @@ inline at::Tensor llama_rms_norm(at::Tensor t_in, at::Tensor t_wt, float eps) {
   return t_out;
 }
 
+template <typename T, typename Tout = T>
+class TppBlockedLinearW {
+ protected:
+  long BS, C, Nc, Nk, Hc, Hk, K;
+  long Ncb, BSb, rem;
+  bool with_bias;
+  SCOPEIT_DECL(CpyBiasTPP<T>) copy_bias_tpp, copy_bias_tpp_rem;
+  SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp, zero_tpp_rem;
+  SCOPEIT_DECL(BrgemmTPP<T, Tout>) brgemm_tpp, brgemm_tpp_rem;
+
+  std::string loop_scheme;
+  std::function<void(VLAPtr<T, 2, long>&, long, long, bool)> postOpCB;
+
+ public:
+  TppBlockedLinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
+    auto in_sizes = t_in.sizes();
+    auto wt_sizes = t_wt.sizes();
+    BS = in_sizes[0] * in_sizes[1];
+    C = in_sizes[2];
+
+    Nc = wt_sizes[1];
+    Hc = C / Nc;
+    Nk = wt_sizes[0];
+    Hk = wt_sizes[3];
+    K = Nk * Hk;
+
+    Ncb = Nc;
+    BSb = 64L;
+    rem = BS % 64;
+    if (large_cache_opt)
+      Ncb = NCB_BLOCK_SIZE;
+
+    with_bias = (t_bias.numel() > 0);
+    copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
+    copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
+    zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
+    zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
+    brgemm_tpp = SCOPEITGEMM(
+        (BrgemmTPP<T, Tout>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+    brgemm_tpp_rem = SCOPEITGEMM(
+        (BrgemmTPP<T, Tout>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+
+    loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+  }
+  template <typename T1 = Tout>
+  VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor& t) {
+    return GetVLAPtr<T1>(t, {Nk, Hk});
+  }
+  std::tuple<long, long, long, long> getOutputShapes() {
+    return std::make_tuple(BSb, rem, Hk, K);
+  }
+  void setPostOpCB(
+      const std::function<void(VLAPtr<Tout, 2, long>&, long, long, bool)>& f) {
+    postOpCB = f;
+  }
+  at::Tensor new_empty(at::Tensor t_in) {
+    auto sizes = t_in.sizes().vec();
+    sizes[2] = K;
+    return t_in.new_empty(sizes);
+  }
+
+  void operator()(
+      at::Tensor t_in,
+      at::Tensor t_wt_V,
+      at::Tensor t_bias,
+      at::Tensor t_out) {
+    t_in = t_in.contiguous();
+    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+    auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
+    auto bias = GetVLAPtr<T>(t_bias, {Hk});
+    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+    {
+      RECORD_OMP_TIME();
+      auto gemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
+          loop_scheme);
+      gemm_loop(
+          [&](int* ind) {
+            int nc = ind[0], s1 = ind[1], nk = ind[2];
+            auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+            bool is_rem = (s1 + BSb > BS);
+            if (!is_rem) {
+              if (nc == 0) {
+                if (with_bias) {
+                  copy_bias_tpp(bias[nk], out[s1][nk]);
+                } else {
+                  zero_tpp(out[s1][nk]);
+                }
+              }
+              brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
+              if (!(nc + Ncb < Nc)) { // last nc iter
+                if (postOpCB)
+                  postOpCB(out, s1, nk, false);
+              }
+            } else {
+              if (nc == 0) {
+                if (with_bias) {
+                  copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+                } else {
+                  zero_tpp_rem(out[s1][nk]);
+                }
+              }
+              brgemm_tpp_rem(
+                  in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
+              brgemm_tpp.config();
+              if (!(nc + Ncb < Nc)) { // last nc iter
+                if (postOpCB)
+                  postOpCB(out, s1, nk, true);
+              }
+            }
+          },
+          [&]() {
+            TimerStart();
+            brgemm_tpp.config();
+          },
+          [&]() {
+            brgemm_tpp.release();
+            TimerEnd();
+          });
+    }
+  }
+};
+
 template <typename T>
 inline void fc_plain(
     at::Tensor t_in,
@@ -363,82 +498,8 @@ inline void fc_plain(
     at::Tensor t_bias,
     at::Tensor t_out) {
   RECORD_SCOPE(pln_gemm, {t_in, t_wt});
-  auto in_sizes = t_in.sizes();
-  auto wt_sizes = t_wt.sizes();
-  auto BS = in_sizes[0] * in_sizes[1];
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  t_in = t_in.contiguous();
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-
-  {
-    RECORD_OMP_TIME();
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto ogemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    ogemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -470,6 +531,8 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   auto C2 = sizes[2];
   auto K2 = sizes[3];
   auto C3 = sizes[4];
+  if (K2 >= 32)
+    return t;
 #if 0
   auto t_new = t.view({K1/RBS, RBS, C1, C2, K2, C3}).permute({0, 2, 3, 1, 4, 5}).contiguous().view({K1/RBS, C1, C2, RBS*K2, C3});
 #else
@@ -520,89 +583,20 @@ inline void fc_mul(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
+  auto in1 = gemm.getOutputVLAPtr(t_in1);
   auto mul_tpp = SCOPEIT((MulTPP<T, T>(BSb, Hk, K, K)), EW_MUL);
   auto mul_tpp_rem = SCOPEIT((MulTPP<T, T>(rem, Hk, K, K)), EW_MUL);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto ogemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    ogemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              mul_tpp_rem(in1[s1][nk], out[s1][nk], out[s1][nk]);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
+    } else {
+      mul_tpp_rem(in1[s1][nk], out[s1][nk], out[s1][nk]);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -613,6 +607,46 @@ inline at::Tensor fc_mul(
     at::Tensor t_bias) {
   auto t_out = at::empty_like(t_in1);
   fc_mul<T>(t_in, t_in1, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T>
+inline void fc_add(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias,
+    at::Tensor t_out) {
+  RECORD_SCOPE(o_gemm, {t_in, t_wt});
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    t_wt = wt_tensor_for_first_token<T>(t_wt);
+  }
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
+  auto in1 = gemm.getOutputVLAPtr(t_in1);
+  auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
+  auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
+    } else {
+      add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
+}
+
+template <typename T>
+inline at::Tensor fc_add(
+    at::Tensor t_in,
+    at::Tensor t_in1,
+    at::Tensor t_wt,
+    at::Tensor t_bias) {
+  auto t_out = at::empty_like(t_in1);
+  fc_add<T>(t_in, t_in1, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -630,89 +664,20 @@ inline void fc_add_scale(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
+  auto in1 = gemm.getOutputVLAPtr(t_in1);
   auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto ogemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    ogemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              sadd_tpp(in1[s1][nk], out[s1][nk], scale);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              sadd_tpp_rem(in1[s1][nk], out[s1][nk], scale);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      sadd_tpp(in1[s1][nk], out[s1][nk], scale);
+    } else {
+      sadd_tpp_rem(in1[s1][nk], out[s1][nk], scale);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -742,94 +707,25 @@ inline void fc_add2_scale(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto in1 = GetVLAPtr<T>(t_in1, {Nk, Hk});
-  auto in2 = GetVLAPtr<T>(t_in2, {Nk, Hk});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
+  auto in1 = gemm.getOutputVLAPtr(t_in1);
+  auto in2 = gemm.getOutputVLAPtr(t_in2);
   auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
   auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto ogemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    ogemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              sadd_tpp(in2[s1][nk], out[s1][nk], scale);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
-              sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
+      sadd_tpp(in2[s1][nk], out[s1][nk], scale);
+    } else {
+      add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
+      sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -857,88 +753,19 @@ inline void fc_gelu(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto igemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    igemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
+    } else {
+      gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -964,88 +791,19 @@ inline void fc_silu(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto silu_fwd_tpp = SCOPEIT(SiLUFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto silu_fwd_tpp_rem = SCOPEIT(SiLUFwdTPP<T>(rem, Hk, K, K), ACT);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto igemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    igemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              silu_fwd_tpp(out[s1][nk], out[s1][nk]);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              silu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      silu_fwd_tpp(out[s1][nk], out[s1][nk]);
+    } else {
+      silu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -1071,88 +829,19 @@ inline void fc_relu(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<T>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % 64;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<T>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<T>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, T>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+  auto gemm = TppBlockedLinearW<T>(t_in, t_wt, t_bias);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BSb, Hk, K, K, false), ACT);
   auto relu_fwd_tpp_rem = SCOPEIT(ReLUFwdTPP<T>(rem, Hk, K, K, false), ACT);
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto igemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    igemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              relu_fwd_tpp(out[s1][nk], out[s1][nk]);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              relu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-            }
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+    if (!is_rem) {
+      relu_fwd_tpp(out[s1][nk], out[s1][nk]);
+    } else {
+      relu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+    }
+  });
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T>
@@ -1178,80 +867,8 @@ inline void qkv_gemm(
   if (BS > FT_OPT_SIZE) { // first token compute
     t_wt = wt_tensor_for_first_token<T>(t_wt);
   }
-  auto wt_sizes = t_wt.sizes();
-  auto C = in_sizes[2];
-
-  auto Nc = wt_sizes[1];
-  auto Hc = C / Nc;
-  auto Nk = wt_sizes[0];
-  auto Hk = wt_sizes[3];
-  auto K = Nk * Hk;
-
-  auto t_wt_V = wt_tensor_for_fwd(Nk, Hk, Nc, Hc, t_wt);
-
-  auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {Nc, Hc * Hk});
-  auto bias = GetVLAPtr<T>(t_bias, {Hk});
-  auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
-
-  auto Ncb = Nc;
-  auto BSb = 64L;
-  auto rem = BS % BSb;
-  if (large_cache_opt)
-    Ncb = NCB_BLOCK_SIZE;
-
-  bool with_bias = (t_bias.numel() > 0);
-  auto copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
-  auto copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
-  auto zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
-  auto zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
-  auto brgemm_tpp = SCOPEITGEMM(
-      (BrgemmTPP<T, Tout>(BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-  auto brgemm_tpp_rem = SCOPEITGEMM(
-      (BrgemmTPP<T, Tout>(rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
-
-  {
-    RECORD_OMP_TIME();
-    // auto loop_scheme = large_cache_opt ? "acB" : "aBC";
-    auto loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
-    auto gemm_loop = ThreadedLoop<3>(
-        {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0, BS, BSb}, LoopSpecs{Nk}},
-        loop_scheme);
-    gemm_loop(
-        [&](int* ind) {
-          int nc = ind[0], s1 = ind[1], nk = ind[2];
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-            brgemm_tpp.config();
-          }
-        },
-        [&]() {
-          TimerStart();
-          brgemm_tpp.config();
-        },
-        [&]() {
-          brgemm_tpp.release();
-          TimerEnd();
-        });
-  }
+  auto gemm = TppBlockedLinearW<T, Tout>(t_in, t_wt, t_bias);
+  gemm(t_in, t_wt, t_bias, t_out);
 }
 
 template <typename T, typename Tout = T>
@@ -1336,12 +953,14 @@ inline at::Tensor attn(
   auto t_CL = at::empty_like(t_QL);
   auto sizes = t_QL.sizes();
   long B = sizes[0];
-  long N = sizes[1];
+  long Nq = sizes[1];
   long Sq = sizes[2];
   long H = sizes[3];
   float one_by_sqrt_H = 1.0 / sqrtf(H);
   auto ksizes = t_KL.sizes();
   long Sk = ksizes[2];
+  long Nkv = ksizes[1];
+  long Nq_per_kv = (Nq == Nkv ? 1 : Nq / Nkv);
   // printf("Sq = %ld, Sk = %ld\n", Sq, Sk);
   // std::cout << "QL: " << t_QL.sizes() << std::endl;
   // std::cout << "KL: " << t_KL.sizes() << std::endl;
@@ -1353,19 +972,26 @@ inline at::Tensor attn(
       offset);
   auto FSk = offset + Sk;
   auto FSk_aligned = (FSk + 0x3FL) & ~0x3FL;
+#ifdef S_FIRST_KVC
+  auto CSk = t_KL_cache.size(0);
+#else
   auto CSk = t_KL_cache.size(2);
+#endif
   // printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
 
-  auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
-  auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
-  auto VL = GetVLAPtr<T>(t_VL, {N, Sk, H});
-  auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
+  auto QL = GetVLAPtr<T>(t_QL, {Nq, Sq, H});
+  auto KL = GetVLAPtr<T>(t_KL, {Nkv, Sk, H});
+  auto VL = GetVLAPtr<T>(t_VL, {Nkv, Sk, H});
+  auto CL = GetVLAPtr<T>(t_CL, {Nq, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {FSk});
-  // auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, N, H});
-  // auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, N, H});
-  auto KL_C = GetVLAPtr<T>(t_KL_cache, {N, CSk, H});
-  auto VL_C = GetVLAPtr<T>(t_VL_cache, {N, CSk, H});
+#ifdef S_FIRST_KVC
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, Nkv, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, Nkv, H});
+#else
+  auto KL_C = GetVLAPtr<T>(t_KL_cache, {Nkv, CSk, H});
+  auto VL_C = GetVLAPtr<T>(t_VL_cache, {Nkv, CSk, H});
+#endif
 
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
@@ -1380,36 +1006,46 @@ inline at::Tensor attn(
   auto zero_tpp = SetZeroTPP<float>(H);
   auto softmax_fwd_tpp =
       SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
-  if (FSk <= 256) {
+  auto nThreads = omp_get_max_threads();
+  float tasks_per_thread = ((float)B * Nq) / nThreads;
+  auto thr_eff = tasks_per_thread / ceilf(tasks_per_thread);
+  if (FSk <= 256 || thr_eff >= 0.75) {
     RECORD_OMP_TIME();
     {
 #pragma omp parallel
       {
-        int tid = omp_get_thread_num();
+        // int tid = omp_get_thread_num();
         // auto t00 = getTime();
         TimerStart();
 #pragma omp for collapse(2) nowait
-        for (int b = 0; b < B; b++) {
-          for (int n = 0; n < N; n++) {
+        for (int nq = 0; nq < Nq; nq++) {
+          for (int b = 0; b < B; b++) {
             float AS[FSk_aligned];
+            int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
             // float *AS = GAS[tid]; //FSk];
             // auto t0 = getTime();
             {
               ScopedTimer t_(BRGEMM, 2 * FSk * H);
               float tmp_QL[H];
-              cvt_b2f_tpp(QL[b][n][0], tmp_QL);
+              cvt_b2f_tpp(QL[b][nq][0], tmp_QL);
               for (int sk = 0; sk < FSk; sk++) {
                 AS[sk] = 0.0f;
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
                   // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-                  // dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
-                  dot_tpp(tmp_QL, KL_C[bid][n][sk], &AS[sk]);
+#ifdef S_FIRST_KVC
+                  dot_tpp(tmp_QL, KL_C[sk][bid][nkv], &AS[sk]);
+#else
+                  dot_tpp(tmp_QL, KL_C[bid][nkv][sk], &AS[sk]);
+#endif
                 } else {
                   // printf("b: %d n: %d sk: %d \n", b, n, sk);
-                  dot_tpp(tmp_QL, KL[b][n][0], &AS[sk]);
-                  // cpy_tpp(KL[b][n][0], KL_C[sk][b][n]);
-                  cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
+                  dot_tpp(tmp_QL, KL[b][nkv][0], &AS[sk]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(KL[b][nkv][0], KL_C[sk][b][nkv]);
+#else
+                  cpy_tpp(KL[b][nkv][0], KL_C[b][nkv][sk]);
+#endif
                 }
                 AS[sk] *= one_by_sqrt_H;
                 if (am_valid) {
@@ -1434,15 +1070,21 @@ inline at::Tensor attn(
                 // if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]);
                 if (sk < offset) {
                   int bid = beam_idx[b][sk];
-                  // scale_add_tpp(VL_C[sk][bid][n], tmp_CL, AS[sk]);
-                  scale_add_tpp(VL_C[bid][n][sk], tmp_CL, AS[sk]);
+#ifdef S_FIRST_KVC
+                  scale_add_tpp(VL_C[sk][bid][nkv], tmp_CL, AS[sk]);
+#else
+                  scale_add_tpp(VL_C[bid][nkv][sk], tmp_CL, AS[sk]);
+#endif
                 } else {
-                  scale_add_tpp(VL[b][n][0], tmp_CL, AS[sk]);
-                  // cpy_tpp(VL[b][n][0], VL_C[sk][b][n]);
-                  cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+                  scale_add_tpp(VL[b][nkv][0], tmp_CL, AS[sk]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(VL[b][nkv][0], VL_C[sk][b][nkv]);
+#else
+                  cpy_tpp(VL[b][nkv][0], VL_C[b][nkv][sk]);
+#endif
                 }
               }
-              cvt_f2b_tpp(tmp_CL, CL[b][n][0]);
+              cvt_f2b_tpp(tmp_CL, CL[b][nq][0]);
             }
             // auto t3 = getTime();
             // if (tid == 0) printf("MHA: bns= %d %d %ld  %10g %10g %10g
@@ -1456,54 +1098,88 @@ inline at::Tensor attn(
       }
     }
   } else {
-    auto t_AS = t_QL.new_empty({B, N, FSk_aligned}, at::kFloat);
+    auto t_AS = t_QL.new_empty({B, Nq, FSk_aligned}, at::kFloat);
     // auto t_XL = t_QL.new_empty({B, N, H}, at::kFloat);
     auto t_XL = t_QL.to(at::kFloat);
-    auto XL = GetVLAPtr<float>(t_XL, {N, H});
-    auto AS = GetVLAPtr<float>(t_AS, {N, FSk_aligned});
+    auto XL = GetVLAPtr<float>(t_XL, {Nq, H});
+    auto AS = GetVLAPtr<float>(t_AS, {Nq, FSk_aligned});
 
-    RECORD_OMP_TIME();
     {
-#pragma omp parallel for collapse(3)
-      for (int b = 0; b < B; b++) {
-        for (int n = 0; n < N; n++) {
-          for (int sk = 0; sk < FSk; sk++) {
-            AS[b][n][sk] = 0.0f;
-            if (sk < offset) {
-              int bid = beam_idx[b][sk];
-              // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-              // dot_tpp(tmp_QL, KL_C[sk][bid][n], &AS[sk]);
-              dot_tpp(XL[b][n], KL_C[bid][n][sk], &AS[b][n][sk]);
-            } else {
-              // printf("b: %d n: %d sk: %d \n", b, n, sk);
-              dot_tpp(XL[b][n], KL[b][n][0], &AS[b][n][sk]);
-              cpy_tpp(KL[b][n][0], KL_C[b][n][sk]);
-            }
-            AS[b][n][sk] *= one_by_sqrt_H;
-            if (am_valid) {
-              AS[b][n][sk] += AM[b][sk];
+      {
+        RECORD_SCOPE(ac_gemm21, {});
+        RECORD_OMP_TIME();
+#pragma omp parallel
+        {
+          TimerStart();
+#pragma omp for collapse(3)
+          for (int nq = 0; nq < Nq; nq++) {
+            for (int b = 0; b < B; b++) {
+              for (int sk = 0; sk < FSk; sk++) {
+                int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+                AS[b][nq][sk] = 0.0f;
+                if (sk < offset) {
+                  int bid = beam_idx[b][sk];
+                  // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
+#ifdef S_FIRST_KVC
+                  dot_tpp(XL[b][nq], KL_C[sk][bid][nkv], &AS[b][nq][sk]);
+#else
+                  dot_tpp(XL[b][nq], KL_C[bid][nkv][sk], &AS[b][nq][sk]);
+#endif
+                } else {
+                  // printf("b: %d n: %d sk: %d \n", b, n, sk);
+                  dot_tpp(XL[b][nq], KL[b][nkv][0], &AS[b][nq][sk]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(KL[b][nkv][0], KL_C[sk][b][nkv]);
+#else
+                  cpy_tpp(KL[b][nkv][0], KL_C[b][nkv][sk]);
+#endif
+                }
+                AS[b][nq][sk] *= one_by_sqrt_H;
+                if (am_valid) {
+                  AS[b][nq][sk] += AM[b][sk];
+                }
+              }
             }
           }
+          TimerEnd();
         }
       }
-#pragma omp parallel for collapse(2)
-      for (int b = 0; b < B; b++) {
-        for (int n = 0; n < N; n++) {
-          for (int sk = FSk; sk < FSk_aligned; sk++) {
-            // pad AS to align for softmax
-            AS[b][n][sk] = -1e9f;
-          }
-          softmax_fwd_tpp(AS[b][n], AS[b][n]);
-          zero_tpp(XL[b][n]);
-          for (int sk = 0; sk < FSk; sk++) {
-            if (sk < offset) {
-              int bid = beam_idx[b][sk];
-              scale_add_tpp(VL_C[bid][n][sk], XL[b][n], AS[b][n][sk]);
-            } else {
-              scale_add_tpp(VL[b][n][0], XL[b][n], AS[b][n][sk]);
-              cpy_tpp(VL[b][n][0], VL_C[b][n][sk]);
+      {
+        RECORD_SCOPE(ac_gemm22, {});
+        RECORD_OMP_TIME();
+#pragma omp parallel
+        {
+          TimerStart();
+#pragma omp for collapse(2)
+          for (int nq = 0; nq < Nq; nq++) {
+            for (int b = 0; b < B; b++) {
+              int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+              for (int sk = FSk; sk < FSk_aligned; sk++) {
+                // pad AS to align for softmax
+                AS[b][nq][sk] = -1e9f;
+              }
+              softmax_fwd_tpp(AS[b][nq], AS[b][nq]);
+              zero_tpp(XL[b][nq]);
+              for (int sk = 0; sk < FSk; sk++) {
+                if (sk < offset) {
+                  int bid = beam_idx[b][sk];
+#ifdef S_FIRST_KVC
+                  scale_add_tpp(VL_C[sk][bid][nkv], XL[b][nq], AS[b][nq][sk]);
+#else
+                  scale_add_tpp(VL_C[bid][nkv][sk], XL[b][nq], AS[b][nq][sk]);
+#endif
+                } else {
+                  scale_add_tpp(VL[b][nkv][0], XL[b][nq], AS[b][nq][sk]);
+#ifdef S_FIRST_KVC
+                  cpy_tpp(VL[b][nkv][0], VL_C[sk][b][nkv]);
+#else
+                  cpy_tpp(VL[b][nkv][0], VL_C[b][nkv][sk]);
+#endif
+                }
+              }
             }
           }
+          TimerEnd();
         }
       }
     }
@@ -1522,12 +1198,16 @@ inline at::Tensor attn(
   auto t_CL = at::empty_like(t_QL);
   auto sizes = t_QL.sizes();
   long B = sizes[0];
-  long N = sizes[1];
+  long Nq = sizes[1];
   long Sq = sizes[2];
   long H = sizes[3];
   float one_by_sqrt_H = 1.0 / sqrtf(H);
   auto ksizes = t_KL.sizes();
   long Sk = ksizes[2];
+  long Nkv = ksizes[1];
+  const long Nq_per_kv = (Nq == Nkv ? 1 : Nq / Nkv);
+  // printf("Nq = %ld, Nkv = %ld, Nq_per_kv = %ld\n", Nq, Nkv, Nq_per_kv);
+  // fflush(stdout);
   long offset = Sk - Sq;
   constexpr long Sqb = 64;
   long qrem = Sq % Sqb;
@@ -1537,14 +1217,14 @@ inline at::Tensor attn(
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
   long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  const long Skb = (!inline_trans ? 512 : SK_BLOCK_SIZE);
+  const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
   long krem = Sk % Skb;
   int pad = Sk_pad - Sk;
 
-  auto t_KL_TV = t_KL.new_empty({B, N, Sk_pad, H});
+  auto t_KL_TV = t_KL.new_empty({B, Nkv, Sk_pad, H});
   auto t_VL_V = t_VL;
   if (VBS != 1) {
-    t_VL_V = t_VL.new_empty({B, N, Sk_pad, H});
+    t_VL_V = t_VL.new_empty({B, Nkv, Sk_pad, H});
   }
   if (Sk != Sk_pad) {
     // TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
@@ -1558,12 +1238,12 @@ inline at::Tensor attn(
       t_AM = at::cat({t_AM, t_tmp}, -1);
     }
   }
-  auto QL = GetVLAPtr<T>(t_QL, {N, Sq, H});
-  auto KL = GetVLAPtr<T>(t_KL, {N, Sk, H});
-  auto KL_TV = GetVLAPtr<T>(t_KL_TV, {N, Sk_pad, H});
-  auto VL = GetVLAPtr<Tv>(t_VL, {N, Sk, H});
-  auto VL_V = GetVLAPtr<Tv>(t_VL_V, {N, Sk_pad, H});
-  auto CL = GetVLAPtr<T>(t_CL, {N, Sq, H});
+  auto QL = GetVLAPtr<T>(t_QL, {Nq, Sq, H});
+  auto KL = GetVLAPtr<T>(t_KL, {Nkv, Sk, H});
+  auto KL_TV = GetVLAPtr<T>(t_KL_TV, {Nkv, Sk_pad, H});
+  auto VL = GetVLAPtr<Tv>(t_VL, {Nkv, Sk, H});
+  auto VL_V = GetVLAPtr<Tv>(t_VL_V, {Nkv, Sk_pad, H});
+  auto CL = GetVLAPtr<T>(t_CL, {Nq, Sq, H});
   auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
   auto AM2 = GetVLAPtr<T>(t_AM, {Sq, Sk_pad});
   int kl_in_vnni = 1;
@@ -1578,7 +1258,7 @@ inline at::Tensor attn(
   if (!inline_trans) {
     RECORD_SCOPE(k_trans, {t_QL, t_KL});
 #pragma omp parallel for collapse(3)
-    for (int n = 0; n < N; n++) {
+    for (int n = 0; n < Nkv; n++) {
       for (int b = 0; b < B; b++) {
         for (int sk = 0; sk < Sk; sk += Skb) {
           int kid = (sk + Skb > Sk) ? 1 : 0;
@@ -1595,8 +1275,9 @@ inline at::Tensor attn(
     {
 #pragma omp parallel for collapse(3)
       for (int b = 0; b < B; b++) {
-        for (int n = 0; n < N; n++) {
+        for (int nq = 0; nq < Nq; nq++) {
           for (int sq = 0; sq < Sq; sq += Sqb) {
+            int nkv = nq / Nq_per_kv;
             long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
             int qid = (sq + Sqb > Sq) ? 1 : 0;
             float omax[qbs], osum[qbs], cmax[qbs], csum[qbs];
@@ -1606,14 +1287,14 @@ inline at::Tensor attn(
               auto& ak = attn_kern[kid];
               float AS[qbs][kbs];
               Tv AST[qbs][kbs];
-              T* k_ptr = KL_TV[b][n][sk];
+              T* k_ptr = KL_TV[b][nkv][sk];
               T k_tmp[kbs * H];
               if (inline_trans) {
                 // ak.xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
-                ak.xform_tpp(KL[b][n][sk], k_tmp);
+                ak.xform_tpp(KL[b][nkv][sk], k_tmp);
                 k_ptr = k_tmp;
               }
-              ak.a_gemm_tpp(QL[b][n][sq], k_ptr, AS[0], 1);
+              ak.a_gemm_tpp(QL[b][nq][sq], k_ptr, AS[0], 1);
               for (int sq1 = 0; sq1 < qbs; sq1++) {
                 auto qval = sq + sq1 + offset;
                 for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
@@ -1640,18 +1321,18 @@ inline at::Tensor attn(
               // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n", sk+xx,
               // (float)AST[0][xx]);
               Tv tmp[qbs * H];
-              Tv* v_ptr = VL_V[b][n][sk];
+              Tv* v_ptr = VL_V[b][nkv][sk];
               Tv v_tmp[kbs * H];
               if (inline_trans && VBS != 1) {
                 // ak.vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
-                ak.vnni_tpp(VL[b][n][sk], v_tmp);
+                ak.vnni_tpp(VL[b][nkv][sk], v_tmp);
                 v_ptr = v_tmp;
               }
               ak.c_gemm_tpp(AST[0], v_ptr, tmp, 1);
               if (sk == 0) {
-                ak.cvt_tpp(tmp, CL[b][n][sq]);
+                ak.cvt_tpp(tmp, CL[b][nq][sq]);
               } else {
-                ak.softmax_fixup(tmp, CL[b][n][sq], cmax, csum, omax, osum);
+                ak.softmax_fixup(tmp, CL[b][nq][sq], cmax, csum, omax, osum);
               }
             }
           }
@@ -1723,7 +1404,7 @@ struct LLMBlock : torch::CustomClassHolder {
     auto t_offset = this->t_dummy_int;
     auto B = t_QL.size(0);
     auto S = t_QL.size(1);
-    auto N = self->N;
+    // auto N = self->N;
     auto H = self->H;
     at::Tensor t_CL;
     long offset = 0;
@@ -1744,10 +1425,15 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (csz > 0) {
       offset = t_key_past.size(2);
     }
+    // TPP_ASSERT(S == 1, "S must be 1");
 
-    t_QL = t_QL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    t_KL = t_KL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
-    t_VL = t_VL.view({B, S, N, H}).permute({0, 2, 1, 3}).contiguous();
+    t_QL = t_QL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
+    t_KL = t_KL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
+    t_VL = t_VL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
+    auto Nq = t_QL.size(1);
+    auto Nkv = t_KL.size(1);
+    // printf("%s:%d Nq = %ld, Nkv = %ld\n", __func__, __LINE__, Nq, Nkv);
+    // TPP_ASSERT(Nq == Nkv, "Nq and Nkv are not equal\n");
 
     if (csz < 4) {
       if (t_key_past.numel() > 0) {
@@ -1756,49 +1442,77 @@ struct LLMBlock : torch::CustomClassHolder {
       if (t_value_past.numel() > 0) {
         t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
       }
+      // std::cout << "1 t_KL.shape: " << t_KL.sizes() << std::endl;
 
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-      t_CL = t_CL.view({B, N, S, H})
+      t_CL = t_CL.view({B, Nq, S, H})
                  .permute({0, 2, 1, 3})
                  .contiguous()
-                 .view({B, S, N * H});
+                 .view({B, S, Nq * H});
 
       return {t_CL, t_KL, t_VL};
 
     } else if (offset == 0) {
+      // std::cout << "2 t_KL.shape: " << t_KL.sizes() << std::endl;
       t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
       auto capacity = S + KV_CACHE_INC_SIZE;
-      t_key_past = t_KL.new_zeros({B, N, capacity, H});
-      t_value_past = t_VL.new_zeros({B, N, capacity, H});
+#ifdef S_FIRST_KVC
+      t_key_past = t_KL.new_zeros({capacity, B, Nkv, H});
+      t_value_past = t_VL.new_zeros({capacity, B, Nkv, H});
+#else
+      t_key_past = t_KL.new_zeros({B, Nkv, capacity, H});
+      t_value_past = t_VL.new_zeros({B, Nkv, capacity, H});
+#endif
       // t_beam_idx = t_beam_idx.new_zeros({capacity, B});
       t_beam_idx =
           at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
       // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() <<
       // std::endl;
       t_offset = t_offset + S;
+#ifdef S_FIRST_KVC
+      t_key_past.slice(0, 0, S, 1).copy_(t_KL.permute({2, 0, 1, 3}));
+      t_value_past.slice(0, 0, S, 1).copy_(t_VL.permute({2, 0, 1, 3}));
+#else
       t_key_past.slice(2, 0, S, 1).copy_(t_KL);
       t_value_past.slice(2, 0, S, 1).copy_(t_VL);
-      t_CL = t_CL.view({B, N, S, H})
+#endif
+      t_CL = t_CL.view({B, Nq, S, H})
                  .permute({0, 2, 1, 3})
                  .contiguous()
-                 .view({B, S, N * H});
+                 .view({B, S, Nq * H});
       return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
       // printf("old offset = %d, new_offset = %ld\n", offset,
       // t_offset.item<long>());
     } else {
+#ifdef S_FIRST_KVC
+      auto capacity = t_key_past.size(0);
+#else
       auto capacity = t_key_past.size(2);
+#endif
       if (capacity <= offset) {
         printf(
             "Warning: Reallocating kv cache, consider increasing KV_CACHE_INC_SIZE (%d)\n",
             KV_CACHE_INC_SIZE);
         auto new_capacity = offset + KV_CACHE_INC_SIZE;
-        auto t_key_past_new = t_key_past.new_empty({B, N, new_capacity, H});
+#ifdef S_FIRST_KVC
+        auto t_key_past_new = t_key_past.new_empty({new_capacity, B, Nkv, H});
+        t_key_past_new.slice(0, 0, offset, 1).copy_(t_key_past);
+        t_key_past = t_key_past_new;
+
+        auto t_value_past_new =
+            t_value_past.new_empty({new_capacity, B, Nkv, H});
+        t_value_past_new.slice(0, 0, offset, 1).copy_(t_value_past);
+        t_value_past = t_value_past_new;
+#else
+        auto t_key_past_new = t_key_past.new_empty({B, Nkv, new_capacity, H});
         t_key_past_new.slice(2, 0, offset, 1).copy_(t_key_past);
         t_key_past = t_key_past_new;
 
-        auto t_value_past_new = t_value_past.new_empty({B, N, new_capacity, H});
+        auto t_value_past_new =
+            t_value_past.new_empty({B, Nkv, new_capacity, H});
         t_value_past_new.slice(2, 0, offset, 1).copy_(t_value_past);
         t_value_past = t_value_past_new;
+#endif
 
         auto t_beam_idx_new =
             at::arange(B).unsqueeze(0).expand({new_capacity, B}).contiguous();
@@ -1823,16 +1537,22 @@ struct LLMBlock : torch::CustomClassHolder {
       }
       t_CL = attn<T>(
           t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
-      t_CL = t_CL.view({B, N, S, H})
+      t_CL = t_CL.view({B, Nq, S, H})
                  .permute({0, 2, 1, 3})
                  .contiguous()
-                 .view({B, S, N * H});
+                 .view({B, S, Nq * H});
       t_offset = t_offset + 1;
       S = t_offset.item<long>();
+#ifdef S_FIRST_KVC
+      t_KL = t_key_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
+      t_VL = t_value_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
+#else
       t_KL = t_key_past.slice(2, 0, S, 1);
       t_VL = t_value_past.slice(2, 0, S, 1);
+#endif
       // printf("old offset = %d, new_offset = %ld\n", offset,
       // t_offset.item<long>());
+      // std::cout << "t_key_past = " << t_key_past.sizes() << std::endl;
       return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
     }
   }
@@ -1845,6 +1565,10 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G, t_B;
   at::Tensor t_EP; // embed_positions
+  // cached for first token
+  at::Tensor t_Wq_1, t_Wk_1, t_Wv_1, t_Wp_1;
+  at::Tensor t_Wi_1, t_Wo_1;
+  bool first_token_remapped = false;
   float eps;
   long N, H;
   long max_positions, rotary_dim;
@@ -1884,6 +1608,17 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
     }
   }
 
+  template <typename T>
+  void remap_for_first_token() {
+    t_Wq_1 = wt_tensor_for_first_token<T>(t_Wq);
+    t_Wk_1 = wt_tensor_for_first_token<T>(t_Wk);
+    t_Wv_1 = wt_tensor_for_first_token<T>(t_Wv);
+    t_Wp_1 = wt_tensor_for_first_token<T>(t_Wp);
+    t_Wi_1 = wt_tensor_for_first_token<T>(t_Wi);
+    t_Wo_1 = wt_tensor_for_first_token<T>(t_Wo);
+    first_token_remapped = true;
+  }
+
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
       std::vector<at::Tensor> t_cache,
@@ -1910,6 +1645,25 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
       large_cache_opt = true;
     else
       large_cache_opt = false;
+
+    auto t_Wq = this->t_Wq;
+    auto t_Wk = this->t_Wk;
+    auto t_Wv = this->t_Wv;
+    auto t_Wp = this->t_Wp;
+    auto t_Wi = this->t_Wi;
+    auto t_Wo = this->t_Wo;
+
+    if (B * S > FT_OPT_SIZE) {
+      if (!first_token_remapped)
+        remap_for_first_token<T>();
+
+      t_Wq = this->t_Wq_1;
+      t_Wk = this->t_Wk_1;
+      t_Wv = this->t_Wv_1;
+      t_Wp = this->t_Wp_1;
+      t_Wi = this->t_Wi_1;
+      t_Wo = this->t_Wo_1;
+    }
 
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
@@ -2077,7 +1831,7 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
   at::Tensor t_Gi, t_Gpa;
   at::Tensor t_EP; // embed_positions
   float eps;
-  long N, H;
+  long Nq, Nkv, H;
   long max_positions, rotary_dim;
 
   LlamaDecoderLayer(
@@ -2107,10 +1861,11 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
 
     t_EP = params[i++]; // embed_positions
 
-    N = t_Wq.size(0) * t_Wq.size(3) / H;
+    Nq = t_Wq.size(0) * t_Wq.size(3) / H;
+    Nkv = t_Wk.size(0) * t_Wk.size(3) / H;
     if (my_rank == 0) {
-      std::cout << "my_size=" << my_size << " N=" << N << " H=" << H
-                << std::endl;
+      std::cout << "my_size=" << my_size << " Nq=" << Nq << " Nkv=" << Nkv
+                << " H=" << H << std::endl;
     }
   }
 
@@ -2146,10 +1901,10 @@ struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
     t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
 
     auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
-    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, N, H);
+    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
 
     auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, N, H);
+    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
 
     auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
 
@@ -2320,6 +2075,7 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
+  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.def(
       "apply_rotary_pos_emb_gptj",
       &apply_rotary_pos_emb_gptj_wrap,
@@ -2342,6 +2098,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
+  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);

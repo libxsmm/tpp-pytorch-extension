@@ -245,8 +245,9 @@ def OptimizeModelForLlama(model, dtype, device="cpu"):
         if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
             FixLlamaDecoderLayer(m, 16, 64, dtype)
         elif isinstance(m, torch.nn.Linear):
-            FixLinear(m, 100, 64, dtype, parallel_dim=0)
-            block(m)
+            if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
+                FixLinear(m, 100, 64, dtype, parallel_dim=1, block_size=64)
+                block(m)
     for m in model.modules():
         for name in m._parameters.keys():
             if m._parameters[name] is None or not m._parameters[name].is_meta:

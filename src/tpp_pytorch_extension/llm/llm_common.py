@@ -38,6 +38,8 @@ USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
 global_layer_dtype = torch.float32
 
+BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
+
 
 def compare(ref, opt, name=""):
     ref = ref.detach()
@@ -369,10 +371,10 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         if self.bias is not None:
             self.bias.block()
 
-    def parallelize(self, dim, rank, size):
+    def parallelize(self, dim, rank, size, block_size=1):
         if size <= 1:
             return
-        ShardLinear(self, dim, rank, size)
+        ShardLinear(self, dim, rank, size, block_size)
         self.model_parallel = True
         self.parallel_dim = dim
         self.parallel_rank = rank
@@ -412,7 +414,12 @@ class BlockedLayerNorm(BlockedModule, torch.nn.LayerNorm):
 
 
 def FixLinear(
-    self, bk=None, bc=None, layer_dtype=global_layer_dtype, parallel_dim=None
+    self,
+    bk=None,
+    bc=None,
+    layer_dtype=global_layer_dtype,
+    parallel_dim=None,
+    block_size=1,
 ):
     if not isinstance(self, torch.nn.Linear):
         return
@@ -421,7 +428,7 @@ def FixLinear(
     self.__class__ = BlockedLinear
     self.model_parallel = False
     if parallel_dim is not None:
-        self.parallelize(parallel_dim, get_rank(), get_size())
+        self.parallelize(parallel_dim, get_rank(), get_size(), block_size=block_size)
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
@@ -510,6 +517,7 @@ def get_layer_past_and_offset(
     if layer_past is None:
         return ([], 0)
     n = len(layer_past)
+    B_DIM = BATCH_DIM_IN_KV_CACHE
     if n < 4:  # cache with beam_idx
         if discrete_kv == True:
             B1, N, S, H = layer_past[0].shape
@@ -519,11 +527,19 @@ def get_layer_past_and_offset(
                 B2 = B1
             inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "128"))
             capacity = S + inc_size
-            new_key = layer_past[0].new_zeros([B2, N, capacity, H])
-            new_value = layer_past[1].new_zeros([B2, N, capacity, H])
+            if B_DIM == 1:
+                new_key = layer_past[0].new_zeros([capacity, B2, N, H])
+                new_value = layer_past[1].new_zeros([capacity, B2, N, H])
+            else:
+                new_key = layer_past[0].new_zeros([B2, N, capacity, H])
+                new_value = layer_past[1].new_zeros([B2, N, capacity, H])
             if B1 == B2:
-                new_key[:, :, :S, :].copy_(layer_past[0])
-                new_value[:, :, :S, :].copy_(layer_past[1])
+                if B_DIM == 1:
+                    new_key[:S, :, :, :].copy_(layer_past[0].permute([2, 0, 1, 3]))
+                    new_value[:S, :, :, :].copy_(layer_past[1].permute([2, 0, 1, 3]))
+                else:
+                    new_key[:, :, :S, :].copy_(layer_past[0])
+                    new_value[:, :, :S, :].copy_(layer_past[1])
                 new_beam_idx = (
                     torch.arange(B2).unsqueeze(0).expand([capacity, B2]).contiguous()
                 )
@@ -533,14 +549,24 @@ def get_layer_past_and_offset(
                 assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
                 assert n == 3, f"Must use lazy kv cache reorder but n = {n}"
                 num_beams = B2 // B1
-                new_key[::num_beams, :, :S, :] = layer_past[0]
-                new_value[::num_beams, :, :S, :] = layer_past[1]
+                if B_DIM == 1:
+                    new_key[:S, ::num_beams, :, :] = layer_past[0].permute([2, 0, 1, 3])
+                    new_value[:S, ::num_beams, :, :] = layer_past[1].permute(
+                        [2, 0, 1, 3]
+                    )
+                else:
+                    new_key[::num_beams, :, :S, :] = layer_past[0]
+                    new_value[::num_beams, :, :S, :] = layer_past[1]
                 new_beam_idx = layer_past[2].new_zeros([capacity, B2]).contiguous()
                 # beam_idx was adjusted in reorder_cache by num_beams, so fit it back
                 new_beam_idx[:S] = layer_past[2] * num_beams
             offset = torch.tensor(S)
-            key = new_key[:, :, :S, :]
-            value = new_value[:, :, :S, :]
+            if B_DIM == 1:
+                key = new_key[:S, :, :, :].permute([1, 2, 0, 3])
+                value = new_value[:S, :, :, :].permute([1, 2, 0, 3])
+            else:
+                key = new_key[:, :, :S, :]
+                value = new_value[:, :, :S, :]
             layer_past = (
                 key,
                 value,
@@ -574,7 +600,8 @@ def _reorder_cache(
         assert (
             len(past[0]) == 6
         ), f"Invalid past key_value tuple length ({len(past[0])})"
-        B1 = past[0][4].shape[0]
+        B_DIM = BATCH_DIM_IN_KV_CACHE
+        B1 = past[0][4].shape[B_DIM]
         B2 = beam_idx.shape[0]
         # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
         # print(f"B1 = {B1}, B2 = {B2}")
@@ -585,10 +612,10 @@ def _reorder_cache(
             S = past[0][0].shape[2]
             for layer_past in past:
                 layer_past_4 = (
-                    layer_past[4].repeat_interleave(num_beams, dim=0).contiguous()
+                    layer_past[4].repeat_interleave(num_beams, dim=B_DIM).contiguous()
                 )
                 layer_past_5 = (
-                    layer_past[5].repeat_interleave(num_beams, dim=0).contiguous()
+                    layer_past[5].repeat_interleave(num_beams, dim=B_DIM).contiguous()
                 )
                 layer_past_2 = (
                     layer_past[2]
@@ -597,8 +624,12 @@ def _reorder_cache(
                     .contiguous()
                 )
                 layer_past_2[layer_past[3] - 1] = beam_idx
-                layer_past_0 = layer_past_4[:, :, :S, :]
-                layer_past_1 = layer_past_5[:, :, :S, :]
+                if B_DIM == 1:
+                    layer_past_0 = layer_past_4[:S].permute([1, 2, 0, 3])
+                    layer_past_1 = layer_past_5[:S].permute([1, 2, 0, 3])
+                else:
+                    layer_past_0 = layer_past_4[:, :, :S, :]
+                    layer_past_1 = layer_past_5[:, :, :S, :]
                 new_past.append(
                     (
                         layer_past_0,

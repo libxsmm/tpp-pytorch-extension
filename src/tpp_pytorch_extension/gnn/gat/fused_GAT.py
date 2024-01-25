@@ -62,6 +62,56 @@ class DummyLinear(BlockedModule):
         return input
 
 
+class LinearOut(BlockedModule):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOut, self).__init__()
+        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = BlockedParameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+        self.bk = out_features
+        self.bc = 64
+        self.weight.set_blocking_param(
+            (
+                [self.bk, self.bc],
+                [0, 2, 3, 1],
+            )
+        )
+
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
+
+    def maybe_block_params(self):
+        self.weight.block()
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
+
+
+class LinearOutBF16(LinearOut):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOutBF16, self).__init__(in_features, out_features)
+        self.weight.set_blocking_param(
+            (
+                [self.bk, [self.bc // 2, 2]],
+                [0, 2, 3, 1, 4],
+                torch.bfloat16,
+            )
+        )
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
+
+
 class GATMLPAttentionFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, fuse_bias, *inputs):
@@ -329,6 +379,52 @@ class FusedReLUDrop(nn.Module):
         return output
 
 
+class FusedLeakyReLUDropFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, alpha, p, inp, training):
+        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(
+            alpha, p, inp, training
+        )
+        if training:
+            ctx.save_for_backward(inp, rmask, dpmask)
+            ctx.alpha = alpha
+            ctx.p = p
+
+        return out
+
+    @staticmethod
+    def backward(ctx, *grad_outs):
+        inputs = list(grad_outs)
+        inputs += ctx.saved_tensors
+        grad_inp = fused_gat_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
+        return (None, None, grad_inp, None)
+
+
+class FusedLeakyReLUDrop(nn.Module):
+    __constants__ = ["alpha", "p", "inplace"]
+    p: float
+    inplace: bool
+
+    def __init__(
+        self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False
+    ) -> None:
+        super(FusedLeakyReLUDrop, self).__init__()
+        self.inplace = False  # inplace
+        if p < 0 or p > 1:
+            raise ValueError(
+                "dropout probability has to be between 0 and 1, " "but got {}".format(p)
+            )
+        self.alpha = alpha
+        self.p = p
+
+    def extra_repr(self) -> str:
+        return "alpha={}, p={}, inplace={}".format(self.alpha, self.p, self.inplace)
+
+    def forward(self, input):
+        output = FusedLeakyReLUDropFn.apply(self.alpha, self.p, input, self.training)
+        return output
+
+
 class AddBiasFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, bias):
@@ -433,6 +529,7 @@ class GATConvOpt(BlockedModule):
         feat_drop=0.0,
         attn_drop=0.0,
         negative_slope=0.2,
+        alpha=0.01,
         residual=False,
         activation=None,
         allow_zero_in_degree=False,
@@ -446,10 +543,9 @@ class GATConvOpt(BlockedModule):
         self.bc = self._in_dst_feats
         self.bk = num_heads * self._out_feats
         self.res = False
-        self.align = 32
+        self.align = 64
         self.fdp = feat_drop
         self.adp = attn_drop
-        print("Use opt_mlp code---------------")
         for cbf in [50, 32, 16]:
             if self._in_dst_feats % cbf == 0:
                 self.bc = cbf
@@ -522,9 +618,15 @@ class GATConvOpt(BlockedModule):
         self.act_drop = None
         self.activation = None
         if activation is not None and feat_drop > 0.0:
-            self.act_drop = FusedReLUDrop(feat_drop)
+            if activation == F.relu:
+                self.act_drop = FusedReLUDrop(feat_drop)
+            elif activation == F.leaky_relu:
+                self.act_drop = FusedLeakyReLUDrop(alpha, feat_drop)
         elif activation is not None and feat_drop == 0.0:
-            self.activation = ReLU()
+            if activation == F.relu:
+                self.activation = ReLU()
+            elif activation == F.leaky_relu:
+                self.activation = LeakyReLU(alpha)
 
         self.use_bf16 = False
         self.reset_parameters()
@@ -645,7 +747,7 @@ class GATConvOpt(BlockedModule):
 
                 el, feat_src_ = GATMLPAttentionFunction.apply(
                     align,
-                    self.fuse_dst_bias or self.fuse_bias,
+                    self.fuse_src_bias or self.fuse_bias,
                     *inputs_src,
                 )
                 feat_src = feat_src_.view(
@@ -676,11 +778,8 @@ class GATConvOpt(BlockedModule):
             else:
 
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
-
-                inputs_src = [
-                    h_src,
-                    self.fc_src.weight,
-                ]
+                h_src = feat
+                inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
                 elif self.bias is not None:
@@ -694,7 +793,7 @@ class GATConvOpt(BlockedModule):
                     self.fuse_src_bias or self.fuse_bias,
                     *inputs_src,
                 )
-                feat_src = feat_src.view(
+                feat_src = feat_src_.view(
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
                 feat_dst = feat_src
@@ -733,7 +832,7 @@ class GATConvOpt(BlockedModule):
                 rst = self.act_drop(rst)
             elif self.activation is not None:
                 rst = self.activation(rst)
-                rst = self.feat_drop(rst)
+                # rst = self.feat_drop(rst)
 
             if get_attention:
                 return rst, graph.edata["a"]
@@ -750,6 +849,7 @@ class GATConvOptBF16(GATConvOpt):
         feat_drop=0.0,
         attn_drop=0.0,
         negative_slope=0.2,
+        alpha=0.01,
         residual=False,
         activation=None,
         allow_zero_in_degree=False,
@@ -763,6 +863,7 @@ class GATConvOptBF16(GATConvOpt):
             feat_drop,
             attn_drop,
             negative_slope,
+            alpha,
             residual,
             activation,
             allow_zero_in_degree,

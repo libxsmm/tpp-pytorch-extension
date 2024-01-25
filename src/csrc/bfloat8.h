@@ -13,6 +13,7 @@
 
 #ifndef PYTORCH_SUPPORTS_BFLOAT8
 #include <libxsmm.h>
+#include <libxsmm_utils.h>
 
 namespace at {
 

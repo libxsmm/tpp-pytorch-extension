@@ -40,3 +40,7 @@ run_dist_ht.sh -np 8 -ppn 8 python -u run_generation.py --device cpu --dtype bfl
 # Run from HBM with sharded model
 run_dist_ht.sh -np 8 -ppn 8 bash numawrap.sh 8 python -u run_generation.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use-tpp --load-sharded-model
 
+
+
+# First token benchmark
+OMP_NUM_THREADS=<physical cores num> numactl -m <node N> -C <cpu list> python -u run_first_token.py --input-tokens 1024  --use-tpp

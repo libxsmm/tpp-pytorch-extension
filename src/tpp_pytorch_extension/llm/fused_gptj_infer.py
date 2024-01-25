@@ -198,7 +198,7 @@ def OptimizeModelForGPTJ(model, dtype, device="cpu"):
             FixGPTJBlock(m, 16, 64, dtype)
         elif isinstance(m, torch.nn.Linear):
             if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
-                FixLinear(m, 100, 64, dtype, parallel_dim=0)
+                FixLinear(m, 100, 64, dtype, parallel_dim=0, block_size=100)
                 block(m)
     for m in model.modules():
         for name in m._parameters.keys():
