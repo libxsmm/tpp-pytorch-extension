@@ -18,6 +18,37 @@
 #include <torch/extension.h>
 #include "xsmm_functors.h"
 
+#define BS 1024
+namespace shm_tpp {
+template <typename T, int S = BS>
+struct TppOps {
+  CpyTPP<T> cpy_tpp = CpyTPP<T>(BS);
+  ConvertTPP<T, float> ucvt_tpp = ConvertTPP<T, float>(BS);
+  ConvertTPP<float, T> dcvt_tpp = ConvertTPP<float, T>(BS);
+  AddTPP<float, float, T> add_tpp = AddTPP<float, float, T>(BS);
+};
+
+static TppOps<float> ops_f;
+static TppOps<bfloat16> ops_bf;
+static TppOps<half> ops_hf;
+
+template <typename T>
+static TppOps<T> getOps() {}
+
+template <>
+TppOps<float> getOps<float>() {
+  return ops_f;
+}
+template <>
+TppOps<bfloat16> getOps<bfloat16>() {
+  return ops_bf;
+}
+template <>
+TppOps<half> getOps<half>() {
+  return ops_hf;
+}
+} // namespace shm_tpp
+
 class SHMBuffer {
  public:
   static const int SHMID = 100;
@@ -137,7 +168,6 @@ class SHMBuffer {
 
   template <typename T>
   void allreduce_impl(at::Tensor t) {
-    constexpr int BS = 1024;
     auto numel = t.numel();
     auto nBytes = numel * t.element_size();
     TPP_ASSERT(nBytes <= bufsz / 2, "Too large allreduce size");
@@ -146,14 +176,13 @@ class SHMBuffer {
     int rem = numel % BS;
     TPP_ASSERT(rem == 0, "Reminder not supported yet\n");
     bool need_copy = ptr != shm_data[rank];
-    auto cpy_tpp = SCOPEIT(CpyTPP<T>(BS), EW_COPY);
-    auto ucvt_tpp = SCOPEIT((ConvertTPP<T, float>(BS)), EW_COPY);
-    auto dcvt_tpp = SCOPEIT((ConvertTPP<float, T>(BS)), EW_COPY);
-    auto add_tpp = SCOPEIT((AddTPP<float, float, T>(BS)), EW_ADD);
-    // printf("SHM At %s:%d\n", __func__, __LINE__);
+    auto ops = shm_tpp::getOps<T>();
+    auto& cpy_tpp = ops.cpy_tpp;
+    auto& ucvt_tpp = ops.ucvt_tpp;
+    auto& dcvt_tpp = ops.dcvt_tpp;
+    auto& add_tpp = ops.add_tpp;
 
     if (need_copy) {
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
       auto src = ptr;
       auto dst = (T*)shm_data[rank];
 #pragma omp parallel for
@@ -162,12 +191,9 @@ class SHMBuffer {
       }
     }
 
-    // printf("SHM At %s:%d\n", __func__, __LINE__);
     barrier();
-    // printf("SHM At %s:%d\n", __func__, __LINE__);
 
     if (numel <= DIRECT_THRESHOLD) {
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
       auto dst = (T*)scratch_data[rank];
       auto lsrc = (T*)shm_data[rank];
 #pragma omp parallel for
@@ -184,7 +210,6 @@ class SHMBuffer {
       barrier();
 
       if (true) {
-        // printf("SHM At %s:%d\n", __func__, __LINE__);
         auto src = (T*)scratch_data[rank];
         auto dst = ptr;
 #pragma omp parallel for
@@ -193,7 +218,6 @@ class SHMBuffer {
         }
       }
     } else {
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
       int slice_start = (nBlk * rank / size) * BS;
       int slice_end = (nBlk * (rank + 1) / size) * BS;
       int slice_size = slice_end - slice_start;
@@ -211,11 +235,8 @@ class SHMBuffer {
         }
         dcvt_tpp(ldst, dst + i);
       }
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
       barrier();
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
       if (true) {
-        // printf("SHM At %s:%d\n", __func__, __LINE__);
         for (int r = 0; r < size; r++) {
           int r1 = (r + rank) % size;
           int slice_start = (nBlk * r1 / size) * BS;
@@ -230,9 +251,7 @@ class SHMBuffer {
           }
         }
       }
-      // printf("SHM At %s:%d\n", __func__, __LINE__);
     }
-    // printf("SHM At %s:%d\n", __func__, __LINE__);
   }
 
   void allreduce(at::Tensor t) {
@@ -248,5 +267,7 @@ class SHMBuffer {
     }
   }
 };
+
+#undef BS
 
 #endif // _TPP_SHM_COLL_H_
