@@ -88,3 +88,20 @@ x = torch.ones([1024])
 print(f"before x: {x}")
 shm_allreduce(x)
 print(f"after x: {x}")
+
+
+sizes = [1024 * 4096, 4 * 4096]
+sizes = [2**i for i in range(24, 9, -1)]
+# sz = 16*1024
+for sz in sizes:
+    t = torch.ones([sz]).to(torch.bfloat16)
+    for _ in range(10):
+        shm_allreduce(t)
+
+    iters = 1000
+    t0 = time.time()
+    for _ in range(iters):
+        shm_allreduce(t)
+    t1 = time.time()
+
+    print(f"#Elem: {sz}  Avg allreduce time: {(t1-t0)*1e6/iters:.3f} usec")

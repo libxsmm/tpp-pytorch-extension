@@ -18,7 +18,7 @@
 #include <torch/extension.h>
 #include "xsmm_functors.h"
 
-#define BS 1024
+#define BS 512
 namespace shm_tpp {
 template <typename T, int S = BS>
 struct TppOps {
@@ -54,7 +54,7 @@ class SHMBuffer {
   static const int SHMID = 100;
   static const int BARID = 10000;
   static const int MAX_RANKS = 64;
-  static const int DIRECT_THRESHOLD = 8 * 1024;
+  static const int DIRECT_THRESHOLD = 32 * 1024;
   c10::intrusive_ptr<c10d::ProcessGroup> pg;
   int rank;
   int size;
@@ -76,7 +76,7 @@ class SHMBuffer {
     shmid[rank] = shmget(SHMID + rank, bufsz, IPC_CREAT | 0666);
     TPP_ASSERT(
         shmid[rank] >= 0,
-        "shmid cannot create shared memory of size %lu",
+        "shmid cannot create shared memory of size %lu\n",
         bufsz);
     // printf("SHM At %d\n", __LINE__);
     if (rank == 0) {
@@ -90,12 +90,12 @@ class SHMBuffer {
     for (int i = 0; i < size; i++) {
       if (i != rank)
         shmid[i] = shmget(SHMID + i, bufsz, 0666);
-      TPP_ASSERT(shmid[i] >= 0, "shmid cannot get shared memory");
+      TPP_ASSERT(shmid[i] >= 0, "shmid cannot get shared memory\n");
     }
     // printf("SHM At %d\n", __LINE__);
     if (rank != 0) {
       barid = shmget(BARID, 4096, IPC_CREAT | 0666);
-      TPP_ASSERT(barid >= 0, "barid cannot create shared memory");
+      TPP_ASSERT(barid >= 0, "barid cannot create shared memory\n");
     }
     // printf("SHM At %d\n", __LINE__);
     for (int i = 0; i < size; i++) {
@@ -220,7 +220,7 @@ class SHMBuffer {
     } else {
       int slice_start = (nBlk * rank / size) * BS;
       int slice_end = (nBlk * (rank + 1) / size) * BS;
-      int slice_size = slice_end - slice_start;
+      // int slice_size = slice_end - slice_start;
 
       auto dst = (T*)scratch_data[rank];
       auto lsrc = (T*)shm_data[rank];
@@ -241,7 +241,7 @@ class SHMBuffer {
           int r1 = (r + rank) % size;
           int slice_start = (nBlk * r1 / size) * BS;
           int slice_end = (nBlk * (r1 + 1) / size) * BS;
-          int slice_size = slice_end - slice_start;
+          // int slice_size = slice_end - slice_start;
 
           auto src = (T*)scratch_data[r1];
           auto dst = ptr;

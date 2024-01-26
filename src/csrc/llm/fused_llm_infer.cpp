@@ -44,7 +44,7 @@ static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
-static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", 1);
+static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
 static const char* GEMM_LOOP_SCHEME =
     getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
 
@@ -74,11 +74,49 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
   process_group = process_group_;
   my_size = process_group->getSize();
   my_rank = process_group->getRank();
-  printf("Setting PG: my_size = %d  my_rank = %d\n", my_size, my_rank);
+  if (my_size == 1)
+    return;
+  auto my_local_size = env2int("MPI_LOCALNRANKS", 0);
+  if (my_local_size > 0 && my_local_size == my_size) {
+    if (USE_SHM_ALLREDUCE == -1) {
+      USE_SHM_ALLREDUCE = 1;
+      // if (my_rank == 0) printf("Single node distributed run detected,
+      // enabling SHM_ALLREDUCE\n");
+    } else if (USE_SHM_ALLREDUCE == 0) {
+      // if (my_rank == 0) printf("Single node distributed run detected, but
+      // USE_SHM_ALLREDUCE set to 0, so not using SHM_ALLREDUCE\n");
+    } else {
+      USE_SHM_ALLREDUCE = 1;
+      // if (my_rank == 0) printf("Single node distributed run detected, using
+      // SHM_ALLREDUCE\n");
+    }
+  } else if (
+      my_local_size > 0 &&
+      (USE_SHM_ALLREDUCE != -1 || USE_SHM_ALLREDUCE != 0)) {
+    USE_SHM_ALLREDUCE = 0;
+    // if (my_rank == 0) printf("Multi-node distributed run detected, disabling
+    // SHM_ALLREDUCE\n");
+  }
+  printf(
+      "Setting PG: my_size = %d  my_rank = %d  my_local_size = %d SHM_ALLREDUCE = %d\n",
+      my_size,
+      my_rank,
+      my_local_size,
+      USE_SHM_ALLREDUCE);
+}
+
+static inline void shm_allreduce(at::Tensor t_in) {
+  RECORD_SCOPE(allred, {t_in});
+  if (!process_group) {
+    printf("Missing process group when using model parallel, use set_pg()\n");
+    exit(1);
+  }
+  auto shm_inst =
+      SHMBuffer::getInst(t_in.numel() * t_in.element_size(), process_group);
+  shm_inst->allreduce(t_in);
 }
 
 static inline void allreduce(at::Tensor t_in) {
-  RECORD_SCOPE(allred, {t_in});
   if (!process_group) {
     printf("Missing process group when using model parallel, use set_pg()\n");
     exit(1);
@@ -89,13 +127,12 @@ static inline void allreduce(at::Tensor t_in) {
     process_group->barrier()->wait();
   }
 #endif
-  if (!USE_SHM_ALLREDUCE) {
+  if (!USE_SHM_ALLREDUCE == 1) {
+    RECORD_SCOPE(allred, {t_in});
     std::vector<at::Tensor> temp_vec = {t_in};
     process_group->allreduce(temp_vec)->wait();
   } else {
-    auto shm_inst =
-        SHMBuffer::getInst(t_in.numel() * t_in.element_size(), process_group);
-    shm_inst->allreduce(t_in);
+    shm_allreduce(t_in);
   }
 }
 
