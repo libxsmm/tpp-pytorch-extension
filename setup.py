@@ -128,6 +128,7 @@ sources = [
     "src/csrc/optim.cpp",
     "src/csrc/xsmm.cpp",
     "src/csrc/bfloat8.cpp",
+    "src/csrc/shm_coll.cpp",
 ]
 
 # AlphaFold sources

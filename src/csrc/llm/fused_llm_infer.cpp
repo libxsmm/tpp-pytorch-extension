@@ -105,18 +105,8 @@ void set_pg(c10::intrusive_ptr<c10d::ProcessGroup> process_group_) {
       USE_SHM_ALLREDUCE);
 }
 
-static inline void shm_allreduce(at::Tensor t_in) {
-  RECORD_SCOPE(allred, {t_in});
-  if (!process_group) {
-    printf("Missing process group when using model parallel, use set_pg()\n");
-    exit(1);
-  }
-  auto shm_inst =
-      SHMBuffer::getInst(t_in.numel() * t_in.element_size(), process_group);
-  shm_inst->allreduce(t_in);
-}
-
 static inline void allreduce(at::Tensor t_in) {
+  RECORD_SCOPE(allred, {t_in});
   if (!process_group) {
     printf("Missing process group when using model parallel, use set_pg()\n");
     exit(1);
@@ -128,11 +118,10 @@ static inline void allreduce(at::Tensor t_in) {
   }
 #endif
   if (!USE_SHM_ALLREDUCE == 1) {
-    RECORD_SCOPE(allred, {t_in});
     std::vector<at::Tensor> temp_vec = {t_in};
     process_group->allreduce(temp_vec)->wait();
   } else {
-    shm_allreduce(t_in);
+    shm_allreduce(t_in, process_group);
   }
 }
 
