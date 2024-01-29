@@ -19,6 +19,8 @@ int64_t HS_t = q_data.size(2); /* Channels (256) */
 int64_t N_t = query_w.size(1); /* number of heads (8) */
 int64_t H_t = query_w.size(2); /* head size (32) */
 
+auto flag = nonbatched_bias.size(0) > 0;
+
 int64_t S_t = Sp_t;
 if (Sp_t % QKV_BLOCKSIZE != 0) {
   S_t = (Sp_t / QKV_BLOCKSIZE + 1) * QKV_BLOCKSIZE; // 768
@@ -33,17 +35,20 @@ if (Sp_t % QKV_BLOCKSIZE != 0) {
   q_data = at::cat({q_data, q_data_pad}, 1);
   m_data = at::cat({m_data, m_data_pad}, 1);
   bias = at::cat({bias, bias_pad}, 3);
-  nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad1}, 2);
-  nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
+  if (flag) {
+    nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad1}, 2);
+    nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
+  }
 }
 
+bias = bias.contiguous();
 auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t, at::kFloat).contiguous();
 auto sfmask_a = GetVLAPtr<float>(sfmask, {1L});
 
 auto q_data_a = GetVLAPtr<T>(q_data, {S_t, HS_t});
 auto m_data_a = GetVLAPtr<T>(m_data, {S_t, HS_t});
 
-auto bias_a = GetVLAPtr<float>(bias, {1L, 1L, S_t});
+auto bias_a = GetVLAPtr<float>(bias, {S_t});
 auto nonbatched_bias_a = GetVLAPtr<float>(nonbatched_bias, {N_t, S_t, S_t});
 
 auto query_w_a = GetVLAPtr<T>(query_w, {N_t, H_t});
@@ -164,7 +169,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
   }
 }
 
-auto flag = nonbatched_bias.size(0) > 0;
+// auto flag = nonbatched_bias.size(0) > 0;
 lda = H_t;
 ldb = A_BLOCKSIZE;
 ldc = S_t;
@@ -252,7 +257,7 @@ auto a_softmax_tpp =
             a_brgemm_tpp(&tmp_qv[0], &tmp_k[0], &tmp_logits[0][j2], 1);
             // a_convert_tpp1(&bias_a[i][0][0][j2], &tmp_conv[0][j2]);
             // a_addbias_tpp(&tmp_conv[0][j2], &tmp_logits[0][j2]);
-            a_addbias_tpp(&bias_a[i][0][0][j2], &tmp_logits[0][j2]);
+            a_addbias_tpp(&bias_a[i][j2], &tmp_logits[0][j2]);
             if (flag) {
               // a_convert_tpp2(&nonbatched_bias_a[0][k][j1][j2],
               // &tmp_conv[0][j2]); a_add_nbbias_tpp(&tmp_conv[0][j2],
