@@ -1071,9 +1071,13 @@ def main():
     if int(os.environ.get("PMI_SIZE", "0")) > 1:
         if args.dist_backend == "ccl":
             try:
-                import torch_ccl
+                import oneccl_bindings_for_pytorch
+
+                # import torch_ccl
             except:
-                print("CCL backend requested but import torch_ccl failed")
+                print(
+                    "CCL backend requested but import oneccl_bindings_for_pytorch failed"
+                )
                 raise
         elif args.dist_backend == "mpi":
             if not torch.distributed.is_mpi_available():

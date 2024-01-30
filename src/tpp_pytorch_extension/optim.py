@@ -283,7 +283,10 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, grad_list=False):
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
-    from torch._six import inf
+    try:
+        from torch import inf
+    except:
+        from torch._six import inf
 
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
