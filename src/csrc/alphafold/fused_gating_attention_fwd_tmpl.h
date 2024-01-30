@@ -42,6 +42,7 @@ if (Sp_t % QKV_BLOCKSIZE != 0) {
 }
 
 bias = bias.contiguous();
+nonbatched_bias = nonbatched_bias.contiguous();
 auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t);
 auto sfmask_a = GetVLAPtr<T>(sfmask, {1L});
 
