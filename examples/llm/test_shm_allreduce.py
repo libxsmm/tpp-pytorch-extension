@@ -4,6 +4,7 @@ import json
 import pathlib
 import argparse
 import os
+import numpy as np
 import inspect
 from typing import Tuple
 
@@ -13,8 +14,22 @@ try:
 except:
     pass
 
+
+def comma_separated_ints(value):
+    vals = value.split(",")
+    for val in vals:
+        try:
+            int(val)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                "%s is not a valid comma separated list of ints" % value
+            )
+
+    return value
+
+
 # args
-parser = argparse.ArgumentParser("Generation script", add_help=False)
+parser = argparse.ArgumentParser("Allreduce test and benchmark script", add_help=False)
 parser.add_argument(
     "--dtype",
     type=str,
@@ -22,11 +37,11 @@ parser.add_argument(
     default="bfloat16",
     help="bfloat16, float32 or float16",
 )
-parser.add_argument("--num-iter", default=10, type=int, help="num iter")
-parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
-parser.add_argument("--batch-size", default=1, type=int, help="batch size")
-parser.add_argument("--size", default=8192, type=int, help="buffer size")
-parser.add_argument("--profile", action="store_true")
+parser.add_argument("--num-iter", default=1000, type=int, help="num iter")
+parser.add_argument("--num-warmup", default=10, type=int, help="num warmup")
+parser.add_argument(
+    "--sizes", default=None, type=comma_separated_ints, help="buffer size"
+)
 parser.add_argument("--dist-backend", default="mpi", type=str)
 args = parser.parse_args()
 print(args)
@@ -80,24 +95,40 @@ def print_rank0(*args, **kwargs):
 print = print_rank0
 
 dist_init()
+# By default shm_allreduce try to use shm implementation
+# set USE_SHM_ALLREDUCE=0 env to force disable it
 from tpp_pytorch_extension.llm.llm_common import shm_allreduce, set_pg
 
 set_pg()
 
-x = torch.ones([1025])
+dtype = torch.bfloat16
+if args.dtype == "bfloat16":
+    dtype = torch.bfloat16
+elif args.dtype == "float32":
+    dtype = torch.float32
+elif args.dtype == "float16":
+    dtype = torch.half
+
+x = torch.ones([1025]).to(dtype)
 print(f"before x: {x}")
 shm_allreduce(x)
 print(f"after x: {x}")
 
-sizes = [2**i for i in range(9, 25)]
+if args.sizes is not None:
+    sizes = np.fromstring(args.sizes, dtype=int, sep=",")
+else:
+    sizes = [2**i for i in range(9, 25)]
+
+iters = args.num_iter
+warmup = args.num_warmup
+
 for sz in sizes:
     total_time = 0.0
-    t_ref = torch.ones([sz]).to(torch.bfloat16)
-    for _ in range(10):
+    t_ref = torch.ones([sz]).to(dtype)
+    for _ in range(warmup):
         t = t_ref.clone()
         shm_allreduce(t)
 
-    iters = 1000
     for _ in range(iters):
         t = t_ref.clone()
         t0 = time.time()
