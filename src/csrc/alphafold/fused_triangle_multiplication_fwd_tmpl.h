@@ -442,6 +442,7 @@ if (equation_flag == 0) { // "Outgoing" edges equation = 'ikc,jkc->ijc'
             .reshape({S_t, S_t, num_intermediate_channel});
 }
 
+act = act.contiguous();
 // act = at::layer_norm(act, act_dim, center_layer_norm_weight,
 // center_layer_norm_bias);
 auto center_gamma_a = GetVLAPtr<T>(center_layer_norm_weight, {1L});
