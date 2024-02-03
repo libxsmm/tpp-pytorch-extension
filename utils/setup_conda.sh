@@ -65,6 +65,7 @@ else
   exit 1
 fi
 # for bert
+conda install -y pybind11
 conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
 
 # for unbuffer
