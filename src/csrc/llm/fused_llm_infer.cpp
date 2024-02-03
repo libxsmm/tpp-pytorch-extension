@@ -117,7 +117,7 @@ static inline void allreduce(at::Tensor t_in) {
     process_group->barrier()->wait();
   }
 #endif
-  if (!USE_SHM_ALLREDUCE == 1) {
+  if (USE_SHM_ALLREDUCE != 1) {
     std::vector<at::Tensor> temp_vec = {t_in};
     process_group->allreduce(temp_vec)->wait();
   } else {
@@ -141,7 +141,7 @@ inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
   auto sz = t_in.sizes().vec();
   auto dim = t_in.dim() - 1;
   TPP_ASSERT(
-      split_sizes.size() == my_size,
+      (int)split_sizes.size() == my_size,
       "Length of split vector doesn't match group size");
   for (int i = 0; i < my_size; i++) {
     c10::InferenceMode guard(false);
@@ -1584,7 +1584,7 @@ struct LLMBlock : torch::CustomClassHolder {
   }
 };
 
-struct GPTJBlock : LLMBlock<GPTJBlock> {
+struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock<GPTJBlock> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
@@ -1723,7 +1723,8 @@ struct GPTJBlock : LLMBlock<GPTJBlock> {
   }
 };
 
-struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
+struct __attribute__((visibility("hidden"))) OPTDecoderLayer
+    : LLMBlock<OPTDecoderLayer> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp; // wt and bias for attn
   at::Tensor t_Bq, t_Bk, t_Bv, t_Bp;
@@ -1850,7 +1851,8 @@ struct OPTDecoderLayer : LLMBlock<OPTDecoderLayer> {
   }
 };
 
-struct LlamaDecoderLayer : LLMBlock<LlamaDecoderLayer> {
+struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
+    : LLMBlock<LlamaDecoderLayer> {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wg, t_Wu, t_Wd;

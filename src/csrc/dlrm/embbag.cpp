@@ -204,7 +204,7 @@ at::Tensor tpp_bdot_forward(at::Tensor& in) {
   } else if (in.scalar_type() == at::kBFloat16) {
     // std::cout << "tpp_dot: bfloat " << in.scalar_type() << std::endl;
     MYASSERT(K % 2 == 0);
-    unsigned int K2 = K / 2;
+    // unsigned int K2 = K / 2;
     // libxsmm_bmmfunction mm_kernel_bf16 = get_bmm_kernel( M, M, K );
     auto mm_kernel_bf16_tpp =
         SCOPEIT((BrgemmTPP<bfloat16, bfloat16>(M, M, K, M * K, M * K, 0.0)));

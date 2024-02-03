@@ -189,7 +189,9 @@ class BertEncoderLayer {
     auto& t_offs = t_masks[1];
     auto& t_bmap = t_masks[2];
     auto sizes = t_QL.sizes();
+#if 0
     long B = t_offs.sizes()[0] - 1;
+#endif
     long S1 = sizes[0];
     long S2 = sizes[2];
     long F2 = sizes[3];
@@ -475,7 +477,7 @@ class BertEncoderLayer {
   }
 };
 
-class BertEncoder {
+class __attribute__((visibility("hidden"))) BertEncoder {
  public:
   float eps;
   long N, HS, IS, H;
@@ -489,7 +491,7 @@ class BertEncoder {
       long IS)
       : eps(eps), N(N), HS(HS), IS(IS) {
     H = HS / N;
-    auto nLayers = params.size();
+    int nLayers = params.size();
     layers.reserve(nLayers);
     for (int i = 0; i < nLayers; i++) {
       layers.push_back(new BertEncoderLayer(params[i], eps, N, H));
@@ -497,7 +499,7 @@ class BertEncoder {
   }
 
   ~BertEncoder() {
-    for (int i = 0; i < layers.size(); i++) {
+    for (int i = 0; i < (int)layers.size(); i++) {
       delete layers[i];
       layers[i] = nullptr;
     }

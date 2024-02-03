@@ -95,7 +95,7 @@ class SHMBuffer {
     for (int i = 0; i < size; i++) {
       shm_data[i] = shmat(shmid[i], NULL, 0);
       TPP_ASSERT(shm_data[i], "shmat failed\n");
-      scratch_data[i] = shm_data[i] + bufsz / 2;
+      scratch_data[i] = (void*)((char*)shm_data[i] + bufsz / 2);
     }
     bar_data = shmat(barid, NULL, 0);
     TPP_ASSERT(bar_data, "barat failed\n");
@@ -166,7 +166,7 @@ class SHMBuffer {
   void allreduce_impl(at::Tensor t) {
     auto numel = t.numel();
     auto nBytes = numel * t.element_size();
-    TPP_ASSERT(nBytes <= bufsz / 2, "Too large allreduce size");
+    TPP_ASSERT((size_t)nBytes <= bufsz / 2, "Too large allreduce size");
     long nBlk = (numel + BS - 1) / BS;
     long max_threads = omp_get_max_threads();
     int nThreads = std::min(nBlk, max_threads);

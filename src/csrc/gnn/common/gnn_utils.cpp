@@ -106,6 +106,7 @@ at::Tensor gather_features(const long alignN, std::vector<at::Tensor> inputs) {
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
+  return at::Tensor();
 }
 
 void scatter_features(

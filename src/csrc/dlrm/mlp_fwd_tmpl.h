@@ -18,7 +18,7 @@ for (int i = 0; i < nLayers; i++) {
   auto K1 = wt_sizes[0];
   auto K2 = wt_sizes[3];
   auto padded_C2 = C2;
-  auto relu_rd = (N2 * K2 + 15) / 16;
+  // auto relu_rd = (N2 * K2 + 15) / 16;
 
   auto t_wt_V = wt_tensor_for_fwd(K1, K2, C1, C2, t_wt);
   if (t_wt_V.numel() != t_wt.numel()) { // if padded

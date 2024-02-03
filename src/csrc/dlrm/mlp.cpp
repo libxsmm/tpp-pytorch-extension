@@ -156,4 +156,6 @@ static std::vector<at::Tensor> cpp_backward(
 REGISTER_SUBMODULE(_mlp_cpp, m) {
   m.def("forward", &tpp_forward, "MLP Forward");
   m.def("backward", &tpp_backward, "MLP Backward");
+  m.def("cpp_forward", &cpp_forward, "MLP Forward");
+  m.def("cpp_backward", &cpp_backward, "MLP Backward");
 }
