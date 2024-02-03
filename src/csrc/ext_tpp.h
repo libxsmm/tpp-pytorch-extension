@@ -118,12 +118,12 @@ class BrgemmExtTPP {
     }
   }
 
-  void config() {
-    brgemm.config();
+  void config(void* ptr = nullptr) {
+    brgemm.config(ptr);
   }
 
-  void release() {
-    brgemm.release();
+  void release(void* ptr = nullptr) {
+    brgemm.release(ptr);
   }
 
  private:
@@ -160,12 +160,12 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout>, impl> {
     }
   }
 
-  void config() {
-    func.config();
+  void config(void* ptr = nullptr) {
+    func.config(ptr);
   }
 
-  void release() {
-    func.release();
+  void release(void* ptr = nullptr) {
+    func.release(ptr);
   }
 
  private:
@@ -193,12 +193,12 @@ class ScopedTPP<tpp::BrgemmExtTPP<Tin, Tout>, impl> {
     }
   }
 
-  void config() {
-    func.config();
+  void config(void* ptr = nullptr) {
+    func.config(ptr);
   }
 
-  void release() {
-    func.release();
+  void release(void* ptr = nullptr) {
+    func.release(ptr);
   }
 
  private:
