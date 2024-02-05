@@ -40,6 +40,7 @@ torch.autograd.set_detect_anomaly(False)
 USE_BF16_PARAMS = True
 MATCH_PYG_GATCONV = True
 
+
 class DummyLinear(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
         super(DummyLinear, self).__init__()
@@ -58,6 +59,7 @@ class DummyLinear(BlockedModule):
     def forward(self, input):
         raise NotImplemented
         return input
+
 
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
@@ -92,6 +94,7 @@ class LinearOut(BlockedModule):
         raise NotImplemented
         return input
 
+
 class LinearOutBF16(LinearOut):
     def __init__(self, in_features, out_features, bias=True):
         super(LinearOutBF16, self).__init__(in_features, out_features)
@@ -106,6 +109,7 @@ class LinearOutBF16(LinearOut):
     def forward(self, input):
         raise NotImplemented
         return input
+
 
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
@@ -423,10 +427,13 @@ class FusedReLUDrop(nn.Module):
         output = FusedReLUDropFn.apply(self.p, input, self.training)
         return output
 
+
 class FusedLeakyReLUDropFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, alpha, p, inp, training):
-        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(alpha, p, inp, 1 if training else 0)
+        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(
+            alpha, p, inp, 1 if training else 0
+        )
         if training:
             ctx.save_for_backward(inp, rmask, dpmask)
             ctx.alpha = alpha
@@ -441,12 +448,15 @@ class FusedLeakyReLUDropFn(torch.autograd.Function):
         grad_inp = fused_gat_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
         return (None, None, grad_inp, None)
 
+
 class FusedLeakyReLUDrop(nn.Module):
     __constants__ = ["alpha", "p", "inplace"]
     p: float
     inplace: bool
 
-    def __init__(self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False) -> None:
+    def __init__(
+        self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False
+    ) -> None:
         super(FusedLeakyReLUDrop, self).__init__()
         self.inplace = False  # inplace
         if p < 0 or p > 1:
@@ -533,6 +543,7 @@ class AddBias(nn.Module):
     def forward(self, inp, bias):
         output = AddBiasFn.apply(inp, bias)
         return output
+
 
 class GATConvOpt(BlockedModule):
     r"""
@@ -641,7 +652,8 @@ class GATConvOpt(BlockedModule):
                 break
         self.fc_src = DummyLinear(
             self._in_src_feats,
-            out_feats * num_heads,  bias=False,
+            out_feats * num_heads,
+            bias=False,
         )
         self.fc_src.weight.set_blocking_param(
             (
@@ -649,10 +661,7 @@ class GATConvOpt(BlockedModule):
                 [0, 2, 3, 1],
             )
         )
-        self.fc_dst = DummyLinear(
-            self._in_dst_feats,
-            out_feats * num_heads,  bias=False
-        )
+        self.fc_dst = DummyLinear(self._in_dst_feats, out_feats * num_heads, bias=False)
         self.fc_dst.weight.set_blocking_param(
             (
                 [self.bk, self.bc],
@@ -839,7 +848,7 @@ class GATConvOpt(BlockedModule):
                     inputs_src.append(self.fc_src.bias)
                 elif self.fuse_bias:
                     inputs_src.append(self.bias)
-                
+
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
@@ -917,7 +926,7 @@ class GATConvOpt(BlockedModule):
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
 
-                    #if graph.is_block:
+                    # if graph.is_block:
                     #    feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
                     #    h_dst = h_dst[: graph.number_of_dst_nodes()]
                     #    dst_prefix_shape = (
@@ -948,8 +957,8 @@ class GATConvOpt(BlockedModule):
             rst = graph.dstdata["ft"]
 
             if self.set_explicit_bias:
-                x = rst.view(*dst_prefix_shape, self._num_heads*self._out_feats)
-                rst = AddBiasFn.apply(x, self.bias) 
+                x = rst.view(*dst_prefix_shape, self._num_heads * self._out_feats)
+                rst = AddBiasFn.apply(x, self.bias)
             if self.act_drop is not None:
                 rst = self.act_drop(rst)
             elif self.activation is not None:

@@ -376,7 +376,6 @@ REGISTER_SUBMODULE(_fused_gat, m) {
   m.def("add_bias_bwd", &add_bias_bwd, "Tpp Optimized GradBias BWD");
   m.def("relu_drop_fwd", &relu_drop_fwd, "Fused ReLU + Dropout FWD");
   m.def("relu_drop_bwd", &relu_drop_bwd, "Fused Relu + Dropout BWD");
-<<<<<<< HEAD
   m.def(
       "leaky_relu_drop_fwd",
       &leaky_relu_drop_fwd,
@@ -385,8 +384,4 @@ REGISTER_SUBMODULE(_fused_gat, m) {
       "leaky_relu_drop_bwd",
       &leaky_relu_drop_bwd,
       "Fused Leaky Relu + Dropout BWD");
-=======
-  m.def("leaky_relu_drop_fwd", &leaky_relu_drop_fwd, "Fused Leaky ReLU + Dropout FWD");
-  m.def("leaky_relu_drop_bwd", &leaky_relu_drop_bwd, "Fused Leaky Relu + Dropout BWD");
->>>>>>> d01f295 (Added Fused LeakyReLUDropout support. Modified GATConvOpt to use PyG-style model parameter initializations)
 }
