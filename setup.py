@@ -131,23 +131,10 @@ sources = [
     "src/csrc/shm_coll.cpp",
 ]
 
-# AlphaFold sources
-sources += glob.glob("src/csrc/alphafold/*.cpp")
-
-# BERT sources
-sources += glob.glob("src/csrc/bert/pad/*.cpp")
-sources += glob.glob("src/csrc/bert/unpad/*.cpp")
-sources += glob.glob("src/csrc/bert/infer/*.cpp")
-
-sources += glob.glob("src/csrc/llm/*.cpp")
-
 # GNN sources
 sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
 sources += glob.glob("src/csrc/gnn/common/*.cpp")
 sources += glob.glob("src/csrc/gnn/gat/*.cpp")
-
-# DLRM sources
-sources += glob.glob("src/csrc/dlrm/*.cpp")
 
 extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
 

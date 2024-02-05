@@ -411,12 +411,13 @@ auto trans_tpp = SCOPEIT(
 {
   RECORD_SCOPE(gadw_gemm, {t_in, t_grad_out});
   {
+    if(nn > 0)
     {
       int upd_n_weight_copies;
       int BF;
 
 #if 1
-      upd_n_weight_copies = K * C < 16384 ? threads : threads / 2;
+      upd_n_weight_copies = nk * nc < 4*threads ? threads : threads / 2;
       BF = 256;
 #else
       BF = atoi(getenv("BF"));
@@ -434,8 +435,8 @@ auto trans_tpp = SCOPEIT(
 
       int blocks_per_layer =
           (nn + upd_n_weight_copies - 1) / upd_n_weight_copies;
-      // std::cout << " upd_n_weight_copies: " << upd_n_weight_copies << " nn "
-      // << nn << " blocks_per_layer " << blocks_per_layer << std::endl;
+       //std::cout << " upd_n_weight_copies: " << upd_n_weight_copies << " nn "
+       //<< nn << " blocks_per_layer " << blocks_per_layer << std::endl;
       int reduce_rows = (nn % blocks_per_layer == 0)
           ? (nn / blocks_per_layer)
           : (nn / blocks_per_layer) + 1;

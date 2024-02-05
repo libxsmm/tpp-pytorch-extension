@@ -26,31 +26,45 @@ auto relu_mask = t_relu_mask.data_ptr<short>();
 auto dp_mask = t_dp_mask.data_ptr<short>();
 const int BS = 256; // Define the block size
 
-auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BS, true), ACT);
-auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(BS, p), DROPOUT);
-{
-  RECORD_SCOPE(gao_relu_drop, {t_in});
+if(training) {
+  auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BS, true), ACT);
+  auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(BS, p), DROPOUT);
   {
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-    long n;
-    /* The omp parallel loop will run for all the blocks of N except the last
-       block by using lastprivate() the ALIGNDOWN() it takes care of the blocks
-       for the 1D tensor*/
+    RECORD_SCOPE(gao_relu_drop, {t_in});
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+      long n;
+      /* The omp parallel loop will run for all the blocks of N except the last
+	 block by using lastprivate() the ALIGNDOWN() it takes care of the blocks
+	 for the 1D tensor*/
 #pragma omp parallel for lastprivate(n)
-    for (n = 0; n < ALIGNDOWN(N, BS); n += BS) {
-      relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
-      dropout_fwd_tpp(
-          &out[n], (void*)get_rng_state(), &out[n], &dp_mask[n / 16]);
-    }
-    // The reminder part is handled here
-    if (n < N) {
-      auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(N - n, true), ACT);
-      auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(N - n, p), DROPOUT);
-      relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
-      dropout_fwd_tpp(
-          &out[n], (void*)get_rng_state(), &out[n], &dp_mask[n / 16]);
+      for (n = 0; n < ALIGNDOWN(N, BS); n += BS) {
+	relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
+	dropout_fwd_tpp(
+	    &out[n], (void*)get_rng_state(), &out[n], &dp_mask[n / 16]);
+      }
+      // The reminder part is handled here
+      if (n < N) {
+	auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(N - n, true), ACT);
+	auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(N - n, p), DROPOUT);
+	relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
+	dropout_fwd_tpp(
+	    &out[n], (void*)get_rng_state(), &out[n], &dp_mask[n / 16]);
+      }
     }
   }
 }
-
+else {
+  auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BS, true), ACT);
+  long n;
+#pragma omp parallel for lastprivate(n)
+  for (n = 0; n < ALIGNDOWN(N, BS); n += BS) {
+    relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
+  }
+  // The reminder part is handled here
+  if (n < N) {
+    auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(N - n, true), ACT);
+    relu_fwd_tpp(&in[n], &out[n], &relu_mask[n / 16]);
+  }
+}
 return {t_out, t_relu_mask, t_dp_mask};

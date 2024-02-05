@@ -30,17 +30,15 @@ from tpp_pytorch_extension.utils.blocked_layout import (
 from tpp_pytorch_extension.utils import blocked_layout, xsmm
 from tpp_pytorch_extension._C import _fused_gat as fused_gat_cpp
 
-# from tpp_pytorch_extension._C import _fused_gat as fused_gat_cpp
 import time
 from contextlib import contextmanager
 
 import numpy as np
 
-
 torch.autograd.set_detect_anomaly(False)
 
 USE_BF16_PARAMS = True
-
+MATCH_PYG_GATCONV = True
 
 class DummyLinear(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
@@ -61,6 +59,53 @@ class DummyLinear(BlockedModule):
         raise NotImplemented
         return input
 
+class LinearOut(BlockedModule):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOut, self).__init__()
+        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = BlockedParameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+        self.bk = out_features
+        self.bc = 64
+        self.weight.set_blocking_param(
+            (
+                [self.bk, self.bc],
+                [0, 2, 3, 1],
+            )
+        )
+
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
+
+    def maybe_block_params(self):
+        self.weight.block()
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
+
+class LinearOutBF16(LinearOut):
+    def __init__(self, in_features, out_features, bias=True):
+        super(LinearOutBF16, self).__init__(in_features, out_features)
+        self.weight.set_blocking_param(
+            (
+                [self.bk, [self.bc // 2, 2]],
+                [0, 2, 3, 1, 4],
+                torch.bfloat16,
+            )
+        )
+
+    def forward(self, input):
+        raise NotImplemented
+        return input
 
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
@@ -343,7 +388,7 @@ class FusedBiasReLU(nn.Module):
 class FusedReLUDropFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p, inp, training):
-        (out, rmask, dpmask) = fused_gat_cpp.relu_drop_fwd(p, inp, training)
+        (out, rmask, dpmask) = fused_gat_cpp.relu_drop_fwd(p, inp, 1 if training else 0)
         if training:
             ctx.save_for_backward(rmask, dpmask)
             ctx.p = p
@@ -376,6 +421,46 @@ class FusedReLUDrop(nn.Module):
 
     def forward(self, input):
         output = FusedReLUDropFn.apply(self.p, input, self.training)
+        return output
+
+class FusedLeakyReLUDropFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, alpha, p, inp, training):
+        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(alpha, p, inp, 1 if training else 0)
+        if training:
+            ctx.save_for_backward(inp, rmask, dpmask)
+            ctx.alpha = alpha
+            ctx.p = p
+
+        return out
+
+    @staticmethod
+    def backward(ctx, *grad_outs):
+        inputs = list(grad_outs)
+        inputs += ctx.saved_tensors
+        grad_inp = fused_gat_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
+        return (None, None, grad_inp, None)
+
+class FusedLeakyReLUDrop(nn.Module):
+    __constants__ = ["alpha", "p", "inplace"]
+    p: float
+    inplace: bool
+
+    def __init__(self, alpha: float = 0.01, p: float = 0.5, inplace: bool = False) -> None:
+        super(FusedLeakyReLUDrop, self).__init__()
+        self.inplace = False  # inplace
+        if p < 0 or p > 1:
+            raise ValueError(
+                "dropout probability has to be between 0 and 1, " "but got {}".format(p)
+            )
+        self.alpha = alpha
+        self.p = p
+
+    def extra_repr(self) -> str:
+        return "alpha={}, p={}, inplace={}".format(self.alpha, self.p, self.inplace)
+
+    def forward(self, input):
+        output = FusedLeakyReLUDropFn.apply(self.alpha, self.p, input, self.training)
         return output
 
 
@@ -448,7 +533,6 @@ class AddBias(nn.Module):
     def forward(self, inp, bias):
         output = AddBiasFn.apply(inp, bias)
         return output
-
 
 class GATConvOpt(BlockedModule):
     r"""
@@ -557,7 +641,7 @@ class GATConvOpt(BlockedModule):
                 break
         self.fc_src = DummyLinear(
             self._in_src_feats,
-            out_feats * num_heads,  # bias=False,
+            out_feats * num_heads,  bias=False,
         )
         self.fc_src.weight.set_blocking_param(
             (
@@ -567,7 +651,7 @@ class GATConvOpt(BlockedModule):
         )
         self.fc_dst = DummyLinear(
             self._in_dst_feats,
-            out_feats * num_heads,  # bias=False
+            out_feats * num_heads,  bias=False
         )
         self.fc_dst.weight.set_blocking_param(
             (
@@ -605,24 +689,26 @@ class GATConvOpt(BlockedModule):
 
         self.fuse_src_bias = True if self.fc_src.bias is not None else False
         self.fuse_dst_bias = True if self.fc_dst.bias is not None else False
+        self.bias = None
 
         self.fuse_bias = False
         if bias and (not self.fuse_src_bias or not self.fuse_dst_bias):
             self.bias = BlockedParameter(
                 torch.FloatTensor(size=(num_heads * out_feats,))
             )
-            self.fuse_bias = True
+            self.set_explicit_bias = True
         else:
             self.register_buffer("bias", None)
 
         self.act_drop = None
         self.activation = None
-        if activation is not None and feat_drop > 0.0:
-            if activation == F.relu:
-                self.act_drop = FusedReLUDrop(feat_drop)
-            elif activation == F.leaky_relu:
-                self.act_drop = FusedLeakyReLUDrop(alpha, feat_drop)
-        elif activation is not None and feat_drop == 0.0:
+        if self.training:
+            if activation is not None and feat_drop > 0.0:
+                if activation == F.relu:
+                    self.act_drop = FusedReLUDrop(feat_drop)
+                elif activation == F.leaky_relu:
+                    self.act_drop = FusedLeakyReLUDrop(alpha, feat_drop)
+        else:
             if activation == F.relu:
                 self.activation = ReLU()
             elif activation == F.leaky_relu:
@@ -654,15 +740,27 @@ class GATConvOpt(BlockedModule):
         The fc weights :math:`W^{(l)}` are initialized using Glorot uniform initialization.
         The attention weights are using xavier initialization method.
         """
-        gain = nn.init.calculate_gain("relu")
+        if not MATCH_PYG_GATCONV:
+            gain = nn.init.calculate_gain("relu")
+        else:
+            gain = 1.0
+
         if hasattr(self, "fc"):
             nn.init.xavier_normal_(self.fc.weight, gain=gain)
         else:
-            nn.init.xavier_normal_(self.fc_src.weight, gain=gain)
-            nn.init.xavier_normal_(self.fc_dst.weight, gain=gain)
-        nn.init.xavier_normal_(self.attn_l, gain=gain)
-        nn.init.xavier_normal_(self.attn_r, gain=gain)
-        if self.bias is not None:
+            if not MATCH_PYG_GATCONV:
+                nn.init.xavier_normal_(self.fc_src.weight, gain=gain)
+                nn.init.xavier_normal_(self.fc_dst.weight, gain=gain)
+            else:
+                nn.init.xavier_uniform_(self.fc_src.weight, gain=gain)
+                nn.init.xavier_uniform_(self.fc_dst.weight, gain=gain)
+            if not MATCH_PYG_GATCONV:
+                nn.init.xavier_normal_(self.attn_l, gain=gain)
+                nn.init.xavier_normal_(self.attn_r, gain=gain)
+            else:
+                nn.init.xavier_uniform_(self.attn_l, gain=gain)
+                nn.init.xavier_uniform_(self.attn_r, gain=gain)
+        if self.set_explicit_bias:
             nn.init.constant_(self.bias, 0)
 
     def set_allow_zero_in_degree(self, set_value):
@@ -741,7 +839,7 @@ class GATConvOpt(BlockedModule):
                     inputs_src.append(self.fc_src.bias)
                 elif self.fuse_bias:
                     inputs_src.append(self.bias)
-
+                
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
@@ -754,6 +852,7 @@ class GATConvOpt(BlockedModule):
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
 
+                N = h_dst.size(0)
                 inputs_dst = [
                     h_dst,
                     self.fc_dst.weight,
@@ -763,7 +862,6 @@ class GATConvOpt(BlockedModule):
                 elif self.fuse_bias:
                     inputs_dst.append(self.bias)
 
-                N = h_dst.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
                 feat_dst_ = GATMLPFunction.apply(
@@ -796,14 +894,35 @@ class GATConvOpt(BlockedModule):
                 feat_src = feat_src_.view(
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
-                feat_dst = feat_src
 
                 if graph.is_block:
-                    feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
-                    h_dst = h_dst[: graph.number_of_dst_nodes()]
-                    dst_prefix_shape = (
-                        graph.number_of_dst_nodes(),
-                    ) + dst_prefix_shape[1:]
+                    h_dst = h_src[: graph.number_of_dst_nodes()]
+                    inputs_dst = [
+                        h_dst,
+                        self.fc_dst.weight,
+                    ]
+                    if self.fuse_dst_bias:
+                        inputs_dst.append(self.fc_dst.bias)
+                    elif self.fuse_bias:
+                        inputs_dst.append(self.bias)
+
+                    N = h_dst.size(0)
+                    align = self.align if (N > self.align or N == 0) else N
+                    feat_dst_ = GATMLPFunction.apply(
+                        align,
+                        self.fuse_dst_bias or self.fuse_bias,
+                        *inputs_dst,
+                    )  #
+                    feat_dst = feat_dst_.view(
+                        *dst_prefix_shape, self._num_heads, self._out_feats
+                    )
+
+                    #if graph.is_block:
+                    #    feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
+                    #    h_dst = h_dst[: graph.number_of_dst_nodes()]
+                    #    dst_prefix_shape = (
+                    #        graph.number_of_dst_nodes(),
+                    #    ) + dst_prefix_shape[1:]
 
             inputs_dst = [feat_dst, self.attn_r]
             N = feat_dst.size(0)
@@ -828,11 +947,13 @@ class GATConvOpt(BlockedModule):
             graph.update_all(fn.u_mul_e("ft", "a", "m"), fn.sum("m", "ft"))
             rst = graph.dstdata["ft"]
 
+            if self.set_explicit_bias:
+                x = rst.view(*dst_prefix_shape, self._num_heads*self._out_feats)
+                rst = AddBiasFn.apply(x, self.bias) 
             if self.act_drop is not None:
                 rst = self.act_drop(rst)
             elif self.activation is not None:
                 rst = self.activation(rst)
-                # rst = self.feat_drop(rst)
 
             if get_attention:
                 return rst, graph.edata["a"]

@@ -306,12 +306,13 @@ auto trans_tpp = SCOPEIT(
 {
   RECORD_SCOPE(gadw_gemm, {t_in, t_grad_out});
   {
+    if(nn > 0)
     {
       int upd_n_weight_copies;
       int BF;
 
 #if 1
-      upd_n_weight_copies = K * C < 16384 ? threads : threads / 2;
+      upd_n_weight_copies = nk * nc < 4*threads ? threads : threads / 2;
       BF = 256;
 #else
       BF = atoi(getenv("BF"));
