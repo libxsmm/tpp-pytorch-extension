@@ -498,7 +498,6 @@ class TppBlockedLinearW {
               }
               brgemm_tpp_rem(
                   in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-              brgemm_tpp.config();
               if (!(nc + Ncb < Nc)) { // last nc iter
                 if (postOpCB)
                   postOpCB(out, s1, nk, true);

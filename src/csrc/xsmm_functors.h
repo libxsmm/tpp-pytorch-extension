@@ -25,6 +25,13 @@
 #include <bfloat8.h>
 #include <string>
 #include <unordered_map>
+#ifdef _OPENMP
+#include <omp.h>
+#else
+#define omp_get_max_threads() 1
+#define omp_get_num_threads() 1
+#define omp_get_thread_num() 0
+#endif
 
 #define TPP_ASSERT(cond, x...) \
   do {                         \
@@ -1950,7 +1957,6 @@ class XformExtTPP {
   SetZeroTPP<T> zero;
 };
 
-static thread_local libxsmm_tilecfg_state l_tilestate;
 template <typename Tin, typename Tout>
 class BrgemmTPP {
  public:
@@ -2007,13 +2013,13 @@ class BrgemmTPP {
         k_gemm_no_tc(this, 3) {}
   void config(void* ptr_ = nullptr) {
     libxsmm_tilecfg_state* ptr = (libxsmm_tilecfg_state*)ptr_;
-    if (!ptr)
+    if (!ptr && omp_get_thread_num() == 0)
       ptr = &l_tilestate;
     k_cfg(ptr);
   }
   void release(void* ptr_ = nullptr) {
     libxsmm_tilecfg_state* ptr = (libxsmm_tilecfg_state*)ptr_;
-    if (!ptr)
+    if (!ptr && omp_get_thread_num() == 0)
       ptr = &l_tilestate;
     k_rls(ptr);
   }
@@ -2224,6 +2230,7 @@ class BrgemmTPP {
   long brgemm_type = -1;
   int unroll_hint;
   int b_vnni;
+  libxsmm_tilecfg_state l_tilestate;
   BrgemmKernel k_gemm_with_tc;
   BrgemmKernel k_cfg;
   BrgemmKernel k_rls;
