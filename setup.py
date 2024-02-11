@@ -151,8 +151,10 @@ sources += glob.glob("src/csrc/dlrm/*.cpp")
 
 extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
 
-if platform.processor() != "aarch64":
-    extra_compile_args.append("-march=native")
+# if platform.processor() != "aarch64":
+#    extra_compile_args.append("-march=native")
+
+extra_compile_args.append("-march=native")
 
 if hasattr(torch, "bfloat8"):
     extra_compile_args.append("-DPYTORCH_SUPPORTS_BFLOAT8")

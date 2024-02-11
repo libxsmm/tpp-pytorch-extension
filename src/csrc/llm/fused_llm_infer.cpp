@@ -1136,7 +1136,6 @@ inline void fused_qkv_gemm(
   }
 
   int totalN = 0;
-  int NGEMM = t_wt.size();
   auto gemm_q = getTppBlockedLinearW<T, Tout>(t_in, t_wt[0], t_bias[0]);
   auto gemm_k = getTppBlockedLinearW<T, Tout>(t_in, t_wt[1], t_bias[1]);
   auto gemm_v = getTppBlockedLinearW<T, Tout>(t_in, t_wt[2], t_bias[2]);
@@ -1343,6 +1342,96 @@ inline at::Tensor attn(
   auto VL_C = GetVLAPtr<T>(t_VL_cache, {Nkv, CSk, H});
 #endif
 
+#ifdef __AVX512F__
+#pragma message "Using AVX512 attn"
+  const int nh = H / 16;
+  RECORD_OMP_TIME();
+#pragma omp parallel
+  {
+    TimerStart();
+#pragma omp for collapse(2) nowait
+    for (int nq = 0; nq < Nq; nq++) {
+      for (int b = 0; b < B; b++) {
+        LIBXSMM_ALIGNED(float AS[FSk_aligned], 64);
+        int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+        {
+          ScopedTimer t_(BRGEMM, 2 * FSk * H);
+          for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+            memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
+            memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
+#else
+            memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
+            memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
+#endif
+          }
+          __m512 vql[16];
+          for (int h = 0; h < nh; h++) {
+            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
+          }
+          float max = -1e20;
+          int sk;
+          for (sk = 0; sk < FSk; sk++) {
+            int bid = beam_idx[b][sk];
+            __m512 vas = _mm512_setzero_ps();
+            for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+              auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
+#else
+              auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
+#endif
+              vas = _mm512_fmadd_ps(vql[h], vklc, vas);
+            }
+            float as = _mm512_reduce_add_ps(vas);
+            as *= one_by_sqrt_H;
+            if (am_valid) {
+              as += AM[b][sk];
+            }
+            max = std::max(max, as);
+            AS[sk] = as;
+          }
+          __m512 vmax = _mm512_set1_ps(max);
+          __m512 vsum = _mm512_setzero_ps();
+          for (sk = 0; sk < ALIGNDOWN(FSk, 16); sk += 16) {
+            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
+                _mm512_sub_ps(_mm512_loadu_ps_auto(AS + sk), vmax));
+            _mm512_storeu_ps(AS + sk, vz);
+            vsum = _mm512_add_ps(vsum, vz);
+          }
+          if (sk < FSk) {
+            int rem = FSk - sk;
+            __mmask16 mask = (1 << rem) - 1;
+            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
+                _mm512_sub_ps(_mm512_maskz_loadu_ps_auto(mask, AS + sk), vmax));
+            _mm512_mask_storeu_ps(AS + sk, mask, vz);
+            vsum = _mm512_mask_add_ps(vsum, mask, vsum, vz);
+          }
+          float sum = _mm512_reduce_add_ps(vsum);
+          sum = 1.0 / sum;
+          for (int h = 0; h < nh; h++) {
+            vql[h] = _mm512_setzero_ps();
+          }
+          for (sk = 0; sk < FSk; sk++) {
+            int bid = beam_idx[b][sk];
+            __m512 vas = _mm512_set1_ps(AS[sk] * sum);
+            for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+              auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
+#else
+              auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
+#endif
+              vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
+            }
+          }
+          for (int h = 0; h < nh; h++) {
+            _mm512_storeu_ps_auto(CL[b][nq][0] + h * 16, vql[h]);
+          }
+        }
+      }
+    }
+    TimerEnd();
+  }
+#else
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
   // auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
@@ -1535,6 +1624,7 @@ inline at::Tensor attn(
     }
     t_CL = t_XL.to(t_CL.dtype());
   }
+#endif
   return t_CL;
 }
 
@@ -1668,8 +1758,8 @@ inline at::Tensor attn(
               }
               ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
               // for (int xx=0;xx<kbs;xx++)
-              // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n", sk+xx,
-              // (float)AST[0][xx]);
+              // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n",
+              // sk+xx, (float)AST[0][xx]);
               Tv tmp[qbs * H];
               Tv* v_ptr = VL_V[b][nkv][sk];
               Tv v_tmp[kbs * H];
@@ -1816,8 +1906,8 @@ struct LLMBlock : torch::CustomClassHolder {
       // t_beam_idx = t_beam_idx.new_zeros({capacity, B});
       t_beam_idx =
           at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
-      // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes() <<
-      // std::endl;
+      // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes()
+      // << std::endl;
       t_offset = t_offset + S;
 #ifdef S_FIRST_KVC
       t_key_past.slice(0, 0, S, 1).copy_(t_KL.permute({2, 0, 1, 3}));
@@ -1870,15 +1960,17 @@ struct LLMBlock : torch::CustomClassHolder {
         t_beam_idx = t_beam_idx_new;
       }
 
-      // if (my_rank == 0) std::cout << "t_beam_idx2: " << t_beam_idx.sizes() <<
-      // std::endl; std::cout << "t_key_past.shape:" << t_key_past.sizes() <<
-      // std::endl; std::cout << "t_beam_idx.shape:" << t_beam_idx.sizes() <<
-      // std::endl; std::cout << "t_offset:" << t_offset << std::endl; std::cout
+      // if (my_rank == 0) std::cout << "t_beam_idx2: " <<
+      // t_beam_idx.sizes() << std::endl; std::cout << "t_key_past.shape:"
+      // << t_key_past.sizes() << std::endl; std::cout <<
+      // "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl; std::cout
+      // << "t_offset:" << t_offset << std::endl; std::cout
       // << "B: " << B << " offset:" << offset << std::endl;
-      auto t_new_beam_idx = t_beam_idx.new_empty({B, offset});
-      auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset});
+      auto t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
+      auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset + 1});
       auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
       for (auto i = 0; i < B; i++) {
+        beam_idx[i][offset] = i;
         beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
         for (auto j = offset - 2; j >= 0;
              j--) { // for the token of input, the target beam is alwarys 0
@@ -2407,7 +2499,8 @@ static at::Tensor fc_plain_wrap(
   sizes[2] = wt_sizes[0] * wt_sizes[3];
 
   auto t_out = t_in.new_empty(sizes);
-  // std::cout << "YYY " << t_out.dtype() << "  " << t_in.dtype() << std::endl;
+  // std::cout << "YYY " << t_out.dtype() << "  " << t_in.dtype() <<
+  // std::endl;
   auto dt = t_wt.dtype();
   if (dt == at::kFloat) {
     fc_plain<float>(t_in, t_wt, t_bias, t_out);
