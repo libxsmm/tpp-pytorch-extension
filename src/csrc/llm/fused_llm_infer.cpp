@@ -40,7 +40,7 @@ static long get_batch_dim_in_kv_cache() {
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
-static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 1);
+static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
