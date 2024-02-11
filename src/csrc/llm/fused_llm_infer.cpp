@@ -40,6 +40,7 @@ static long get_batch_dim_in_kv_cache() {
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
+static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 1);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
@@ -51,6 +52,7 @@ static const char* GEMM_LOOP_SCHEME =
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
+REGISTER_LOCAL_SCOPE(fqkv_gemm, "fqkv_gemm");
 REGISTER_LOCAL_SCOPE(mha, "mha");
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
@@ -396,7 +398,8 @@ inline at::Tensor llama_rms_norm(at::Tensor t_in, at::Tensor t_wt, float eps) {
 
 template <typename T, typename Tout = T>
 class TppBlockedLinearW {
- protected:
+  // protected:
+ public:
   long BS, C, Nc, Nk, Hc, Hk, K;
   long Ncb, BSb, rem;
   bool with_bias;
@@ -1009,6 +1012,196 @@ inline at::Tensor fc_relu(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
 
   auto t_out = t_in.new_empty(sizes);
   fc_relu<T>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T, typename Tout = T>
+inline void fused_qkvi_gemm(
+    at::Tensor t_in,
+    std::vector<at::Tensor> t_wt,
+    std::vector<at::Tensor> t_bias,
+    std::vector<at::Tensor> t_out) {
+  RECORD_SCOPE(fqkv_gemm, {t_in, t_wt[0]});
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    for (int i = 0; i < (int)t_wt.size(); i++) {
+      t_wt[i] = wt_tensor_for_first_token<T>(t_wt[i]);
+    }
+  }
+
+  int totalN = 0;
+  auto gemm_q = getTppBlockedLinearW<T, Tout>(t_in, t_wt[0], t_bias[0]);
+  auto gemm_k = getTppBlockedLinearW<T, Tout>(t_in, t_wt[1], t_bias[1]);
+  auto gemm_v = getTppBlockedLinearW<T, Tout>(t_in, t_wt[2], t_bias[2]);
+  auto gemm_i = getTppBlockedLinearW<T, Tout>(t_in, t_wt[3], t_bias[3]);
+  long BSb, rem, Hk, K;
+  std::tie(BSb, rem, Hk, K) = gemm_i.getOutputShapes();
+  auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
+  auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
+  gemm_i.setPostOpCB(
+      [&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
+        } else {
+          gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+        }
+      });
+
+  totalN = gemm_q.Nk + gemm_k.Nk + gemm_v.Nk + gemm_i.Nk;
+  TPP_ASSERT(
+      gemm_q.Nc == gemm_k.Nc && gemm_k.Nc == gemm_v.Nc &&
+          gemm_v.Nc == gemm_i.Nc,
+      "Fused QKV weight block mismatch\n");
+  auto in = gemm_q.getInputVLAPtr(t_in);
+  auto wt_q = gemm_q.getWeightVLAPtr(t_wt[0]);
+  auto wt_k = gemm_k.getWeightVLAPtr(t_wt[1]);
+  auto wt_v = gemm_v.getWeightVLAPtr(t_wt[2]);
+  auto wt_i = gemm_i.getWeightVLAPtr(t_wt[3]);
+  auto bias_q = gemm_q.getBiasVLAPtr(t_bias[0]);
+  auto bias_k = gemm_k.getBiasVLAPtr(t_bias[1]);
+  auto bias_v = gemm_v.getBiasVLAPtr(t_bias[2]);
+  auto bias_i = gemm_i.getBiasVLAPtr(t_bias[3]);
+  auto out_q = gemm_q.getOutputVLAPtr(t_out[0]);
+  auto out_k = gemm_k.getOutputVLAPtr(t_out[1]);
+  auto out_v = gemm_v.getOutputVLAPtr(t_out[2]);
+  auto out_i = gemm_i.getOutputVLAPtr(t_out[3]);
+  auto func_q = gemm_q.stepFunc(in, wt_q, bias_q, out_q);
+  auto func_k = gemm_k.stepFunc(in, wt_k, bias_k, out_k);
+  auto func_v = gemm_v.stepFunc(in, wt_v, bias_v, out_v);
+  auto func_i = gemm_i.stepFunc(in, wt_i, bias_i, out_i);
+  {
+    RECORD_OMP_TIME();
+    auto gemm_loop = ThreadedLoop<3>(
+        {LoopSpecs{0, gemm_q.Nc, gemm_q.Ncb, false},
+         LoopSpecs{0L, gemm_q.BS, gemm_q.BSb},
+         LoopSpecs{totalN}},
+        "aCb");
+    gemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          if (nk < gemm_q.Nk) {
+            func_q(nc, s1, nk);
+          } else if (nk < gemm_k.Nk + gemm_q.Nk) {
+            nk -= gemm_q.Nk;
+            func_k(nc, s1, nk);
+          } else if (nk < gemm_v.Nk + gemm_k.Nk + gemm_q.Nk) {
+            nk -= (gemm_q.Nk + gemm_k.Nk);
+            func_v(nc, s1, nk);
+          } else {
+            nk -= (gemm_q.Nk + gemm_k.Nk + gemm_v.Nk);
+            func_i(nc, s1, nk);
+          }
+        },
+        [&]() {
+          TimerStart();
+          gemm_q.config();
+        },
+        [&]() {
+          gemm_q.release();
+          TimerEnd();
+        });
+  }
+}
+
+template <typename T, typename Tout = T>
+inline std::vector<at::Tensor> fused_qkvi_gemm(
+    at::Tensor t_in,
+    std::vector<at::Tensor> t_wt,
+    std::vector<at::Tensor> t_bias) {
+  auto sizes = t_in.sizes().vec();
+  std::vector<at::Tensor> t_out;
+  for (int i = 0; i < (int)t_wt.size(); i++) {
+    auto wt_sizes = t_wt[i].sizes();
+    sizes[2] = wt_sizes[0] * wt_sizes[3];
+    t_out.push_back(t_in.new_empty(sizes));
+  }
+  fused_qkvi_gemm<T, Tout>(t_in, t_wt, t_bias, t_out);
+  return t_out;
+}
+
+template <typename T, typename Tout = T>
+inline void fused_qkv_gemm(
+    at::Tensor t_in,
+    std::vector<at::Tensor> t_wt,
+    std::vector<at::Tensor> t_bias,
+    std::vector<at::Tensor> t_out) {
+  RECORD_SCOPE(fqkv_gemm, {t_in, t_wt[0]});
+  auto in_sizes = t_in.sizes();
+  auto BS = in_sizes[0] * in_sizes[1];
+  if (BS > FT_OPT_SIZE) { // first token compute
+    for (int i = 0; i < (int)t_wt.size(); i++) {
+      t_wt[i] = wt_tensor_for_first_token<T>(t_wt[i]);
+    }
+  }
+
+  int totalN = 0;
+  int NGEMM = t_wt.size();
+  auto gemm_q = getTppBlockedLinearW<T, Tout>(t_in, t_wt[0], t_bias[0]);
+  auto gemm_k = getTppBlockedLinearW<T, Tout>(t_in, t_wt[1], t_bias[1]);
+  auto gemm_v = getTppBlockedLinearW<T, Tout>(t_in, t_wt[2], t_bias[2]);
+
+  totalN = t_wt[0].size(0) + t_wt[1].size(0) + t_wt[2].size(0);
+  TPP_ASSERT(
+      t_wt[0].size(3) == t_wt[1].size(3) && t_wt[1].size(3) == t_wt[2].size(3),
+      "Fused QKV weight block mismatch\n");
+  auto in = gemm_q.getInputVLAPtr(t_in);
+  auto wt_q = gemm_q.getWeightVLAPtr(t_wt[0]);
+  auto wt_k = gemm_k.getWeightVLAPtr(t_wt[1]);
+  auto wt_v = gemm_v.getWeightVLAPtr(t_wt[2]);
+  auto bias_q = gemm_q.getBiasVLAPtr(t_bias[0]);
+  auto bias_k = gemm_k.getBiasVLAPtr(t_bias[1]);
+  auto bias_v = gemm_v.getBiasVLAPtr(t_bias[2]);
+  auto out_q = gemm_q.getOutputVLAPtr(t_out[0]);
+  auto out_k = gemm_k.getOutputVLAPtr(t_out[1]);
+  auto out_v = gemm_v.getOutputVLAPtr(t_out[2]);
+  auto func_q = gemm_q.stepFunc(in, wt_q, bias_q, out_q);
+  auto func_k = gemm_k.stepFunc(in, wt_k, bias_k, out_k);
+  auto func_v = gemm_v.stepFunc(in, wt_v, bias_v, out_v);
+  {
+    RECORD_OMP_TIME();
+    auto gemm_loop = ThreadedLoop<3>(
+        {LoopSpecs{0, gemm_q.Nc, gemm_q.Ncb, false},
+         LoopSpecs{0L, gemm_q.BS, gemm_q.BSb},
+         LoopSpecs{totalN}},
+        "aCb");
+    gemm_loop(
+        [&](int* ind) {
+          int nc = ind[0], s1 = ind[1], nk = ind[2];
+          if (nk < gemm_q.Nk) {
+            func_q(nc, s1, nk);
+          } else if (nk < gemm_k.Nk + gemm_q.Nk) {
+            nk -= gemm_q.Nk;
+            func_k(nc, s1, nk);
+          } else {
+            nk -= (gemm_q.Nk + gemm_k.Nk);
+            func_v(nc, s1, nk);
+          }
+        },
+        [&]() {
+          TimerStart();
+          gemm_q.config();
+        },
+        [&]() {
+          gemm_q.release();
+          TimerEnd();
+        });
+  }
+}
+
+template <typename T, typename Tout = T>
+inline std::vector<at::Tensor> fused_qkv_gemm(
+    at::Tensor t_in,
+    std::vector<at::Tensor> t_wt,
+    std::vector<at::Tensor> t_bias) {
+  auto sizes = t_in.sizes().vec();
+  std::vector<at::Tensor> t_out;
+  for (int i = 0; i < (int)t_wt.size(); i++) {
+    auto wt_sizes = t_wt[i].sizes();
+    sizes[2] = wt_sizes[0] * wt_sizes[3];
+    t_out.push_back(t_in.new_empty(sizes));
+  }
+  fused_qkv_gemm<T, Tout>(t_in, t_wt, t_bias, t_out);
   return t_out;
 }
 
@@ -1826,30 +2019,84 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_res = t_HS;
     t_HS = lyr_norm<T, LT>(t_HS, t_G, t_B, eps);
 
-    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
-    apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
+    if (FUSED_QKV_GEMM == 0) {
+      auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
+      apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
+      auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+      apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
 
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+      auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
 
-    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+      auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
 
-    auto t_CL = outputs[0];
-    auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
-    auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
-    auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
-    if (my_size > 1) {
-      allreduce(t_Out);
-    }
+      auto t_CL = outputs[0];
+      auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+      auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
+      auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
+      if (my_size > 1) {
+        allreduce(t_Out);
+      }
 
-    outputs[0] = t_Out;
+      outputs[0] = t_Out;
 
-    if (use_cache) {
-      return outputs;
+      if (use_cache) {
+        return outputs;
+      } else {
+        return {t_Out};
+      }
+    } else if (FUSED_QKV_GEMM == 1) {
+      auto t_qkv_outs =
+          fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
+      auto t_QL = t_qkv_outs[0];
+      auto t_KL = t_qkv_outs[1];
+      auto t_VL = t_qkv_outs[2];
+      apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
+      apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
+
+      auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+      auto t_CL = outputs[0];
+      auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+      auto t_I = fc_gelu<T>(t_HS, t_Wi, t_Bi);
+      auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
+      if (my_size > 1) {
+        allreduce(t_Out);
+      }
+
+      outputs[0] = t_Out;
+
+      if (use_cache) {
+        return outputs;
+      } else {
+        return {t_Out};
+      }
     } else {
-      return {t_Out};
+      auto t_qkv_outs = fused_qkvi_gemm<T>(
+          t_HS, {t_Wq, t_Wk, t_Wv, t_Wi}, {t_null, t_null, t_null, t_Bi});
+      auto t_QL = t_qkv_outs[0];
+      auto t_KL = t_qkv_outs[1];
+      auto t_VL = t_qkv_outs[2];
+      auto t_I = t_qkv_outs[3];
+      apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
+      apply_rotary_pos_emb_gptj<T>(t_KL, t_EP, t_pid, N, H);
+
+      auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+      auto t_CL = outputs[0];
+      auto t_SO = qkv_gemm<T>(t_CL, t_Wp, t_null);
+      auto t_Out = fc_add2_scale<T>(t_I, t_SO, t_res, t_Wo, t_Bo, scale);
+      if (my_size > 1) {
+        allreduce(t_Out);
+      }
+
+      outputs[0] = t_Out;
+
+      if (use_cache) {
+        return outputs;
+      } else {
+        return {t_Out};
+      }
     }
   }
 };
