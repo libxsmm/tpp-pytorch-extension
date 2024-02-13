@@ -889,7 +889,7 @@ class GATConvOpt(BlockedModule):
                 inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                 if self.fuse_src_bias:
                     inputs_src.append(self.fc_src.bias)
-                elif self.bias is not None:
+                elif self.fuse_bias:
                     inputs_src.append(self.bias)
 
                 N = h_src.size(0)
@@ -903,7 +903,7 @@ class GATConvOpt(BlockedModule):
                 feat_src = feat_src_.view(
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
-
+ 
                 if graph.is_block:
                     h_dst = h_src[: graph.number_of_dst_nodes()]
                     inputs_dst = [
@@ -925,13 +925,15 @@ class GATConvOpt(BlockedModule):
                     feat_dst = feat_dst_.view(
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
-
                     # if graph.is_block:
                     #    feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
                     #    h_dst = h_dst[: graph.number_of_dst_nodes()]
                     #    dst_prefix_shape = (
                     #        graph.number_of_dst_nodes(),
                     #    ) + dst_prefix_shape[1:]
+                
+                else:
+                    feat_dst = feat_src
 
             inputs_dst = [feat_dst, self.attn_r]
             N = feat_dst.size(0)
