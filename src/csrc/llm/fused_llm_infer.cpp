@@ -27,7 +27,8 @@ using namespace tpp;
 #include "shm_coll.h"
 #include "tensor_helper.h"
 
-// #define S_FIRST_KVC
+#define S_FIRST_KVC
+#define PER_THREAD_COPY
 
 static long get_batch_dim_in_kv_cache() {
 #ifdef S_FIRST_KVC
@@ -329,10 +330,9 @@ inline void lyr_norm(
   auto beta = GetVLAPtr<LT>(t_beta);
   auto out = GetVLAPtr<T>(t_out, {K});
 
-  //auto layer_norm_fwd_tpp =
+  // auto layer_norm_fwd_tpp =
   //    SCOPEIT((LayerNormFwdTPP<T, LT>(1, 1, K, eps)), LAYER_NORM);
-  auto layer_norm_fwd_tpp =
-      LayerNormFwdTPP<T, LT>(1, 1, K, eps);
+  auto layer_norm_fwd_tpp = LayerNormFwdTPP<T, LT>(1, 1, K, eps);
 
   {
     RECORD_OMP_TIME();
@@ -1322,11 +1322,16 @@ inline at::Tensor attn(
       Sk,
       offset);
   auto FSk = offset + Sk;
-  auto FSk_aligned = (FSk + 0x3FL) & ~0x3FL;
-#ifdef S_FIRST_KVC
-  auto CSk = t_KL_cache.size(0);
+#if defined(__AVX512F__) && defined(S_FIRST_KVC)
+  constexpr long FSk_BS = 16L;
 #else
-  auto CSk = t_KL_cache.size(2);
+  constexpr long FSk_BS = 64L;
+#endif
+  auto FSk_aligned = (FSk + (FSk_BS - 1)) & ~(FSk_BS - 1);
+#ifdef S_FIRST_KVC
+  // auto CSk = t_KL_cache.size(0);
+#else
+  // auto CSk = t_KL_cache.size(2);
 #endif
   // printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
   const bool am_valid = (t_AM.numel() > 0);
@@ -1346,6 +1351,319 @@ inline at::Tensor attn(
 
 #ifdef __AVX512F__
 #pragma message "Using AVX512 attn"
+  TPP_ASSERT(H % 16 == 0, "Head size must be multiple of 16\n");
+#if 1
+#ifdef S_FIRST_KVC
+  const int nh = H / 16;
+  const int nbFSk = FSk_aligned / FSk_BS;
+  auto t_AS = t_QL.new_empty({nbFSk, B, Nq, FSk_BS}, at::kFloat);
+  auto AS = GetVLAPtr<float>(t_AS, {B, Nq, FSk_BS});
+#ifndef PER_THREAD_COPY
+  auto t_tmpCL = t_QL.new_empty({nbFSk, B, Nq, H}, at::kFloat);
+  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {B, Nq, H});
+#else
+  const int nThreads = omp_get_max_threads();
+  auto t_tmpCL = t_QL.new_empty({nThreads, B, Nq, H}, at::kFloat);
+  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {B, Nq, H});
+  auto t_accFlags = t_QL.new_zeros({nThreads, B, Nq}, at::kByte);
+  auto accFlags = GetVLAPtr<uint8_t>(t_accFlags, {B, Nq});
+#endif
+  {
+    RECORD_OMP_TIME();
+#pragma omp parallel for collapse(2)
+    for (int b = 0; b < B; b++) {
+      for (int nkv = 0; nkv < Nkv; nkv++) {
+#ifdef S_FIRST_KVC
+        memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
+        memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
+#else
+        memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
+        memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
+#endif
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+      for (int nq = 0; nq < Nq; nq++) {
+        for (int b = 0; b < B; b++) {
+          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+          __m512 vql[nh];
+          for (int h = 0; h < nh; h++) {
+            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
+          }
+          int sk_off = sk1 * FSk_BS;
+          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
+            int sk = sk_off + sk2;
+            if (sk < FSk) {
+              int bid = beam_idx[b][sk];
+              __m512 vas = _mm512_setzero_ps();
+              for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+                auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
+#else
+                auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
+#endif
+                vas = _mm512_fmadd_ps(vql[h], vklc, vas);
+              }
+              float as = _mm512_reduce_add_ps(vas);
+              as *= one_by_sqrt_H;
+              if (am_valid) {
+                as += AM[b][sk];
+              }
+              AS[sk1][b][nq][sk2] = as;
+            } else {
+              AS[sk1][b][nq][sk2] = -1e10;
+            }
+          }
+        }
+      }
+    }
+#pragma omp parallel for collapse(2)
+    for (int b = 0; b < B; b++) {
+      for (int nq = 0; nq < Nq; nq++) {
+        __m512 vmax = _mm512_set1_ps(-1e20);
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[sk1][b][nq];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
+          }
+        }
+        float max = _mm512_reduce_max_ps(vmax);
+        vmax = _mm512_set1_ps(max);
+        __m512 vsum = _mm512_setzero_ps();
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[sk1][b][nq];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
+                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
+            _mm512_storeu_ps(ASP + sk2, vz);
+            vsum = _mm512_add_ps(vsum, vz);
+          }
+        }
+        float sum = _mm512_reduce_add_ps(vsum);
+        sum = 1.0 / sum;
+        vsum = _mm512_set1_ps(sum);
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[sk1][b][nq];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            auto vmul = _mm512_mul_ps(_mm512_loadu_ps_auto(ASP + sk2), vsum);
+            _mm512_storeu_ps(ASP + sk2, vmul);
+          }
+        }
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+      for (int nq = 0; nq < Nq; nq++) {
+        for (int b = 0; b < B; b++) {
+#ifdef PER_THREAD_COPY
+          int tid = omp_get_thread_num();
+#endif
+          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+          __m512 vql[nh];
+          for (int h = 0; h < nh; h++) {
+#ifdef PER_THREAD_COPY
+            if (accFlags[tid][b][nq] == 0) {
+              vql[h] = _mm512_setzero_ps();
+            } else {
+              vql[h] = _mm512_loadu_ps_auto(tmpCL[tid][b][nq] + h * 16);
+            }
+#else
+            vql[h] = _mm512_setzero_ps();
+#endif
+          }
+          int sk_off = sk1 * FSk_BS;
+          float* ASP = AS[sk1][b][nq];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
+            int sk = sk_off + sk2;
+            if (sk < FSk) {
+              int bid = beam_idx[b][sk];
+              __m512 vas = _mm512_set1_ps(ASP[sk2]);
+              for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+                auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
+#else
+                auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
+#endif
+                vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
+              }
+            }
+          }
+          for (int h = 0; h < nh; h++) {
+#ifndef PER_THREAD_COPY
+            _mm512_storeu_ps_auto(tmpCL[sk1][b][nq] + h * 16, vql[h]);
+#else
+            _mm512_storeu_ps_auto(tmpCL[tid][b][nq] + h * 16, vql[h]);
+#endif
+          }
+#ifdef PER_THREAD_COPY
+          accFlags[tid][b][nq] = 1;
+#endif
+        }
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int b = 0; b < B; b++) {
+      for (int nq = 0; nq < Nq; nq++) {
+        for (int h = 0; h < nh; h++) {
+          auto vec = _mm512_setzero_ps();
+#ifndef PER_THREAD_COPY
+          for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+            vec = _mm512_add_ps(
+                vec, _mm512_loadu_ps_auto(&tmpCL[sk1][b][nq][h * 16]));
+          }
+#else
+          for (int tid = 0; tid < nThreads; tid++) {
+            if (accFlags[tid][b][nq] == 0)
+              continue;
+            vec = _mm512_add_ps(
+                vec, _mm512_loadu_ps_auto(&tmpCL[tid][b][nq][h * 16]));
+          }
+#endif
+          _mm512_storeu_ps_auto(&CL[b][nq][0][h * 16], vec);
+        }
+      }
+    }
+  }
+#else // S_FIRST_KVC is not define
+  const int nh = H / 16;
+  const int nbFSk = FSk_aligned / FSk_BS;
+  auto t_AS = t_QL.new_empty({B, Nq, nbFSk, FSk_BS}, at::kFloat);
+  auto t_tmpCL = t_QL.new_empty({B, Nq, nbFSk, H}, at::kFloat);
+  auto AS = GetVLAPtr<float>(t_AS, {Nq, nbFSk, FSk_BS});
+  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {Nq, nbFSk, H});
+  {
+    RECORD_OMP_TIME();
+#pragma omp parallel for collapse(2)
+    for (int b = 0; b < B; b++) {
+      for (int nkv = 0; nkv < Nkv; nkv++) {
+#ifdef S_FIRST_KVC
+        memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
+        memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
+#else
+        memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
+        memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
+#endif
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int nq = 0; nq < Nq; nq++) {
+      for (int b = 0; b < B; b++) {
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+          __m512 vql[nh];
+          for (int h = 0; h < nh; h++) {
+            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
+          }
+          int sk_off = sk1 * FSk_BS;
+          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
+            int sk = sk_off + sk2;
+            if (sk < FSk) {
+              int bid = beam_idx[b][sk];
+              __m512 vas = _mm512_setzero_ps();
+              for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+                auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
+#else
+                auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
+#endif
+                vas = _mm512_fmadd_ps(vql[h], vklc, vas);
+              }
+              float as = _mm512_reduce_add_ps(vas);
+              as *= one_by_sqrt_H;
+              if (am_valid) {
+                as += AM[b][sk];
+              }
+              AS[b][nq][sk1][sk2] = as;
+            } else {
+              AS[b][nq][sk1][sk2] = -1e10;
+            }
+          }
+        }
+      }
+    }
+#pragma omp parallel for collapse(2)
+    for (int b = 0; b < B; b++) {
+      for (int nq = 0; nq < Nq; nq++) {
+        __m512 vmax = _mm512_set1_ps(-1e20);
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[b][nq][sk1];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
+          }
+        }
+        float max = _mm512_reduce_max_ps(vmax);
+        vmax = _mm512_set1_ps(max);
+        __m512 vsum = _mm512_setzero_ps();
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[b][nq][sk1];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
+                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
+            _mm512_storeu_ps(ASP + sk2, vz);
+            vsum = _mm512_add_ps(vsum, vz);
+          }
+        }
+        float sum = _mm512_reduce_add_ps(vsum);
+        sum = 1.0 / sum;
+        vsum = _mm512_set1_ps(sum);
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          float* ASP = AS[b][nq][sk1];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
+            auto vmul = _mm512_mul_ps(_mm512_loadu_ps_auto(ASP + sk2), vsum);
+            _mm512_storeu_ps(ASP + sk2, vmul);
+          }
+        }
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int nq = 0; nq < Nq; nq++) {
+      for (int b = 0; b < B; b++) {
+        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
+          __m512 vql[nh];
+          for (int h = 0; h < nh; h++) {
+            vql[h] = _mm512_setzero_ps();
+          }
+          int sk_off = sk1 * FSk_BS;
+          float* ASP = AS[b][nq][sk1];
+          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
+            int sk = sk_off + sk2;
+            if (sk < FSk) {
+              int bid = beam_idx[b][sk];
+              __m512 vas = _mm512_set1_ps(ASP[sk2]);
+              for (int h = 0; h < nh; h++) {
+#ifdef S_FIRST_KVC
+                auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
+#else
+                auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
+#endif
+                vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
+              }
+            }
+          }
+          for (int h = 0; h < nh; h++) {
+            _mm512_storeu_ps_auto(tmpCL[b][nq][sk1] + h * 16, vql[h]);
+          }
+        }
+      }
+    }
+#pragma omp parallel for collapse(3)
+    for (int nq = 0; nq < Nq; nq++) {
+      for (int b = 0; b < B; b++) {
+        for (int h = 0; h < nh; h++) {
+          auto vec = _mm512_setzero_ps();
+          for (int sk1 = 0; sk1 < nbFSk; sk1++) {
+            vec = _mm512_add_ps(
+                vec, _mm512_loadu_ps_auto(&tmpCL[b][nq][sk1][h * 16]));
+          }
+          _mm512_storeu_ps_auto(&CL[b][nq][0][h * 16], vec);
+        }
+      }
+    }
+  }
+#endif
+#else
   const int nh = H / 16;
   RECORD_OMP_TIME();
 #pragma omp parallel
@@ -1354,7 +1672,7 @@ inline at::Tensor attn(
 #pragma omp for collapse(2) nowait
     for (int nq = 0; nq < Nq; nq++) {
       for (int b = 0; b < B; b++) {
-        LIBXSMM_ALIGNED(float AS[FSk_aligned], 64);
+        LIBXSMM_ALIGNED(float AS[FSk_aligned], FSk_BS);
         int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
         {
           ScopedTimer t_(BRGEMM, 2 * FSk * H);
@@ -1365,7 +1683,7 @@ inline at::Tensor attn(
           memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
           memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
 #endif
-          __m512 vql[16];
+          __m512 vql[nh];
           for (int h = 0; h < nh; h++) {
             vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
           }
@@ -1431,6 +1749,7 @@ inline at::Tensor attn(
     }
     TimerEnd();
   }
+#endif
 #else
   // Removing SCOPEIT due to very high overhead of timing these
   // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
