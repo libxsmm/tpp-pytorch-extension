@@ -329,8 +329,10 @@ inline void lyr_norm(
   auto beta = GetVLAPtr<LT>(t_beta);
   auto out = GetVLAPtr<T>(t_out, {K});
 
+  //auto layer_norm_fwd_tpp =
+  //    SCOPEIT((LayerNormFwdTPP<T, LT>(1, 1, K, eps)), LAYER_NORM);
   auto layer_norm_fwd_tpp =
-      SCOPEIT((LayerNormFwdTPP<T, LT>(1, 1, K, eps)), LAYER_NORM);
+      LayerNormFwdTPP<T, LT>(1, 1, K, eps);
 
   {
     RECORD_OMP_TIME();
