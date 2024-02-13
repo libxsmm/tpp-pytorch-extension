@@ -94,6 +94,11 @@ print(args)
 my_rank = 0
 my_size = 1
 
+if os.environ.get("LIBXSMM_X86_AMX_GEMM_ENFORCE_Mx1_TILE_BLOCKING", None) is None:
+    os.environ["LIBXSMM_X86_AMX_GEMM_ENFORCE_Mx1_TILE_BLOCKING"] = "1"
+if os.environ.get("LIBXSMM_X86_AMX_GEMM_STREAMING_TILELOAD", None) is None:
+    os.environ["LIBXSMM_X86_AMX_GEMM_STREAMING_TILELOAD"] = "1"
+
 
 def dist_init():
     import os
