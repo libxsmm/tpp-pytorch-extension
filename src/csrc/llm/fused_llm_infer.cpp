@@ -1358,15 +1358,13 @@ inline at::Tensor attn(
         int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
         {
           ScopedTimer t_(BRGEMM, 2 * FSk * H);
-          for (int h = 0; h < nh; h++) {
 #ifdef S_FIRST_KVC
-            memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
-            memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
+          memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
+          memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
 #else
-            memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
-            memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
+          memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
+          memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
 #endif
-          }
           __m512 vql[16];
           for (int h = 0; h < nh; h++) {
             vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
