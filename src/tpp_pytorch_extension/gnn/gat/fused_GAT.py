@@ -903,7 +903,7 @@ class GATConvOpt(BlockedModule):
                 feat_src = feat_src_.view(
                     *src_prefix_shape, self._num_heads, self._out_feats
                 )
- 
+
                 if graph.is_block:
                     h_dst = h_src[: graph.number_of_dst_nodes()]
                     inputs_dst = [
@@ -931,7 +931,7 @@ class GATConvOpt(BlockedModule):
                     #    dst_prefix_shape = (
                     #        graph.number_of_dst_nodes(),
                     #    ) + dst_prefix_shape[1:]
-                
+
                 else:
                     feat_dst = feat_src
 
