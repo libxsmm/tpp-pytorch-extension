@@ -145,8 +145,8 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         ShardLinear(self.attn.k_proj, 0, rank, wsize, self.attn.head_dim)
         ShardLinear(self.attn.v_proj, 0, rank, wsize, self.attn.head_dim)
         ShardLinear(self.attn.out_proj, 1, rank, wsize, self.attn.head_dim)
-        ShardLinear(self.mlp.fc_in, 0, rank, wsize, self.attn.head_dim)
-        ShardLinear(self.mlp.fc_out, 1, rank, wsize, self.attn.head_dim)
+        ShardLinear(self.mlp.fc_in, 0, rank, wsize, 64)
+        ShardLinear(self.mlp.fc_out, 1, rank, wsize, 64)
         self.model_parallel = True
     else:
         self.model_parallel = False

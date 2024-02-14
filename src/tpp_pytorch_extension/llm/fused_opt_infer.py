@@ -140,8 +140,8 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.out_proj, 1, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.fc1, 0, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.fc2, 1, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.fc1, 0, rank, wsize, 64)
+        ShardLinear(self.fc2, 1, rank, wsize, 64)
         self.model_parallel = True
     else:
         self.model_parallel = False

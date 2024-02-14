@@ -172,13 +172,16 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
     rank = get_rank()
     wsize = get_size()
     if wsize > 1:
-        ShardLinear(self.self_attn.q_proj, 0, rank, wsize, self.self_attn.head_dim)
+        block_size = self.self_attn.head_dim
+        if hasattr(self.self_attn, "num_key_value_groups"):
+            block_size = block_size * self.self_attn.num_key_value_groups
+        ShardLinear(self.self_attn.q_proj, 0, rank, wsize, block_size)
         ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.self_attn.o_proj, 1, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.mlp.gate_proj, 0, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.mlp.up_proj, 0, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.mlp.down_proj, 1, rank, wsize, self.self_attn.head_dim)
+        ShardLinear(self.self_attn.o_proj, 1, rank, wsize, block_size)
+        ShardLinear(self.mlp.gate_proj, 0, rank, wsize, 64)
+        ShardLinear(self.mlp.up_proj, 0, rank, wsize, 64)
+        ShardLinear(self.mlp.down_proj, 1, rank, wsize, 64)
         self.model_parallel = True
     else:
         self.model_parallel = False
