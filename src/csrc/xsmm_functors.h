@@ -5395,7 +5395,7 @@ class FusedAdamWTPP {
       } else if (eqn_no == 3) {
         int use_wd = (p->weight_decay == 0.0 && p->use_adam) ? 0 : 1;
         if (!use_wd)
-          return nullptr;
+          return (void*)0xdeaddead;
         auto my_eqn3 = libxsmm_meqn_create();
         meqn_push_binary_op(my_eqn3, LIBXSMM_MELTW_TYPE_BINARY_ADD);
         meqn_push_binary_op(
@@ -5711,7 +5711,7 @@ class FusedSplitAdamWTPP {
       } else if (eqn_no == 3) {
         int use_wd = (p->weight_decay == 0.0 && p->use_adam) ? 0 : 1;
         if (!use_wd)
-          return nullptr;
+          return (void*)0xdeaddead;
         auto my_eqn3 = libxsmm_meqn_create();
         meqn_push_binary_op(my_eqn3, LIBXSMM_MELTW_TYPE_BINARY_ADD);
         meqn_push_binary_op(
