@@ -588,6 +588,130 @@ class BinaryTPP : public BaseTPP {
   libxsmm_meltwfunction_binary kernel = NULL;
 };
 
+class TernaryTPP : public BaseTPP {
+ public:
+  TernaryTPP() {}
+  TernaryTPP(
+      libxsmm_blasint rows,
+      libxsmm_blasint cols,
+      libxsmm_blasint ldi,
+      libxsmm_blasint ldo,
+      libxsmm_datatype dt_in,
+      libxsmm_datatype dt_out,
+      libxsmm_datatype dt_compute,
+      libxsmm_bitfield flags,
+      libxsmm_meltw_ternary_type type)
+      : TernaryTPP(
+            rows,
+            cols,
+            ldi,
+            ldi,
+            ldi,
+            ldo,
+            dt_in,
+            dt_in,
+            dt_in,
+            dt_out,
+            dt_compute,
+            flags,
+            type) {}
+  TernaryTPP(
+      libxsmm_blasint rows,
+      libxsmm_blasint cols,
+      libxsmm_blasint ldi0,
+      libxsmm_blasint ldi1,
+      libxsmm_blasint ldi2,
+      libxsmm_blasint ldo,
+      libxsmm_datatype dt_in0,
+      libxsmm_datatype dt_in1,
+      libxsmm_datatype dt_in2,
+      libxsmm_datatype dt_out,
+      libxsmm_datatype dt_compute,
+      libxsmm_bitfield flags,
+      libxsmm_meltw_ternary_type type)
+      : rows(rows),
+        cols(cols),
+        ldi0(ldi0),
+        ldi1(ldi1),
+        ldi2(ldi2),
+        ldo(ldo),
+        dt_in0(dt_in0),
+        dt_in1(dt_in1),
+        dt_in2(dt_in2),
+        dt_out(dt_out),
+        dt_compute(dt_compute),
+        flags(flags),
+        type(type) {
+    kernel = (libxsmm_meltwfunction_ternary)get_kernel();
+    if (kernel)
+      initialized = true;
+  }
+
+  void operator()(void* in0, void* in1, void* in2, void* out) {
+    if (!initialized)
+      return;
+    libxsmm_meltw_ternary_param ternary_param;
+    ternary_param.in0.primary = in0;
+    ternary_param.in1.primary = in1;
+    ternary_param.in2.primary = in2;
+    ternary_param.out.primary = out;
+    kernel(&ternary_param);
+  }
+
+ protected:
+  std::string hash_str() override {
+    char hash[200];
+    snprintf(
+        hash,
+        200,
+        "ternary_r%d_c%d_i0%d_i1%d_i2%d_o%d_di0%d_di1%d_di2%d_do%d_dc%d_f%d_t%d",
+        rows,
+        cols,
+        ldi0,
+        ldi1,
+        ldi2,
+        ldo,
+        dt_in0,
+        dt_in1,
+        dt_in2,
+        dt_out,
+        dt_compute,
+        flags,
+        type);
+    return std::string(hash);
+  }
+  void* build_kernel() override {
+    libxsmm_meltw_ternary_shape shape = libxsmm_create_meltw_ternary_shape(
+        cols,
+        rows,
+        ldi0,
+        ldi1,
+        ldi2,
+        ldo,
+        dt_in0,
+        dt_in1,
+        dt_in2,
+        dt_out,
+        dt_compute);
+    return (void*)libxsmm_dispatch_meltw_ternary(type, shape, flags);
+  }
+
+  libxsmm_blasint rows = 0;
+  libxsmm_blasint cols = 0;
+  libxsmm_blasint ldi0;
+  libxsmm_blasint ldi1;
+  libxsmm_blasint ldi2;
+  libxsmm_blasint ldo;
+  libxsmm_datatype dt_in0;
+  libxsmm_datatype dt_in1;
+  libxsmm_datatype dt_in2;
+  libxsmm_datatype dt_out;
+  libxsmm_datatype dt_compute;
+  libxsmm_bitfield flags;
+  libxsmm_meltw_ternary_type type;
+  libxsmm_meltwfunction_ternary kernel = NULL;
+};
+
 template <typename T>
 class SetZeroTPP {
  public:
@@ -5018,32 +5142,50 @@ template <typename T>
 class FusedAdamWTPP {
  public:
   FusedAdamWTPP() {}
-  FusedAdamWTPP(int N, float beta1, float beta2, float weight_decay, float eps)
+  FusedAdamWTPP(
+      int N,
+      float beta1,
+      float beta2,
+      float weight_decay,
+      float eps,
+      bool use_adam = false)
       : N(N),
         beta1(beta1),
         beta2(beta2),
         weight_decay(weight_decay),
         eps(eps),
+        use_adam(use_adam),
         eqn0(this, 0),
         eqn1(this, 1),
-        eqn2(this, 2) {}
+        eqn2(this, 2),
+        eqn3(this, 3) {}
   void operator()(
       T* data,
-      T* grad,
+      T* grad_,
       T* exp_avg,
       T* exp_avg_sq,
       float step_size,
       float lr) {
+    T wd_grad[N];
     float beta1_1 = 1.0f - beta1;
     float beta2_1 = 1.0f - beta2;
     float lrwd_1 = 1.0f - lr * weight_decay;
+    void* grad = use_adam ? (void*)wd_grad : (void*)grad_;
     libxsmm_meqn_param eqn_param;
-    libxsmm_matrix_arg arg_array[6];
+    libxsmm_matrix_arg arg_array[7];
+    eqn_param.inputs = arg_array;
+    if (use_adam) {
+      arg_array[0].primary = (void*)grad_;
+      arg_array[4].primary = (void*)data;
+      arg_array[6].primary = (void*)&weight_decay;
+      eqn_param.output.primary = (void*)grad;
+      eqn3(&eqn_param);
+    }
+
     arg_array[0].primary = (void*)grad;
     arg_array[1].primary = (void*)&beta1_1;
     arg_array[2].primary = (void*)exp_avg;
     arg_array[3].primary = (void*)&beta1;
-    eqn_param.inputs = arg_array;
     eqn_param.output.primary = (void*)exp_avg;
     eqn0(&eqn_param);
 
@@ -5080,11 +5222,13 @@ class FusedAdamWTPP {
       auto avg_sq_i = exp_avg_sq[i];
       auto grad_i = grad[i];
       auto data_i = data[i];
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = grad_i + data_i * weight_decay;
       avg_i = avg_i * beta1 + grad_i * beta1_1;
       avg_sq_i = avg_sq_i * beta2 + grad_i * grad_i * beta2_1;
       auto denom = sqrtf(avg_sq_i) + eps;
       data_i = data_i - step_size * (avg_i / denom);
-      if (weight_decay > 0.0)
+      if (weight_decay > 0.0 && !use_adam)
         data_i = data_i - data_i * lr * weight_decay;
       exp_avg[i] = avg_i;
       exp_avg_sq[i] = avg_sq_i;
@@ -5097,13 +5241,16 @@ class FusedAdamWTPP {
     auto vbeta2_1 = _mm512_set1_ps(beta2_1);
     auto veps = _mm512_set1_ps(eps);
     auto vstep_size = _mm512_set1_ps(step_size);
-    auto vweight_decay = _mm512_set1_ps(lr * weight_decay);
+    auto vweight_decay = _mm512_set1_ps(weight_decay);
+    auto vweight_decay_lr = _mm512_set1_ps(lr * weight_decay);
     long i;
     for (i = 0; i < ALIGNDOWN(sz, 16); i += 16) {
       auto avg_i = _mm512_loadu_ps(&exp_avg[i]);
       auto avg_sq_i = _mm512_loadu_ps(&exp_avg_sq[i]);
       auto grad_i = _mm512_loadu_ps(&grad[i]);
       auto data_i = _mm512_loadu_ps(&data[i]);
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = _mm512_add_ps(grad_i, _mm512_mul_ps(data_i, vweight_decay));
       avg_i = _mm512_add_ps(
           _mm512_mul_ps(avg_i, vbeta1), _mm512_mul_ps(grad_i, vbeta1_1));
       avg_sq_i = _mm512_add_ps(
@@ -5112,8 +5259,8 @@ class FusedAdamWTPP {
       auto denom = _mm512_add_ps(_mm512_sqrt_ps(avg_sq_i), veps);
       data_i = _mm512_sub_ps(
           data_i, _mm512_mul_ps(vstep_size, _mm512_div_ps(avg_i, denom)));
-      // if (weight_decay > 0.0)
-      data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay));
+      if (weight_decay > 0.0 && !use_adam)
+        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay_lr));
       _mm512_storeu_ps(&exp_avg[i], avg_i);
       _mm512_storeu_ps(&exp_avg_sq[i], avg_sq_i);
       _mm512_storeu_ps(&data[i], data_i);
@@ -5125,6 +5272,8 @@ class FusedAdamWTPP {
       auto avg_sq_i = _mm512_maskz_loadu_ps(mask, &exp_avg_sq[i]);
       auto grad_i = _mm512_maskz_loadu_ps(mask, &grad[i]);
       auto data_i = _mm512_maskz_loadu_ps(mask, &data[i]);
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = _mm512_add_ps(grad_i, _mm512_mul_ps(data_i, vweight_decay));
       avg_i = _mm512_add_ps(
           _mm512_mul_ps(avg_i, vbeta1), _mm512_mul_ps(grad_i, vbeta1_1));
       avg_sq_i = _mm512_add_ps(
@@ -5133,8 +5282,8 @@ class FusedAdamWTPP {
       auto denom = _mm512_add_ps(_mm512_sqrt_ps(avg_sq_i), veps);
       data_i = _mm512_sub_ps(
           data_i, _mm512_mul_ps(vstep_size, _mm512_div_ps(avg_i, denom)));
-      // if (weight_decay > 0.0)
-      data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay));
+      if (weight_decay > 0.0 && !use_adam)
+        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay_lr));
       _mm512_mask_storeu_ps(&exp_avg[i], mask, avg_i);
       _mm512_mask_storeu_ps(&exp_avg_sq[i], mask, avg_sq_i);
       _mm512_mask_storeu_ps(&data[i], mask, data_i);
@@ -5160,18 +5309,18 @@ class FusedAdamWTPP {
       snprintf(
           hash,
           200,
-          "fused_adamw_eqn%d_t%d_n%d_wd%d",
+          "fused_adamw_eqn%d_t%d_n%d_wd%d_adam%d",
           eqn_no,
           XsmmDtype<T>(),
           p->N,
-          (p->weight_decay == 0.0 ? 0 : 1));
+          (p->weight_decay == 0.0 ? 0 : 1),
+          (p->use_adam ? 1 : 0));
       return std::string(hash);
     }
     void* build_kernel() override {
       auto in_dt = XsmmDtype<T>();
       libxsmm_blasint ld = p->N;
       auto N = p->N;
-      int use_wd = p->weight_decay == 0.0 ? 0 : 1;
       libxsmm_meqn_function func;
       if (eqn_no == 0) {
         // Equation for exp_avg
@@ -5211,6 +5360,7 @@ class FusedAdamWTPP {
         debug_print_eqn_tree(my_eqn1);
         func = meqn_dispatch(N, 1, &ld, in_dt, my_eqn1);
       } else if (eqn_no == 2) {
+        int use_wd = (p->weight_decay == 0.0 && !p->use_adam) ? 0 : 1;
         // Equation for data_i (with decay)
         auto my_eqn2 = libxsmm_meqn_create();
         if (use_wd == 1) {
@@ -5242,6 +5392,22 @@ class FusedAdamWTPP {
         }
         debug_print_eqn_tree(my_eqn2);
         func = meqn_dispatch(N, 1, &ld, in_dt, my_eqn2);
+      } else if (eqn_no == 3) {
+        int use_wd = (p->weight_decay == 0.0 && p->use_adam) ? 0 : 1;
+        if (!use_wd)
+          return nullptr;
+        auto my_eqn3 = libxsmm_meqn_create();
+        meqn_push_binary_op(my_eqn3, LIBXSMM_MELTW_TYPE_BINARY_ADD);
+        meqn_push_binary_op(
+            my_eqn3,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+        meqn_push_arg(my_eqn3, N, 1, ld, 4, 0, in_dt); // data_i
+        meqn_push_arg(
+            my_eqn3, 1, 1, 1, 6, 0, LIBXSMM_DATATYPE_F32); // weight_decay
+        meqn_push_arg(my_eqn3, N, 1, ld, 0, 0, in_dt); // grad_i
+        debug_print_eqn_tree(my_eqn3);
+        func = meqn_dispatch(N, 1, &ld, in_dt, my_eqn3);
       } else {
         TPP_ASSERT(false, "Should not come here\n");
       }
@@ -5257,7 +5423,8 @@ class FusedAdamWTPP {
  private:
   int N = 0;
   float beta1, beta2, weight_decay, eps;
-  Eqn eqn0, eqn1, eqn2;
+  bool use_adam;
+  Eqn eqn0, eqn1, eqn2, eqn3;
   friend class Eqn;
 };
 
@@ -5270,33 +5437,47 @@ class FusedSplitAdamWTPP {
       float beta1,
       float beta2,
       float weight_decay,
-      float eps)
+      float eps,
+      bool use_adam = false)
       : N(N),
         beta1(beta1),
         beta2(beta2),
         weight_decay(weight_decay),
         eps(eps),
+        use_adam(use_adam),
         eqn0(this, 0),
         eqn1(this, 1),
-        eqn2(this, 2) {}
+        eqn2(this, 2),
+        eqn3(this, 3) {}
   void operator()(
       T* hi,
       T* lo,
-      T* grad,
+      T* grad_,
       T* exp_avg,
       T* exp_avg_sq,
       float step_size,
       float lr) {
+    T wd_grad[N];
     float beta1_1 = 1.0f - beta1;
     float beta2_1 = 1.0f - beta2;
     float lrwd_1 = 1.0f - lr * weight_decay;
+    void* grad = use_adam ? (void*)wd_grad : (void*)grad_;
     libxsmm_meqn_param eqn_param;
-    libxsmm_matrix_arg arg_array[7];
+    libxsmm_matrix_arg arg_array[8];
+    eqn_param.inputs = arg_array;
+    if (use_adam) {
+      arg_array[0].primary = (void*)grad_;
+      arg_array[4].primary = (void*)lo;
+      arg_array[5].primary = (void*)hi;
+      arg_array[7].primary = (void*)&weight_decay;
+      eqn_param.output.primary = (void*)grad;
+      eqn3(&eqn_param);
+    }
+
     arg_array[0].primary = (void*)grad;
     arg_array[1].primary = (void*)&beta1_1;
     arg_array[2].primary = (void*)exp_avg;
     arg_array[3].primary = (void*)&beta1;
-    eqn_param.inputs = arg_array;
     eqn_param.output.primary = (void*)exp_avg;
     eqn0(&eqn_param);
 
@@ -5340,12 +5521,14 @@ class FusedSplitAdamWTPP {
       data_hp.i[0] = lo[i];
       data_hp.i[1] = hi[i];
       float data_i = data_hp.f;
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = grad_i + data_i * weight_decay;
 
       avg_i = avg_i * beta1 + grad_i * beta1_1;
       avg_sq_i = avg_sq_i * beta2 + grad_i * grad_i * beta2_1;
       auto denom = sqrtf(avg_sq_i) + eps;
       data_i = data_i - step_size * (avg_i / denom);
-      if (weight_decay > 0.0)
+      if (weight_decay > 0.0 && !use_adam)
         data_i = data_i - data_i * lr * weight_decay;
       exp_avg[i] = avg_i;
       exp_avg_sq[i] = avg_sq_i;
@@ -5360,13 +5543,16 @@ class FusedSplitAdamWTPP {
     auto vbeta2_1 = _mm512_set1_ps(beta2_1);
     auto veps = _mm512_set1_ps(eps);
     auto vstep_size = _mm512_set1_ps(step_size);
-    auto vweight_decay = _mm512_set1_ps(lr * weight_decay);
+    auto vweight_decay = _mm512_set1_ps(weight_decay);
+    auto vweight_decay_lr = _mm512_set1_ps(lr * weight_decay);
     long i;
     for (i = 0; i < ALIGNDOWN(sz, 16); i += 16) {
       auto avg_i = _mm512_loadu_ps(&exp_avg[i]);
       auto avg_sq_i = _mm512_loadu_ps(&exp_avg_sq[i]);
       auto grad_i = _mm512_loadu_ps(&grad[i]);
       auto data_i = _mm512_split_loadu_ps(&hi[i], &lo[i]);
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = _mm512_add_ps(grad_i, _mm512_mul_ps(data_i, vweight_decay));
       avg_i = _mm512_add_ps(
           _mm512_mul_ps(avg_i, vbeta1), _mm512_mul_ps(grad_i, vbeta1_1));
       avg_sq_i = _mm512_add_ps(
@@ -5375,8 +5561,8 @@ class FusedSplitAdamWTPP {
       auto denom = _mm512_add_ps(_mm512_sqrt_ps(avg_sq_i), veps);
       data_i = _mm512_sub_ps(
           data_i, _mm512_mul_ps(vstep_size, _mm512_div_ps(avg_i, denom)));
-      if (weight_decay > 0.0)
-        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay));
+      if (weight_decay > 0.0 && !use_adam)
+        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay_lr));
       _mm512_storeu_ps(&exp_avg[i], avg_i);
       _mm512_storeu_ps(&exp_avg_sq[i], avg_sq_i);
       _mm512_split_storeu_ps(&hi[i], &lo[i], data_i);
@@ -5388,6 +5574,8 @@ class FusedSplitAdamWTPP {
       auto avg_sq_i = _mm512_maskz_loadu_ps(mask, &exp_avg_sq[i]);
       auto grad_i = _mm512_maskz_loadu_ps(mask, &grad[i]);
       auto data_i = _mm512_maskz_split_loadu_ps(mask, &hi[i], &lo[i]);
+      if (weight_decay > 0.0 && use_adam)
+        grad_i = _mm512_add_ps(grad_i, _mm512_mul_ps(data_i, vweight_decay));
       avg_i = _mm512_add_ps(
           _mm512_mul_ps(avg_i, vbeta1), _mm512_mul_ps(grad_i, vbeta1_1));
       avg_sq_i = _mm512_add_ps(
@@ -5396,8 +5584,8 @@ class FusedSplitAdamWTPP {
       auto denom = _mm512_add_ps(_mm512_sqrt_ps(avg_sq_i), veps);
       data_i = _mm512_sub_ps(
           data_i, _mm512_mul_ps(vstep_size, _mm512_div_ps(avg_i, denom)));
-      if (weight_decay > 0.0)
-        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay));
+      if (weight_decay > 0.0 && !use_adam)
+        data_i = _mm512_sub_ps(data_i, _mm512_mul_ps(data_i, vweight_decay_lr));
       _mm512_mask_storeu_ps(&exp_avg[i], mask, avg_i);
       _mm512_mask_storeu_ps(&exp_avg_sq[i], mask, avg_sq_i);
       _mm512_mask_split_storeu_ps(&hi[i], &lo[i], mask, data_i);
@@ -5423,18 +5611,18 @@ class FusedSplitAdamWTPP {
       snprintf(
           hash,
           200,
-          "fused_split_adamw_eqn%d_t%d_n%d_wd%d",
+          "fused_split_adamw_eqn%d_t%d_n%d_wd%d_adam%d",
           eqn_no,
           XsmmDtype<T>(),
           p->N,
-          (p->weight_decay == 0.0 ? 0 : 1));
+          (p->weight_decay == 0.0 ? 0 : 1),
+          (p->use_adam ? 1 : 0));
       return std::string(hash);
     }
     void* build_kernel() override {
       auto in_dt = XsmmDtype<T>();
       libxsmm_blasint ld = p->N;
       auto N = p->N;
-      int use_wd = p->weight_decay == 0.0 ? 0 : 1;
       libxsmm_meqn_function func;
       if (eqn_no == 0) {
         // Equation for exp_avg
@@ -5475,6 +5663,7 @@ class FusedSplitAdamWTPP {
         func = meqn_dispatch(N, 1, &ld, in_dt, my_eqn1);
       } else if (eqn_no == 2) {
         // Equation for data_i (with decay)
+        int use_wd = (p->weight_decay == 0.0 && !p->use_adam) ? 0 : 1;
         auto my_eqn2 = libxsmm_meqn_create();
         meqn_push_unary_op(
             my_eqn2,
@@ -5519,6 +5708,30 @@ class FusedSplitAdamWTPP {
         }
         debug_print_eqn_tree(my_eqn2);
         func = meqn_dispatch(N, 1, &ld, LIBXSMM_DATATYPE_U16, my_eqn2);
+      } else if (eqn_no == 3) {
+        int use_wd = (p->weight_decay == 0.0 && p->use_adam) ? 0 : 1;
+        if (!use_wd)
+          return nullptr;
+        auto my_eqn3 = libxsmm_meqn_create();
+        meqn_push_binary_op(my_eqn3, LIBXSMM_MELTW_TYPE_BINARY_ADD);
+        meqn_push_binary_op(
+            my_eqn3,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+        meqn_push_binary_op(
+            my_eqn3,
+            LIBXSMM_MELTW_TYPE_BINARY_ZIP,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_DATATYPE_IMPLICIT);
+        meqn_push_arg(
+            my_eqn3, N, 1, ld, 4, 0, LIBXSMM_DATATYPE_U16); // data_i lo
+        meqn_push_arg(
+            my_eqn3, N, 1, ld, 5, 0, LIBXSMM_DATATYPE_U16); // data_i hi
+        meqn_push_arg(
+            my_eqn3, 1, 1, 1, 7, 0, LIBXSMM_DATATYPE_F32); // weight_decay
+        meqn_push_arg(my_eqn3, N, 1, ld, 0, 0, in_dt); // grad_i
+        debug_print_eqn_tree(my_eqn3);
+        func = meqn_dispatch(N, 1, &ld, in_dt, my_eqn3);
       } else {
         TPP_ASSERT(false, "Should not come here\n");
       }
@@ -5534,7 +5747,8 @@ class FusedSplitAdamWTPP {
  private:
   int N = 0;
   float beta1, beta2, weight_decay, eps;
-  Eqn eqn0, eqn1, eqn2;
+  bool use_adam;
+  Eqn eqn0, eqn1, eqn2, eqn3;
   friend class Eqn;
 };
 

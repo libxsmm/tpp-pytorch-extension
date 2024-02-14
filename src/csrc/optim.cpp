@@ -283,7 +283,8 @@ void fused_adamw(
     float step_size,
     float lr,
     float weight_decay,
-    float eps) {
+    float eps,
+    bool use_adam) {
   GlobalPass _gp(UPD);
   RECORD_SCOPE(fused_adamw, {t_data});
   typedef float T;
@@ -296,8 +297,8 @@ void fused_adamw(
     long sz = t_data.numel();
     constexpr int BS = 64;
 
-    auto adamw_tpp =
-        SCOPEIT(FusedAdamWTPP<T>(BS, beta1, beta2, weight_decay, eps), OPTIM);
+    auto adamw_tpp = SCOPEIT(
+        FusedAdamWTPP<T>(BS, beta1, beta2, weight_decay, eps, use_adam), OPTIM);
 
     long i;
 #pragma omp parallel for lastprivate(i)
@@ -306,7 +307,8 @@ void fused_adamw(
     }
     if (i < sz) {
       auto adamw_tpp = SCOPEIT(
-          FusedAdamWTPP<T>(sz - i, beta1, beta2, weight_decay, eps), OPTIM);
+          FusedAdamWTPP<T>(sz - i, beta1, beta2, weight_decay, eps, use_adam),
+          OPTIM);
       adamw_tpp(&data[i], &grad[i], &exp_avg[i], &exp_avg_sq[i], step_size, lr);
     }
   } else {
@@ -323,8 +325,8 @@ void fused_adamw(
     // auto M = t_data.size(0);
     auto E = t_data.size(1);
 
-    auto adamw_tpp =
-        SCOPEIT(FusedAdamWTPP<T>(E, beta1, beta2, weight_decay, eps), OPTIM);
+    auto adamw_tpp = SCOPEIT(
+        FusedAdamWTPP<T>(E, beta1, beta2, weight_decay, eps, use_adam), OPTIM);
 #pragma omp parallel for
     for (int i = 0; i < NS; i++) {
       auto ind = indices[i];
@@ -350,7 +352,8 @@ void fused_split_adamw(
     float step_size,
     float lr,
     float weight_decay,
-    float eps) {
+    float eps,
+    bool use_adam) {
   GlobalPass _gp(UPD);
   RECORD_SCOPE(splt_adamw, {t_data_hi});
   typedef bfloat16 T;
@@ -364,8 +367,9 @@ void fused_split_adamw(
     long sz = t_data_hi.numel();
     constexpr int BS = 64;
 
-    auto split_adamw_tpp =
-        SCOPEIT(FusedSplitAdamWTPP(BS, beta1, beta2, weight_decay, eps), OPTIM);
+    auto split_adamw_tpp = SCOPEIT(
+        FusedSplitAdamWTPP(BS, beta1, beta2, weight_decay, eps, use_adam),
+        OPTIM);
 
     long i;
 #pragma omp parallel for lastprivate(i)
@@ -381,7 +385,8 @@ void fused_split_adamw(
     }
     if (i < sz) {
       auto split_adamw_tpp = SCOPEIT(
-          FusedSplitAdamWTPP(sz - i, beta1, beta2, weight_decay, eps), OPTIM);
+          FusedSplitAdamWTPP(sz - i, beta1, beta2, weight_decay, eps, use_adam),
+          OPTIM);
       split_adamw_tpp(
           &data_hi[i],
           &data_lo[i],
@@ -408,8 +413,9 @@ void fused_split_adamw(
     // auto M = t_data_hi.size(0);
     auto E = t_data_hi.size(1);
 
-    auto split_adamw_tpp =
-        SCOPEIT(FusedSplitAdamWTPP(E, beta1, beta2, weight_decay, eps), OPTIM);
+    auto split_adamw_tpp = SCOPEIT(
+        FusedSplitAdamWTPP(E, beta1, beta2, weight_decay, eps, use_adam),
+        OPTIM);
 #pragma omp parallel for
     for (int i = 0; i < NS; i++) {
       auto ind = indices[i];
