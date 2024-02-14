@@ -5170,11 +5170,12 @@ class FusedAdamWTPP {
     float beta1_1 = 1.0f - beta1;
     float beta2_1 = 1.0f - beta2;
     float lrwd_1 = 1.0f - lr * weight_decay;
-    void* grad = use_adam ? (void*)wd_grad : (void*)grad_;
+    bool adam_style_weight_decay = weight_decay > 0.0 && use_adam;
+    void* grad = adam_style_weight_decay ? (void*)wd_grad : (void*)grad_;
     libxsmm_meqn_param eqn_param;
     libxsmm_matrix_arg arg_array[7];
     eqn_param.inputs = arg_array;
-    if (use_adam) {
+    if (adam_style_weight_decay) {
       arg_array[0].primary = (void*)grad_;
       arg_array[4].primary = (void*)data;
       arg_array[6].primary = (void*)&weight_decay;
@@ -5461,11 +5462,12 @@ class FusedSplitAdamWTPP {
     float beta1_1 = 1.0f - beta1;
     float beta2_1 = 1.0f - beta2;
     float lrwd_1 = 1.0f - lr * weight_decay;
-    void* grad = use_adam ? (void*)wd_grad : (void*)grad_;
+    bool adam_style_weight_decay = weight_decay > 0.0 && use_adam;
+    void* grad = adam_style_weight_decay ? (void*)wd_grad : (void*)grad_;
     libxsmm_meqn_param eqn_param;
     libxsmm_matrix_arg arg_array[8];
     eqn_param.inputs = arg_array;
-    if (use_adam) {
+    if (adam_style_weight_decay) {
       arg_array[0].primary = (void*)grad_;
       arg_array[4].primary = (void*)lo;
       arg_array[5].primary = (void*)hi;
