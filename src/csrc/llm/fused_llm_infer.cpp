@@ -2102,6 +2102,23 @@ inline at::Tensor attn(
   return t_CL;
 }
 
+at::Tensor remap_indices(at::Tensor t_beam_idx, at::Tensor t_offset) {
+  long B = t_beam_idx.size(1);
+  long offset = t_offset.item<long>();
+  auto t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
+  auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset + 1});
+  auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
+  for (auto i = 0; i < B; i++) {
+    beam_idx[i][offset] = i;
+    beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
+    for (auto j = offset - 2; j >= 0;
+         j--) { // for the token of input, the target beam is alwarys 0
+      beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
+    }
+  }
+  return t_new_beam_idx;
+}
+
 template <typename cls>
 struct LLMBlock : torch::CustomClassHolder {
  public:
@@ -2178,7 +2195,8 @@ struct LLMBlock : torch::CustomClassHolder {
       t_offset = t_cache[3];
       offset = t_offset.item<long>();
       TPP_ASSERT(
-          csz == 6, "Updated indirect kv_cache tuple should be of length 6\n");
+          csz >= 6,
+          "Updated indirect kv_cache tuple should be of minimum length 6\n");
       t_key_past = t_cache[4];
       t_value_past = t_cache[5];
     } else if (csz > 0) {
@@ -2285,17 +2303,26 @@ struct LLMBlock : torch::CustomClassHolder {
       // "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl; std::cout
       // << "t_offset:" << t_offset << std::endl; std::cout
       // << "B: " << B << " offset:" << offset << std::endl;
-      auto t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
+
+      at::Tensor t_new_beam_idx;
+      if (csz > 6) {
+        t_new_beam_idx = t_cache[6];
+      } else {
+        t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
+      }
       auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset + 1});
-      auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
-      for (auto i = 0; i < B; i++) {
-        beam_idx[i][offset] = i;
-        beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
-        for (auto j = offset - 2; j >= 0;
-             j--) { // for the token of input, the target beam is alwarys 0
-          beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
+      if (csz <= 6) {
+        auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
+        for (auto i = 0; i < B; i++) {
+          beam_idx[i][offset] = i;
+          beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
+          for (auto j = offset - 2; j >= 0;
+               j--) { // for the token of input, the target beam is alwarys 0
+            beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
+          }
         }
       }
+
       t_CL = attn<T>(
           t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
       t_CL = t_CL.view({B, Nq, S, H})
@@ -2893,6 +2920,7 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
+  m.def("remap_indices", &remap_indices);
   m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.def(
       "apply_rotary_pos_emb_gptj",
@@ -2916,6 +2944,7 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
+  m.def("remap_indices", &remap_indices);
   m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.class_<GPTJBlock>("GPTJBlock")
       .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())

@@ -123,6 +123,7 @@ def generate_past_key_values(model, batch_size, seq_len, num_beams=1, indirect_k
         )
     else:
         if indirect_kv == True:
+            num_tensors = 7 if num_beams > 1 else 6
             past_key_values = tuple(
                 (
                     torch.empty(
@@ -155,7 +156,8 @@ def generate_past_key_values(model, batch_size, seq_len, num_beams=1, indirect_k
                     )
                     .to(model.dtype)
                     .to(model.device),
-                )
+                    torch.empty(batch_size, 1, dtype=torch.int64).to(model.device),
+                )[:num_tensors]
                 for _ in range(num_block_layers)
             )
         else:
@@ -224,7 +226,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         first_token = True if kwargs["past_key_values"] is None else False
         if kwargs["past_key_values"] is None and self._default.config.use_cache:
             kwargs["past_key_values"] = generate_past_key_values(
-                self._default, kwargs["input_ids"].shape[0], 0
+                self._default, kwargs["input_ids"].shape[0], 0, num_beams=self.num_beams
             )
         # kwargs.pop("position_ids", None)
         if first_token == True and self.num_beams > 1:
@@ -598,7 +600,7 @@ def _reorder_cache(
     # print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
     if len(past[0]) >= 4:  # discrete kv_cache
         assert (
-            len(past[0]) == 6
+            len(past[0]) >= 6
         ), f"Invalid past key_value tuple length ({len(past[0])})"
         B_DIM = BATCH_DIM_IN_KV_CACHE
         B1 = past[0][4].shape[B_DIM]
@@ -608,6 +610,14 @@ def _reorder_cache(
         if B1 != B2:
             assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
             num_beams = B2 // B1
+            tmp = (
+                past[0][2]
+                .repeat_interleave(num_beams, dim=1)
+                .mul(num_beams)
+                .contiguous()
+            )
+            tmp[past[0][3] - 1] = beam_idx
+            remapped_ind = fused_llm_cpp.remap_indices(tmp, past[0][3])
             new_past = []
             S = past[0][0].shape[2]
             for layer_past in past:
@@ -638,6 +648,7 @@ def _reorder_cache(
                         layer_past[3],
                         layer_past_4,
                         layer_past_5,
+                        remapped_ind,
                     )
                 )
 
@@ -645,6 +656,16 @@ def _reorder_cache(
         else:
             for layer_past in past:
                 layer_past[2][layer_past[3] - 1] = beam_idx
+            remapped_ind = fused_llm_cpp.remap_indices(past[0][2], past[0][3])
+            new_past = []
+            for layer_past in past:
+                l_layer_past = list(layer_past)
+                if len(layer_past) == 6:
+                    l_layer_past.append(remapped_ind)
+                else:
+                    l_layer_past[6] = remapped_ind
+                new_past.append(tuple(l_layer_past))
+            past = tuple(new_past)
             return past
     else:
         B1 = past[0][0].shape[0]
