@@ -9,6 +9,7 @@
 ###############################################################################
 
 import torch
+import math
 from tpp_pytorch_extension._C import _gnn_utils as gnn_utils_cpp
 
 
@@ -117,3 +118,8 @@ def mapped_spmm_copy_lhs_add(dest, indptr, dind, sind, comms, source, edge, soff
         inputs = [dest, indptr, dind, sind, comms, source, edge]
 
     gnn_utils_cpp.mapped_spmm_copy_lhs_add(inputs, rank, soff)
+
+
+def glorot_initializer(tensor: torch.Tensor):
+    a = math.sqrt(6.0 / (tensor.size(-2) + tensor.size(-1)))
+    tensor.data.uniform_(-a, a)

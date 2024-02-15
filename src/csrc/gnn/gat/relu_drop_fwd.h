@@ -11,16 +11,14 @@
 RECORD_FUNCTION("relu_drop_fwd", std::vector<c10::IValue>());
 
 auto t_in = inp;
-at::Tensor t_relu_mask;
-at::Tensor t_dp_mask;
 
 auto N = t_in.numel();
 int dN = (N + 15) / 16;
 auto t_out = at::empty_like(t_in);
 auto out = t_out.data_ptr<T>();
 
-t_relu_mask = at::empty({dN}, at::kShort);
-t_dp_mask = at::empty({dN}, at::kShort);
+auto t_relu_mask = at::empty({dN}, at::kShort);
+auto t_dp_mask = at::empty({dN}, at::kShort);
 auto in = t_in.data_ptr<T>();
 auto relu_mask = t_relu_mask.data_ptr<short>();
 auto dp_mask = t_dp_mask.data_ptr<short>();

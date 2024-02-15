@@ -12,7 +12,6 @@ RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
 
 at::Tensor t_in, t_wt, t_bias = at::empty(0);
 int i = 0;
-// #define PRINT_T(x) std::cout << #x << "==: " << x.sizes() << std::endl
 
 t_in = inputs[i++]; // [N, C]
 t_wt = inputs[i++]; // [nk, nc, bc, bk]
@@ -42,27 +41,18 @@ if (t_wt.dtype() == at::kBFloat16) {
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 
 auto t_out = t_in.new_empty({N, K}); // [N,  K]
-at::Tensor t_out_f32 = at::empty(0);
-if (add_bias) {
-  if (t_out.dtype() == at::kFloat)
-    t_out_f32 = t_out;
-  else
-    t_out_f32 = at::empty({N, K});
-}
 auto in = GetVLAPtr<T>(t_in, {bn, nc, bcp});
 auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
-auto bias = GetVLAPtr<float>(t_bias, {bk});
 auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
-auto out_f32 = GetVLAPtr<float>(t_out_f32, {bn, nk, bk});
 
 {
   RECORD_SCOPE(gao_gemm, {t_in, t_wt_V});
   {
     if (add_bias) {
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, float>(
+      auto bias = GetVLAPtr<T>(t_bias, {bk});
+      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
           bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(bn, bk, K), BIAS);
-      auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
+      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
 
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
@@ -80,9 +70,8 @@ auto out_f32 = GetVLAPtr<float>(t_out_f32, {bn, nk, bk});
         for (int n3k = chunk_start; n3k < chunk_end; n3k++) {
           int n = n3k / nk;
           int k = n3k % nk;
-          cpy_bias_tpp(bias[k], out_f32[n][0][k]);
-          brgemm_tpp(in[n][0][0], wt_V[k][0], out_f32[n][0][k], nc);
-          cvt_tpp(out_f32[n][0][k], out[n][0][k]);
+          cpy_bias_tpp(bias[k], out[n][0][k]);
+          brgemm_tpp(in[n][0][0], wt_V[k][0], out[n][0][k], nc);
         }
         brgemm_tpp.release();
       }
@@ -90,22 +79,17 @@ auto out_f32 = GetVLAPtr<float>(t_out_f32, {bn, nk, bk});
         auto in = GetVLAPtr<T>(t_in, {nc, bcp});
         auto out = GetVLAPtr<T>(t_out, {nk, bk});
 
-        auto out_f32 = GetVLAPtr<float>(t_out_f32, {nk, bk});
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, float>(
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(1, bk, K), BIAS);
-        auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, bk, K, K)), EW_COPY);
+        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
 
         brgemm_tpp.config();
 
         for (int k = 0; k < nk; k++) {
           for (int r = 0; r < rem; r++)
-            cpy_bias_tpp(bias[k], out_f32[nn * bn + r][k]);
-          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out_f32[nn * bn][k], nc);
-          for (int r = 0; r < rem; r++) {
-            cvt_tpp(out_f32[nn * bn + r][k], out[nn * bn + r][k]);
-          }
+            cpy_bias_tpp(bias[k], out[nn * bn + r][k]);
+          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
         }
         brgemm_tpp.release();
       }

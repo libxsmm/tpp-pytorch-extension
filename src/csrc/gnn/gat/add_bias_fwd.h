@@ -20,27 +20,26 @@ auto K = in_sizes[1];
 
 auto t_out = t_in.new_empty({N, K});
 
-at::Tensor t_out_f32 = t_out;
-if (t_in.dtype() == at::kBFloat16)
-  t_out_f32 = at::empty({N, K});
-
 auto in = GetVLAPtr<T>(t_in, {K});
-auto bias = GetVLAPtr<float>(t_bias, {K});
 auto out = GetVLAPtr<T>(t_out, {K});
-auto out_f32 = GetVLAPtr<float>(t_out_f32, {K});
+auto bias = GetVLAPtr<T>(t_bias, {K});
 
-auto add_bias_tpp = SCOPEIT(AddBiasTPP<float>(1, K), BIAS);
+auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(1, K), BIAS);
 auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
 auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, K)), EW_COPY);
 {
   RECORD_SCOPE(go_add_bias, {t_in});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for
-    for (int n = 0; n < N; n++) {
-      cvt_f32_tpp(in[n], out_f32[n]);
-      add_bias_tpp(bias[0], out_f32[n]);
-      cvt_tpp(out_f32[n], out[n]);
+#pragma omp parallel
+    {
+      float tmp[K];
+#pragma omp for
+      for (int n = 0; n < N; n++) {
+        cvt_f32_tpp(in[n], tmp);
+        add_bias_tpp(bias[0], tmp);
+        cvt_tpp(tmp, out[n]);
+      }
     }
   }
 }

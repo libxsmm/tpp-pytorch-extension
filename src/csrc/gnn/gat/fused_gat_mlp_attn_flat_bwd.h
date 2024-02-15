@@ -106,16 +106,11 @@ if (t_wt.dtype() == at::kBFloat16) {
   t_grad_wt_tmp = t_grad_wt;
 }
 
-at::Tensor t_grad_bias = at::empty(0);
+at::Tensor t_grad_bias = t_grad_out.new_empty(0);
 if (add_bias)
-  t_grad_bias = at::empty({nk * bk});
-
-at::Tensor t_grad_out_f32 = t_grad_out;
-if (t_grad_out.dtype() == at::kBFloat16)
-  t_grad_out_f32 = at::empty({N, K});
+  t_grad_bias = t_grad_out.new_empty({nk * bk});
 
 auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, nk, bk});
-auto grad_out_f32 = GetVLAPtr<float>(t_grad_out_f32, {bn, nk, bk});
 
 auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, nc, bc});
 
@@ -256,11 +251,11 @@ auto brgemm_dw_bf16_tpp_b1 =
 }
 
 if (add_bias) {
-  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<float>(bn, bk, K), BIAS);
+  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, bk, K), BIAS);
   // Grad Bias
   RECORD_SCOPE(ga_fused_dbias, {t_grad_out, t_grad_bias});
   {
-    auto grad_bias = GetVLAPtr<float>(t_grad_bias, {bk});
+    auto grad_bias = GetVLAPtr<T>(t_grad_bias, {bk});
     tensor_set_zero(nk, bk, t_grad_bias);
     float* bias_ptrs[threads];
 
@@ -271,20 +266,17 @@ if (add_bias) {
       float prv_grad_bias[nk][bk];
       bias_ptrs[tid] = prv_grad_bias[0];
       set_zero_tpp(prv_grad_bias[0]);
-#pragma omp for // collapse(2)
+#pragma omp for
       for (int n = 0; n < nn; n++) {
         for (int k = 0; k < nk; k++) {
-          cvt_f32_tpp(grad_out[n][0][k], grad_out_f32[n][0][k]);
-          grad_bias_tpp(grad_out_f32[n][0][k], prv_grad_bias[k]);
+          grad_bias_tpp(grad_out[n][0][k], prv_grad_bias[k]);
         }
       }
       omp_reduce_buf(threads, nk * bk, bias_ptrs, grad_bias[0]);
     }
     if (rem > 0) {
       auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
-      auto grad_out_f32 = GetVLAPtr<float>(t_grad_out_f32, {nk, bk});
-      auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, bk, K, K)), EW_COPY);
-      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<float>(1, bk, K), BIAS);
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, bk, K), BIAS);
 
       float prv_grad_bias[nk][bk];
       bias_ptrs[0] = prv_grad_bias[0];
@@ -292,8 +284,7 @@ if (add_bias) {
 
       for (int k = 0; k < nk; k++) {
         for (int r = 0; r < rem; r++) {
-          cvt_f32_tpp(grad_out[nn * bn + r][k], grad_out_f32[nn * bn + r][k]);
-          grad_bias_tpp(grad_out_f32[nn * bn + r][k], prv_grad_bias[k]);
+          grad_bias_tpp(grad_out[nn * bn + r][k], prv_grad_bias[k]);
         }
       }
       omp_reduce_buf(1, nk * bk, bias_ptrs, grad_bias[0], true);
