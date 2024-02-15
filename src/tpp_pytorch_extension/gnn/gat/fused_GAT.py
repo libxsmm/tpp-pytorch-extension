@@ -370,9 +370,7 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
             )
             ctx.save_for_backward(inp, rmask, dpmask)
         else:
-            (out, rmask) = fused_gat_cpp.bias_lrelu_drop_fwd(
-                inputs, alpha, p, 0
-            )
+            (out, rmask) = fused_gat_cpp.bias_lrelu_drop_fwd(inputs, alpha, p, 0)
             ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
         ctx.p = p
