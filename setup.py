@@ -156,7 +156,7 @@ if platform.processor() != "aarch64":
 if hasattr(torch, "bfloat8"):
     extra_compile_args.append("-DPYTORCH_SUPPORTS_BFLOAT8")
 
-USE_CXX11_ABI = int(torch._C._GLIBCXX_USE_CXX11_ABI)
+USE_CXX_ABI = int(torch._C._GLIBCXX_USE_CXX11_ABI)
 
 print("extra_compile_args = ", extra_compile_args)
 
@@ -190,7 +190,7 @@ setup(
                 "CC=gcc",
                 "CXX=g++",
                 "AVX=2",
-                f"USE_CXX11_ABI={USE_CXX11_ABI}",
+                f"USE_CXX_ABI={USE_CXX_ABI}",
                 "-j",
                 "ROOTDIR = " + parlooper_root,
                 "LIBXSMM_ROOT=" + libxsmm_root,
