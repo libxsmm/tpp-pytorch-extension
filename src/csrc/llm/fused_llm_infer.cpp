@@ -41,6 +41,8 @@ static long get_batch_dim_in_kv_cache() {
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int large_cache_opt = false;
+static int TPP_CACHE_REMAPPED_WEIGHTS =
+    env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
@@ -2441,7 +2443,7 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock<GPTJBlock> {
     auto t_Wi = this->t_Wi;
     auto t_Wo = this->t_Wo;
 
-    if (B * S > FT_OPT_SIZE) {
+    if (B * S > FT_OPT_SIZE && TPP_CACHE_REMAPPED_WEIGHTS) {
       if (!first_token_remapped)
         remap_for_first_token<T>();
 
@@ -2548,6 +2550,9 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer
   at::Tensor t_Bi, t_Bo;
   at::Tensor t_G1, t_B1; // Gamma and Beta for attention layernorm
   at::Tensor t_G2, t_B2; // Gamma and Beta for MLP layernorm
+  at::Tensor t_Wq_1, t_Wk_1, t_Wv_1, t_Wp_1;
+  at::Tensor t_Wi_1, t_Wo_1;
+  bool first_token_remapped = false;
   float eps1, eps2;
   long N, H;
   bool do_layer_norm_before;
@@ -2590,6 +2595,17 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer
     }
   }
 
+  template <typename T>
+  void remap_for_first_token() {
+    t_Wq_1 = wt_tensor_for_first_token<T>(t_Wq);
+    t_Wk_1 = wt_tensor_for_first_token<T>(t_Wk);
+    t_Wv_1 = wt_tensor_for_first_token<T>(t_Wv);
+    t_Wp_1 = wt_tensor_for_first_token<T>(t_Wp);
+    t_Wi_1 = wt_tensor_for_first_token<T>(t_Wi);
+    t_Wo_1 = wt_tensor_for_first_token<T>(t_Wo);
+    first_token_remapped = true;
+  }
+
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
       std::vector<at::Tensor> t_cache,
@@ -2616,6 +2632,25 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer
     else
       large_cache_opt = false;
 
+    auto t_Wq = this->t_Wq;
+    auto t_Wk = this->t_Wk;
+    auto t_Wv = this->t_Wv;
+    auto t_Wp = this->t_Wp;
+    auto t_Wi = this->t_Wi;
+    auto t_Wo = this->t_Wo;
+
+    if (B * S > FT_OPT_SIZE && TPP_CACHE_REMAPPED_WEIGHTS) {
+      if (!first_token_remapped)
+        remap_for_first_token<T>();
+
+      t_Wq = this->t_Wq_1;
+      t_Wk = this->t_Wk_1;
+      t_Wv = this->t_Wv_1;
+      t_Wp = this->t_Wp_1;
+      t_Wi = this->t_Wi_1;
+      t_Wo = this->t_Wo_1;
+    }
+
     auto t_null = t_HS.new_empty({0}); // at::Tensor().to(t_HS.dtype());
 
     auto t_res = t_HS;
@@ -2623,9 +2658,18 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer
       t_HS = lyr_norm<T, LT>(t_HS, t_G1, t_B1, eps1);
     }
 
-    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_Bq);
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_Bk);
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_Bv);
+    at::Tensor t_QL, t_KL, t_VL;
+    if (FUSED_QKV_GEMM == 0) {
+      t_QL = qkv_gemm<T>(t_HS, t_Wq, t_Bq);
+      t_KL = qkv_gemm<T>(t_HS, t_Wk, t_Bk);
+      t_VL = qkv_gemm<T>(t_HS, t_Wv, t_Bv);
+    } else {
+      auto t_qkv_outs =
+          fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
+      t_QL = t_qkv_outs[0];
+      t_KL = t_qkv_outs[1];
+      t_VL = t_qkv_outs[2];
+    }
 
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
 
@@ -2674,6 +2718,9 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
   at::Tensor t_Wg, t_Wu, t_Wd;
   at::Tensor t_Gi, t_Gpa;
   at::Tensor t_EP; // embed_positions
+  at::Tensor t_Wq_1, t_Wk_1, t_Wv_1, t_Wp_1;
+  at::Tensor t_Wg_1, t_Wu_1, t_Wd_1;
+  bool first_token_remapped = false;
   float eps;
   long Nq, Nkv, H;
   long max_positions, rotary_dim;
@@ -2713,6 +2760,18 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
     }
   }
 
+  template <typename T>
+  void remap_for_first_token() {
+    t_Wq_1 = wt_tensor_for_first_token<T>(t_Wq);
+    t_Wk_1 = wt_tensor_for_first_token<T>(t_Wk);
+    t_Wv_1 = wt_tensor_for_first_token<T>(t_Wv);
+    t_Wp_1 = wt_tensor_for_first_token<T>(t_Wp);
+    t_Wg_1 = wt_tensor_for_first_token<T>(t_Wg);
+    t_Wu_1 = wt_tensor_for_first_token<T>(t_Wu);
+    t_Wd_1 = wt_tensor_for_first_token<T>(t_Wd);
+    first_token_remapped = true;
+  }
+
   std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
       std::vector<at::Tensor> t_cache,
@@ -2740,17 +2799,49 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
     else
       large_cache_opt = false;
 
+    auto t_Wq = this->t_Wq;
+    auto t_Wk = this->t_Wk;
+    auto t_Wv = this->t_Wv;
+    auto t_Wp = this->t_Wp;
+    auto t_Wg = this->t_Wg;
+    auto t_Wu = this->t_Wu;
+    auto t_Wd = this->t_Wd;
+
+    if (B * S > FT_OPT_SIZE && TPP_CACHE_REMAPPED_WEIGHTS) {
+      if (!first_token_remapped)
+        remap_for_first_token<T>();
+
+      t_Wq = this->t_Wq_1;
+      t_Wk = this->t_Wk_1;
+      t_Wv = this->t_Wv_1;
+      t_Wp = this->t_Wp_1;
+      t_Wg = this->t_Wg_1;
+      t_Wu = this->t_Wu_1;
+      t_Wd = this->t_Wd_1;
+    }
+
     auto t_null = t_HS.new_empty({0});
     auto t_res = t_HS;
     t_HS = llama_rms_norm<T, LT>(t_HS, t_Gi, eps);
 
-    auto t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
-    apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+    at::Tensor t_QL, t_KL, t_VL;
+    if (FUSED_QKV_GEMM == 0) {
+      t_QL = qkv_gemm<T>(t_HS, t_Wq, t_null);
+      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
 
-    auto t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
-    apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+      t_KL = qkv_gemm<T>(t_HS, t_Wk, t_null);
+      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
 
-    auto t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+      t_VL = qkv_gemm<T>(t_HS, t_Wv, t_null);
+    } else {
+      auto t_qkv_outs =
+          fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_null, t_null, t_null});
+      t_QL = t_qkv_outs[0];
+      t_KL = t_qkv_outs[1];
+      t_VL = t_qkv_outs[2];
+      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+    }
 
     auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
 
