@@ -59,6 +59,10 @@ REGISTER_SCOPE(gao_relu_drop, "gao_relu_drop");
 REGISTER_SCOPE(gado_relu_drop, "gado_relu_drop");
 REGISTER_SCOPE(gao_lrelu_drop, "gao_lrelu_drop");
 REGISTER_SCOPE(gado_lrelu_drop, "gado_lrelu_drop");
+REGISTER_SCOPE(go_bias_relu_drop, "gao_bias_relu_drop");
+REGISTER_SCOPE(gdo_bias_relu_drop, "gado_bias_relu_drop");
+REGISTER_SCOPE(go_bias_lrelu_drop, "gao_bias_lrelu_drop");
+REGISTER_SCOPE(gdo_bias_lrelu_drop, "gado_bias_lrelu_drop");
 
 // ######################################## FUSED GAT MLP & ATTENTION
 // ################################################
@@ -271,7 +275,7 @@ std::vector<at::Tensor> bias_relu_bwd(std::vector<at::Tensor> inputs) {
 
 // ######################################## Fused Dropout with ReLU
 // ################################################
-std::vector<at::Tensor> relu_drop_fwd(float p, at::Tensor inp, bool training) {
+std::vector<at::Tensor> relu_drop_fwd(float p, at::Tensor inp, int training) {
   GlobalPass _gp(FWD);
   if (inp.dtype() == at::kFloat) {
     typedef float T;
@@ -293,13 +297,42 @@ at::Tensor relu_drop_bwd(float p, std::vector<at::Tensor> inputs) {
   }
 }
 
+// ######################################## Fuse Bias, ReLU, Dropout
+// ################################################
+std::vector<at::Tensor> bias_relu_drop_fwd(
+    std::vector<at::Tensor> inputs,
+    float p,
+    int training) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_relu_drop_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_relu_drop_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> bias_relu_drop_bwd(
+    std::vector<at::Tensor> inputs,
+    float p) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_relu_drop_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_relu_drop_bwd.h"
+  }
+}
+
 // ######################################## Fused Dropout with LeakyReLU
 // ################################################
 std::vector<at::Tensor> leaky_relu_drop_fwd(
     float alpha,
     float p,
     at::Tensor inp,
-    bool training) {
+    int training) {
   GlobalPass _gp(FWD);
   if (inp.dtype() == at::kFloat) {
     typedef float T;
@@ -321,6 +354,37 @@ at::Tensor leaky_relu_drop_bwd(
   } else {
     typedef bfloat16 T;
 #include "leaky_relu_drop_bwd.h"
+  }
+}
+
+// ######################################## Fuse Bias, LeakyReLU, Dropout
+// ################################################
+std::vector<at::Tensor> bias_lrelu_drop_fwd(
+    std::vector<at::Tensor> inputs,
+    float alpha,
+    float p,
+    int training) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_lrelu_drop_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_lrelu_drop_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> bias_lrelu_drop_bwd(
+    std::vector<at::Tensor> inputs,
+    float alpha,
+    float p) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_lrelu_drop_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_lrelu_drop_bwd.h"
   }
 }
 
@@ -384,4 +448,14 @@ REGISTER_SUBMODULE(_fused_gat, m) {
       "leaky_relu_drop_bwd",
       &leaky_relu_drop_bwd,
       "Fused Leaky Relu + Dropout BWD");
+  m.def("bias_relu_drop_fwd", &bias_relu_drop_fwd, "Fuse Bias,ReLU,Dropout");
+  m.def("bias_relu_drop_bwd", &bias_relu_drop_bwd, "Fuse Bias,ReLU,Dropout");
+  m.def(
+      "bias_lrelu_drop_fwd",
+      &bias_lrelu_drop_fwd,
+      "Fuse Bias,LeakyReLU,Dropout");
+  m.def(
+      "bias_lrelu_drop_bwd",
+      &bias_lrelu_drop_bwd,
+      "Fuse Bias,LeakyReLU,Dropout");
 }

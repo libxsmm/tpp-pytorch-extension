@@ -21,8 +21,6 @@ import platform
 
 cwd = os.path.dirname(os.path.realpath(__file__))
 
-use_parlooper = True
-
 libxsmm_root = os.path.join(cwd, "libxsmm")
 if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
@@ -129,6 +127,7 @@ sources = [
     "src/csrc/xsmm.cpp",
     "src/csrc/bfloat8.cpp",
     "src/csrc/shm_coll.cpp",
+    "src/csrc/common_loops.cpp",
 ]
 
 # AlphaFold sources
@@ -159,10 +158,7 @@ extra_compile_args.append("-march=native")
 if hasattr(torch, "bfloat8"):
     extra_compile_args.append("-DPYTORCH_SUPPORTS_BFLOAT8")
 
-if use_parlooper is not True:
-    extra_compile_args.append("-DNO_PARLOOPER")
-else:
-    sources += ["src/csrc/common_loops.cpp"]
+USE_CXX_ABI = int(torch._C._GLIBCXX_USE_CXX11_ABI)
 
 print("extra_compile_args = ", extra_compile_args)
 
@@ -196,6 +192,7 @@ setup(
                 "CC=gcc",
                 "CXX=g++",
                 "AVX=2",
+                f"USE_CXX_ABI={USE_CXX_ABI}",
                 "-j",
                 "ROOTDIR = " + parlooper_root,
                 "LIBXSMM_ROOT=" + libxsmm_root,

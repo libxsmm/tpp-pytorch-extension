@@ -71,17 +71,11 @@ if (t_wt.dtype() == at::kBFloat16)
 else
   t_grad_wt_tmp = t_grad_wt;
 
-at::Tensor t_grad_bias = at::empty(0);
+at::Tensor t_grad_bias = t_grad_out.new_empty(0);
 if (add_bias)
-  t_grad_bias = at::empty({nk * bk});
-
-at::Tensor t_grad_out_f32 = t_grad_out;
-if (t_grad_out.dtype() == at::kBFloat16)
-  t_grad_out_f32 = at::empty({N, K});
+  t_grad_bias = t_grad_out.new_empty({nk * bk});
 
 auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, nk, bk});
-auto grad_out_f32 = GetVLAPtr<float>(t_grad_out_f32, {bn, nk, bk});
-
 auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, nc, bc});
 
 // del-weights and weights in blocked layout
@@ -89,13 +83,13 @@ auto grad_wt = GetVLAPtr<T>(t_grad_wt, {nc, bc* bk});
 auto grad_wt_tmp = GetVLAPtr<float>(t_grad_wt_tmp, {nc, bc* bk});
 
 auto wt_TV = GetVLAPtr<T>(t_wt_TV, {nc, bkp* bc});
-auto grad_bias = GetVLAPtr<float>(t_grad_bias, {bk});
+auto grad_bias = GetVLAPtr<T>(t_grad_bias, {bk});
 
 auto in = GetVLAPtr<T>(t_in, {bn, nc, bc}); // flat layout for fp32
 
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(nk * bk), EW_ZERO);
 auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(bn, 1, bkp), EW_ZERO);
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<float>(bn, bk, K), BIAS);
+auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, bk, K), BIAS);
 auto n2v_tpp = SCOPEIT(
     XformExtTPP<T>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
@@ -164,8 +158,7 @@ auto brgemm_dw_bf16_tpp_b1 =
 #pragma omp for
         for (int n = 0; n < nn; n++) {
           for (int k = 0; k < nk; k++) {
-            cvt_f32_tpp(grad_out[n][0][k], grad_out_f32[n][0][k]);
-            grad_bias_tpp(grad_out_f32[n][0][k], prv_grad_bias[k]);
+            grad_bias_tpp(grad_out[n][0][k], prv_grad_bias[k]);
           }
         }
         omp_reduce_buf(threads, nk * bk, bias_ptrs, grad_bias[0]);
@@ -174,11 +167,8 @@ auto brgemm_dw_bf16_tpp_b1 =
       if (rem > 0) {
         // Grad_bias---------------------------------------------------
         auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
-        auto grad_out_f32 = GetVLAPtr<float>(t_grad_out_f32, {nk, bk});
 
-        auto cvt_f32_tpp =
-            SCOPEIT((ConvertTPP<T, float>(1, bk, K, K)), EW_COPY);
-        auto grad_bias_tpp = SCOPEIT(GradBiasTPP<float>(1, bk, K), BIAS);
+        auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, bk, K), BIAS);
 
         float prv_grad_bias[nk][bk];
         bias_ptrs[0] = prv_grad_bias[0];
@@ -186,8 +176,7 @@ auto brgemm_dw_bf16_tpp_b1 =
 
         for (int k = 0; k < nk; k++) {
           for (int r = 0; r < rem; r++) {
-            cvt_f32_tpp(grad_out[nn * bn + r][k], grad_out_f32[nn * bn + r][k]);
-            grad_bias_tpp(grad_out_f32[nn * bn + r][k], prv_grad_bias[k]);
+            grad_bias_tpp(grad_out[nn * bn + r][k], prv_grad_bias[k]);
           }
         }
         omp_reduce_buf(1, nk * bk, bias_ptrs, grad_bias[0], true);
