@@ -125,7 +125,6 @@ sources = [
     "src/csrc/init.cpp",
     "src/csrc/optim.cpp",
     "src/csrc/xsmm.cpp",
-    "src/csrc/bfloat8.cpp",
     "src/csrc/shm_coll.cpp",
     "src/csrc/common_loops.cpp",
 ]
@@ -155,8 +154,8 @@ extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
 
 extra_compile_args.append("-march=native")
 
-if hasattr(torch, "bfloat8"):
-    extra_compile_args.append("-DPYTORCH_SUPPORTS_BFLOAT8")
+if hasattr(torch, "float8_e5m2") and hasattr(torch, "float8_e4m3fn"):
+    extra_compile_args.append("-DPYTORCH_SUPPORTS_FLOAT8")
 
 USE_CXX_ABI = int(torch._C._GLIBCXX_USE_CXX11_ABI)
 

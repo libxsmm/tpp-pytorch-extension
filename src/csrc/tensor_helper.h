@@ -179,8 +179,12 @@ inline at::Tensor wt_tensor_for_fwd(
     } else {
       if (input.dtype() == at::kBFloat16) {
         return wt_tensor_n2v<bfloat16>(Nk, Hk, Nc, Hc, input);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
       } else if (input.dtype() == at::kBFloat8) {
         return wt_tensor_n2v<bfloat8>(Nk, Hk, Nc, Hc, input);
+      } else if (input.dtype() == at::kHFloat8) {
+        return wt_tensor_n2v<hfloat8>(Nk, Hk, Nc, Hc, input);
+#endif
       } else {
         TPP_ASSERT(false, "Unsupported datatype!");
       }
@@ -205,12 +209,20 @@ inline at::Tensor wt_tensor_for_bwd(
     } else {
       return wt_tensor_trans_n2v<bfloat16>(Nk, Hk, Nc, Hc, input);
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     if (input.dim() == 5) {
       return wt_tensor_trans_v2v<bfloat8>(Nk, Hk, Nc, Hc, input);
     } else {
       return wt_tensor_trans_n2v<bfloat8>(Nk, Hk, Nc, Hc, input);
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    if (input.dim() == 5) {
+      return wt_tensor_trans_v2v<hfloat8>(Nk, Hk, Nc, Hc, input);
+    } else {
+      return wt_tensor_trans_n2v<hfloat8>(Nk, Hk, Nc, Hc, input);
+    }
+#endif
   } else if (input.dtype() == at::kFloat) {
 #if 0
     return input.permute({0, 1, 3, 2}).contiguous();
@@ -245,12 +257,20 @@ inline at::Tensor wt_tensor_for_bwd_compact(
     } else {
       return wt_tensor_trans_n2v_compact<bfloat16>(Nk, Hk, Nc, Hc, input);
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     if (input.dim() == 5) {
       return wt_tensor_trans_v2v_compact<bfloat8>(Nk, Hk, Nc, Hc, input);
     } else {
       return wt_tensor_trans_n2v_compact<bfloat8>(Nk, Hk, Nc, Hc, input);
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    if (input.dim() == 5) {
+      return wt_tensor_trans_v2v_compact<hfloat8>(Nk, Hk, Nc, Hc, input);
+    } else {
+      return wt_tensor_trans_n2v_compact<hfloat8>(Nk, Hk, Nc, Hc, input);
+    }
+#endif
   } else if (input.dtype() == at::kFloat) {
 #if 0
     return input.permute({1, 0, 3, 2}).contiguous();
@@ -300,6 +320,7 @@ inline at::Tensor act_tensor_trans(
         trans_tpp(in[n], out[n]);
       }
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     auto out = GetVLAPtr<bfloat8>(output, {H * S2});
     auto in = GetVLAPtr<bfloat8>(input, {H * S2});
@@ -312,6 +333,19 @@ inline at::Tensor act_tensor_trans(
         trans_tpp(in[n], out[n]);
       }
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    auto out = GetVLAPtr<hfloat8>(output, {H * S2});
+    auto in = GetVLAPtr<hfloat8>(input, {H * S2});
+    auto trans_tpp =
+        SCOPEIT(XformExtTPP<hfloat8>(S2, H, XformTPP::XFORM_XPOSE_TPP), XPOSE);
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+      for (int n = 0; n < B * S1 * N; n++) {
+        trans_tpp(in[n], out[n]);
+      }
+    }
+#endif
   } else {
     TPP_ASSERT(false, "Unsupported datatype!");
   }
@@ -342,6 +376,7 @@ inline at::Tensor act_tensor_trans(
         trans_tpp(in[n], out[n]);
       }
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     auto out = GetVLAPtr<bfloat8>(output, {H * S2});
     auto in = GetVLAPtr<bfloat8>(input, {H * S2});
@@ -354,6 +389,19 @@ inline at::Tensor act_tensor_trans(
         trans_tpp(in[n], out[n]);
       }
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    auto out = GetVLAPtr<hfloat8>(output, {H * S2});
+    auto in = GetVLAPtr<hfloat8>(input, {H * S2});
+    auto trans_tpp =
+        SCOPEIT(XformExtTPP<hfloat8>(S2, H, XformTPP::XFORM_XPOSE_TPP), XPOSE);
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+      for (int n = 0; n < S1 * N; n++) {
+        trans_tpp(in[n], out[n]);
+      }
+    }
+#endif
   } else {
     TPP_ASSERT(false, "Unsupported datatype!");
   }
@@ -386,6 +434,7 @@ inline at::Tensor act_tensor_trans_compact(
         }
       }
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     auto out = GetVLAPtr<bfloat8>(output, {S1, H * S2});
     auto in = GetVLAPtr<bfloat8>(input, {N, H * S2});
@@ -400,6 +449,21 @@ inline at::Tensor act_tensor_trans_compact(
         }
       }
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    auto out = GetVLAPtr<hfloat8>(output, {S1, H * S2});
+    auto in = GetVLAPtr<hfloat8>(input, {N, H * S2});
+    auto trans_tpp =
+        SCOPEIT(XformExtTPP<hfloat8>(S2, H, XformTPP::XFORM_XPOSE_TPP), XPOSE);
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for collapse(2)
+      for (int s1 = 0; s1 < S1; s1++) {
+        for (int n = 0; n < N; n++) {
+          trans_tpp(in[s1][n], out[n][s1]);
+        }
+      }
+    }
+#endif
   } else {
     TPP_ASSERT(false, "Unsupported datatype!");
   }
@@ -497,6 +561,7 @@ inline at::Tensor act_tensor_n2v_compact(
         }
       }
     }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (input.dtype() == at::kBFloat8) {
     auto out = GetVLAPtr<bfloat8>(output, {S1, H * S2});
     auto in = GetVLAPtr<bfloat8>(input, {N, H * S2});
@@ -511,6 +576,21 @@ inline at::Tensor act_tensor_n2v_compact(
         }
       }
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    auto out = GetVLAPtr<hfloat8>(output, {S1, H * S2});
+    auto in = GetVLAPtr<hfloat8>(input, {N, H * S2});
+    auto n2v_tpp =
+        SCOPEIT(XformExtTPP<hfloat8>(S2, H, XformTPP::XFORM_N2V_TPP), VNNI);
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for collapse(2)
+      for (int s1 = 0; s1 < S1; s1++) {
+        for (int n = 0; n < N; n++) {
+          n2v_tpp(in[s1][n], out[n][s1]);
+        }
+      }
+    }
+#endif
   } else {
     TPP_ASSERT(false, "Unsupported datatype!");
   }
@@ -591,7 +671,8 @@ inline void tensor_set_zero(long N, long sz, at::Tensor& input) {
     for (int n = 0; n < N; n++) {
       set_zero_tpp(in[n]);
     }
-  } else {
+#ifdef PYTORCH_SUPPORTS_FLOAT8
+  } else if (input.dtype() == at::kBFloat8) {
     auto in = GetVLAPtr<bfloat8>(input, {sz});
     auto set_zero_tpp = SCOPEIT(SetZeroTPP<bfloat8>(sz), EW_ZERO);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
@@ -599,6 +680,17 @@ inline void tensor_set_zero(long N, long sz, at::Tensor& input) {
     for (int n = 0; n < N; n++) {
       set_zero_tpp(in[n]);
     }
+  } else if (input.dtype() == at::kHFloat8) {
+    auto in = GetVLAPtr<hfloat8>(input, {sz});
+    auto set_zero_tpp = SCOPEIT(SetZeroTPP<hfloat8>(sz), EW_ZERO);
+    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+    for (int n = 0; n < N; n++) {
+      set_zero_tpp(in[n]);
+    }
+#endif
+  } else {
+    TPP_ASSERT(false, "Unsupported Datatype\n");
   }
 #endif
 }

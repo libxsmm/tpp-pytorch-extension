@@ -14,7 +14,7 @@
 #include <ATen/record_function.h>
 #include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/extension.h>
-#include "bfloat8.h"
+#include "float8.h"
 #include "vla.h"
 
 #include <cxxabi.h>
@@ -42,7 +42,10 @@
 
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
-typedef at::BFloat8 bfloat8;
+#ifdef PYTORCH_SUPPORTS_FLOAT8
+typedef at::Float8_e5m2 bfloat8;
+typedef at::Float8_e4m3fn hfloat8;
+#endif
 
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define DECL_VLA_PTR_PT(type, name, dims, t) \
@@ -54,20 +57,6 @@ extern double ifreq; // defined in init.cpp
 extern thread_local unsigned int* rng_state;
 extern thread_local struct drand48_data drng_state; // For non AVX512 version
 unsigned int* get_rng_state();
-
-#if 0
-template <typename T>
-inline T* pt_get_data_ptr(at::Tensor t) {
-  return t.data_ptr<T>();
-}
-#ifndef PYTORCH_SUPPORTS_BFLOAT8
-template <>
-inline bfloat8* pt_get_data_ptr<bfloat8>(at::Tensor t) {
-  // TPP_ASSERT(t.dtype() == at::kByte, "Wrong prec");
-  return (bfloat8*)t.data_ptr<uint8_t>();
-}
-#endif
-#endif
 
 template <typename T>
 inline std::string get_class_name() {

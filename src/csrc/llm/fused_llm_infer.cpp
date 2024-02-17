@@ -2153,11 +2153,13 @@ struct LLMBlock : torch::CustomClassHolder {
     } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
       ret = self->template _forward<bfloat16, bfloat16>(
           t_inp, t_cache, use_cache);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
     } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
       ret = self->template _forward<bfloat8, float>(t_inp, t_cache, use_cache);
     } else if (dt == at::kBFloat8 && ldt == at::kBFloat16) {
       ret =
           self->template _forward<bfloat8, bfloat16>(t_inp, t_cache, use_cache);
+#endif
     } else {
       std::cout << "Types: " << dt << "  " << ldt << std::endl;
       TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
@@ -2886,8 +2888,12 @@ static void apply_rotary_pos_emb_gptj_wrap(
     apply_rotary_pos_emb_gptj<float>(t_in, t_emb_pos, t_pos, N, H);
   } else if (dt == at::kBFloat16) {
     apply_rotary_pos_emb_gptj<bfloat16>(t_in, t_emb_pos, t_pos, N, H);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt == at::kBFloat8) {
     apply_rotary_pos_emb_gptj<bfloat8>(t_in, t_emb_pos, t_pos, N, H);
+  } else if (dt == at::kHFloat8) {
+    apply_rotary_pos_emb_gptj<hfloat8>(t_in, t_emb_pos, t_pos, N, H);
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -2909,10 +2915,16 @@ static at::Tensor lyr_norm_wrap(
     lyr_norm<bfloat16, float>(t_in, t_gamma, t_beta, t_out, eps);
   } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
     lyr_norm<bfloat16, bfloat16>(t_in, t_gamma, t_beta, t_out, eps);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
     lyr_norm<bfloat8, float>(t_in, t_gamma, t_beta, t_out, eps);
   } else if (dt == at::kBFloat8 && ldt == at::kBFloat8) {
     lyr_norm<bfloat8, bfloat8>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kHFloat8 && ldt == at::kFloat) {
+    lyr_norm<hfloat8, float>(t_in, t_gamma, t_beta, t_out, eps);
+  } else if (dt == at::kHFloat8 && ldt == at::kHFloat8) {
+    lyr_norm<hfloat8, hfloat8>(t_in, t_gamma, t_beta, t_out, eps);
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -2943,8 +2955,12 @@ static at::Tensor fc_plain_wrap(
     fc_plain<float>(t_in, t_wt, t_bias, t_out);
   } else if (dt == at::kBFloat16) {
     fc_plain<bfloat16>(t_in, t_wt, t_bias, t_out);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt == at::kBFloat8) {
     fc_plain<bfloat8>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kHFloat8) {
+    fc_plain<hfloat8>(t_in, t_wt, t_bias, t_out);
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -2972,8 +2988,12 @@ static at::Tensor fc_add2_scale_wrap(
     fc_add2_scale<float>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
   } else if (dt == at::kBFloat16) {
     fc_add2_scale<bfloat16>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt == at::kBFloat8) {
     fc_add2_scale<bfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+  } else if (dt == at::kHFloat8) {
+    fc_add2_scale<hfloat8>(t_in, t_in1, t_in2, t_wt, t_bias, t_out, scale);
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
@@ -2996,8 +3016,12 @@ static at::Tensor fc_gelu_wrap(
     fc_gelu<float>(t_in, t_wt, t_bias, t_out);
   } else if (dt == at::kBFloat16) {
     fc_gelu<bfloat16>(t_in, t_wt, t_bias, t_out);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt == at::kBFloat8) {
     fc_gelu<bfloat8>(t_in, t_wt, t_bias, t_out);
+  } else if (dt == at::kHFloat8) {
+    fc_gelu<hfloat8>(t_in, t_wt, t_bias, t_out);
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }

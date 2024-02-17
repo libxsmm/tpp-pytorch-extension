@@ -574,8 +574,12 @@ class __attribute__((visibility("hidden"))) BertEncoder {
         t_HS = l->forward<bfloat16, float>(t_HS, t_masks, t_HS, t_scratch);
       } else if (dt == at::kBFloat16 && ldt == at::kBFloat16) {
         t_HS = l->forward<bfloat16, bfloat16>(t_HS, t_masks, t_HS, t_scratch);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
       } else if (dt == at::kBFloat8 && ldt == at::kFloat) {
         t_HS = l->forward<bfloat8, float>(t_HS, t_masks, t_HS, t_scratch);
+      } else if (dt == at::kHFloat8 && ldt == at::kFloat) {
+        t_HS = l->forward<hfloat8, float>(t_HS, t_masks, t_HS, t_scratch);
+#endif
       } else {
         TPP_ASSERT(0, "Should not come here\n");
       }

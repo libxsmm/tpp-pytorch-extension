@@ -475,8 +475,12 @@ double clip_grad_norm(std::vector<at::Tensor>& grads, double max_norm) {
     } else if (grads[i].dtype() == at::kBFloat16) {
       total_norm +=
           norm2(pt_get_data_ptr<bfloat16>(grads[i]), grads[i].numel());
+#ifdef PYTORCH_SUPPORTS_FLOAT8
     } else if (grads[i].dtype() == at::kBFloat8) {
       total_norm += norm2(pt_get_data_ptr<bfloat8>(grads[i]), grads[i].numel());
+    } else if (grads[i].dtype() == at::kHFloat8) {
+      total_norm += norm2(pt_get_data_ptr<hfloat8>(grads[i]), grads[i].numel());
+#endif
     } else {
       TPP_ASSERT(0, "Unsupported data type");
     }
@@ -492,9 +496,14 @@ double clip_grad_norm(std::vector<at::Tensor>& grads, double max_norm) {
       } else if (grads[i].dtype() == at::kBFloat16) {
         tensor_scale(
             pt_get_data_ptr<bfloat16>(grads[i]), grads[i].numel(), clip_coef);
+#ifdef PYTORCH_SUPPORTS_FLOAT8
       } else if (grads[i].dtype() == at::kBFloat8) {
         tensor_scale(
             pt_get_data_ptr<bfloat8>(grads[i]), grads[i].numel(), clip_coef);
+      } else if (grads[i].dtype() == at::kHFloat8) {
+        tensor_scale(
+            pt_get_data_ptr<hfloat8>(grads[i]), grads[i].numel(), clip_coef);
+#endif
       } else {
         TPP_ASSERT(0, "Unsupported data type");
       }

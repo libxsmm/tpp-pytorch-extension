@@ -67,9 +67,11 @@ static std::vector<at::Tensor> fused_self_attention_fwd(
   } else if (inputs[6].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "fused_self_attention_fwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (inputs[6].dtype() == at::kBFloat8) {
     typedef bfloat8 T;
 #include "fused_self_attention_fwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -85,9 +87,11 @@ static std::vector<at::Tensor> fused_self_attention_bwd(
   } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "fused_self_attention_bwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (inputs[0].dtype() == at::kBFloat8) {
     typedef bfloat8 T;
 #include "fused_self_attention_bwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -108,22 +112,26 @@ static std::vector<at::Tensor> fused_dense_dropout_layernorm_fwd(
     typedef bfloat16 T;
     typedef float LT;
 #include "fused_dense_dropout_layernorm_fwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (
       inputs[0].dtype() == at::kBFloat8 && inputs[4].dtype() == at::kFloat) {
     typedef bfloat8 T;
     typedef float LT;
 #include "fused_dense_dropout_layernorm_fwd_tmpl.h"
+#endif
   } else if (
       inputs[0].dtype() == at::kBFloat16 &&
       inputs[4].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
     typedef bfloat16 LT;
 #include "fused_dense_dropout_layernorm_fwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (
       inputs[0].dtype() == at::kBFloat8 && inputs[4].dtype() == at::kBFloat8) {
     typedef bfloat8 T;
     typedef bfloat8 LT;
 #include "fused_dense_dropout_layernorm_fwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -142,22 +150,26 @@ static std::vector<at::Tensor> fused_dense_dropout_layernorm_bwd(
     typedef bfloat16 T;
     typedef float LT;
 #include "fused_dense_dropout_layernorm_bwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (
       inputs[0].dtype() == at::kBFloat8 && inputs[3].dtype() == at::kFloat) {
     typedef bfloat8 T;
     typedef float LT;
 #include "fused_dense_dropout_layernorm_bwd_tmpl.h"
+#endif
   } else if (
       inputs[0].dtype() == at::kBFloat16 &&
       inputs[3].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
     typedef bfloat16 LT;
 #include "fused_dense_dropout_layernorm_bwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (
       inputs[0].dtype() == at::kBFloat8 && inputs[3].dtype() == at::kBFloat8) {
     typedef bfloat8 T;
     typedef bfloat8 LT;
 #include "fused_dense_dropout_layernorm_bwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -175,9 +187,11 @@ static std::vector<at::Tensor> fused_dense_gelu_fwd(
   } else if (t_in.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "fused_dense_gelu_fwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (t_in.dtype() == at::kBFloat8) {
     typedef bfloat8 T;
 #include "fused_dense_gelu_fwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -195,9 +209,11 @@ static std::vector<at::Tensor> fused_dense_gelu_bwd(
   } else if (t_grad_out.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "fused_dense_gelu_bwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (t_grad_out.dtype() == at::kBFloat8) {
     typedef bfloat8 T;
 #include "fused_dense_gelu_bwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -231,6 +247,7 @@ static std::vector<at::Tensor> fused_embedding_layernorm_dropout_fwd(
     typedef bfloat16 T;
     typedef bfloat16 ET;
 #include "fused_embedding_layernorm_dropout_fwd_tmpl.h"
+#ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (
       inputs[4].dtype() == at::kBFloat8 && inputs[6].dtype() == at::kFloat) {
     typedef bfloat8 T;
@@ -246,6 +263,7 @@ static std::vector<at::Tensor> fused_embedding_layernorm_dropout_fwd(
     typedef float T;
     typedef bfloat8 ET;
 #include "fused_embedding_layernorm_dropout_fwd_tmpl.h"
+#endif
   } else {
     TPP_ASSERT(0, "Should not come here\n");
   }

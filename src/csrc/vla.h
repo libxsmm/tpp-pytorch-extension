@@ -144,16 +144,6 @@ inline T* pt_get_data_ptr(at::Tensor t) {
   }
   return t.data_ptr<T>();
 }
-#ifndef PYTORCH_SUPPORTS_BFLOAT8
-template <>
-inline at::BFloat8* pt_get_data_ptr<at::BFloat8>(at::Tensor t) {
-  if (!t.is_contiguous()) {
-    std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
-              << std::endl;
-  }
-  return (at::BFloat8*)t.data_ptr<uint8_t>();
-}
-#endif
 typedef int64_t index_t;
 template <typename T, std::size_t N> //, typename index_t = int64_t>
 VLAPtr<T, N, index_t> GetVLAPtr(at::Tensor t, const index_t (&sizes)[N]) {

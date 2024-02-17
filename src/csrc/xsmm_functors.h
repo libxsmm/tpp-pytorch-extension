@@ -22,7 +22,7 @@
 #else
 #include <pytorch_extension_wrapper.h>
 #endif
-#include <bfloat8.h>
+#include <float8.h>
 #include <string>
 #include <unordered_map>
 #ifdef _OPENMP
@@ -47,7 +47,11 @@ extern long long hsh_key, hsh_ret;
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
-typedef at::BFloat8 bfloat8;
+#ifdef PYTORCH_SUPPORTS_FLOAT8
+typedef at::Float8_e5m2 bfloat8;
+typedef at::Float8_e4m3fn hfloat8;
+#endif
+
 inline float upconvert_to_float(float val) {
   return val;
 }
@@ -57,9 +61,14 @@ inline float upconvert_to_float(bfloat16 val) {
 inline float upconvert_to_float(half val) {
   return (float)val;
 }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
 inline float upconvert_to_float(bfloat8 val) {
   return (float)val;
 }
+inline float upconvert_to_float(hfloat8 val) {
+  return (float)val;
+}
+#endif
 template <typename T>
 inline libxsmm_datatype XsmmDtype();
 template <>
@@ -82,10 +91,16 @@ template <>
 inline libxsmm_datatype XsmmDtype<half>() {
   return LIBXSMM_DATATYPE_F16;
 }
+#ifdef PYTORCH_SUPPORTS_FLOAT8
 template <>
 inline libxsmm_datatype XsmmDtype<bfloat8>() {
   return LIBXSMM_DATATYPE_BF8;
 }
+template <>
+inline libxsmm_datatype XsmmDtype<hfloat8>() {
+  return LIBXSMM_DATATYPE_HF8;
+}
+#endif
 
 #ifdef __AVX512F__
 inline __m512 _mm512_loadu_ps_auto(float const* mem_addr) {
@@ -186,7 +201,17 @@ inline __m128i _mm_convert_ps_bf8(__m512 a) {
   return _mm256_cvtepi16_epi8(_mm256_srai_epi16(
       _mm512_cvtps_ph(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), 8));
 }
+inline __m512 _mm512_convert_hf8_ps(__m128i a) {
+  TPP_ASSERT(0, "_mm512_convert_hf8_ps not implemented\n");
+  return _mm512_cvtph_ps(_mm256_slli_epi16(_mm256_cvtepi8_epi16(a), 8));
+}
+inline __m128i _mm_convert_ps_hf8(__m512 a) {
+  TPP_ASSERT(0, "_mm_convert_ps_hf8 not implemented\n");
+  return _mm256_cvtepi16_epi8(_mm256_srai_epi16(
+      _mm512_cvtps_ph(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), 8));
+}
 
+#ifdef PYTORCH_SUPPORTS_FLOAT8
 inline __m512 _mm512_loadu_ps_auto(bfloat8 const* mem_addr) {
   return _mm512_convert_bf8_ps(_mm_loadu_si128((__m128i const*)mem_addr));
 }
@@ -203,6 +228,24 @@ inline void _mm512_mask_storeu_ps_auto(
     __m512 a) {
   _mm_mask_storeu_epi8((__m128i*)mem_addr, k, _mm_convert_ps_bf8(a));
 }
+
+inline __m512 _mm512_loadu_ps_auto(hfloat8 const* mem_addr) {
+  return _mm512_convert_hf8_ps(_mm_loadu_si128((__m128i const*)mem_addr));
+}
+inline __m512 _mm512_maskz_loadu_ps_auto(__mmask16 k, hfloat8 const* mem_addr) {
+  return _mm512_convert_hf8_ps(
+      _mm_maskz_loadu_epi8(k, (__m128i const*)mem_addr));
+}
+inline void _mm512_storeu_ps_auto(hfloat8* mem_addr, __m512 a) {
+  _mm_storeu_si128((__m128i*)mem_addr, _mm_convert_ps_hf8(a));
+}
+inline void _mm512_mask_storeu_ps_auto(
+    hfloat8* mem_addr,
+    __mmask16 k,
+    __m512 a) {
+  _mm_mask_storeu_epi8((__m128i*)mem_addr, k, _mm_convert_ps_hf8(a));
+}
+#endif // PYTORCH_SUPPORTS_FLOAT8
 #endif
 
 inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
@@ -211,11 +254,16 @@ inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
       {at::kFloat, LIBXSMM_DATATYPE_F32},
       {at::kHalf, LIBXSMM_DATATYPE_F16},
       {at::kBFloat16, LIBXSMM_DATATYPE_BF16},
-      {at::kByte, LIBXSMM_DATATYPE_I8},
+      {at::kByte, LIBXSMM_DATATYPE_U8},
       {at::kChar, LIBXSMM_DATATYPE_I8},
       {at::kShort, LIBXSMM_DATATYPE_I16},
       {at::kInt, LIBXSMM_DATATYPE_I32},
-      {at::kLong, LIBXSMM_DATATYPE_I64}};
+      {at::kLong, LIBXSMM_DATATYPE_I64},
+#ifdef PYTORCH_SUPPORTS_FLOAT8
+      {at::kFloat8_e5m2, LIBXSMM_DATATYPE_BF8},
+      {at::kFloat8_e4m3fn, LIBXSMM_DATATYPE_HF8}
+#endif
+  };
 
   return pt2xsmmDtypes.at(dtype);
 }
