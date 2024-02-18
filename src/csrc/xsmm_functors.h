@@ -2129,7 +2129,11 @@ class XformExtTPP {
   SetZeroTPP<T> zero;
 };
 
-template <typename Tin, typename Tout>
+template <
+    typename Tin,
+    typename Tout,
+    typename Tw = Tin,
+    typename Tcomp = float>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}
@@ -2197,7 +2201,7 @@ class BrgemmTPP {
   }
   void operator()(
       Tin* A,
-      Tin* B,
+      Tw* B,
       Tout* C,
       unsigned long long count,
       bool no_tile_cfg = false) {
@@ -2215,24 +2219,27 @@ class BrgemmTPP {
   }
   void ref(
       Tin* A,
-      Tin* B,
+      Tw* B,
       Tout* C,
       unsigned long long count,
       bool no_tile_cfg = false) {
+    // VNNI blocking is based on input type to allow weight only quantization
     auto dtype = XsmmDtype<Tin>();
     for (uint64_t c = 0; c < count; c++) {
       auto A_ = &A[c * str_a];
       auto B_ = &B[c * str_b];
-      if (std::is_same<Tin, float>::value || b_vnni == 0) {
+      if (std::is_same<Tw, float>::value || b_vnni == 0) {
         for (int i = 0; i < M; i++) {
           for (int j = 0; j < N; j++) {
             if (beta == 0.0 && c == 0)
               C[i * N + j] = 0.0;
             for (int k = 0; k < K; k++) {
               if (a_trans == 1) {
-                C[i * ldc + j] += A_[k * lda + i] * B_[k * ldb + j];
+                C[i * ldc + j] +=
+                    (float)A_[k * lda + i] * (float)B_[k * ldb + j];
               } else {
-                C[i * ldc + j] += A_[i * lda + k] * B_[k * ldb + j];
+                C[i * ldc + j] +=
+                    (float)A_[i * lda + k] * (float)B_[k * ldb + j];
               }
             }
           }
@@ -2241,16 +2248,16 @@ class BrgemmTPP {
         const int BS = xsmm_get_vnni_block_size(dtype);
         for (int i = 0; i < M; i++) {
           for (int j = 0; j < N; j++) {
-            float sum =
-                ((beta == 0.0 && c == 0) ? 0.0f : (float)C[i * ldc + j]);
+            Tcomp sum =
+                ((beta == 0.0 && c == 0) ? 0.0f : (Tcomp)C[i * ldc + j]);
             for (int k = 0; k < K / BS; k++) {
               for (int b = 0; b < BS; b++) {
                 if (a_trans == 1) {
-                  sum += (float)A_[k * lda * BS + i * BS + b] *
-                      (float)B_[k * ldb * BS + j * BS + b];
+                  sum += (Tcomp)A_[k * lda * BS + i * BS + b] *
+                      (Tcomp)B_[k * ldb * BS + j * BS + b];
                 } else {
-                  sum += (float)A_[i * lda + k * BS + b] *
-                      (float)B_[k * ldb * BS + j * BS + b];
+                  sum += (Tcomp)A_[i * lda + k * BS + b] *
+                      (Tcomp)B_[k * ldb * BS + j * BS + b];
                 }
               }
             }
@@ -2305,7 +2312,7 @@ class BrgemmTPP {
       snprintf(
           hash,
           200,
-          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dto%d",
+          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dtw%d_dto%d_dtc%d",
           p->M,
           p->N,
           p->K,
@@ -2321,7 +2328,9 @@ class BrgemmTPP {
           config,
           p->b_vnni,
           XsmmDtype<Tin>(),
-          XsmmDtype<Tout>());
+          XsmmDtype<Tw>(),
+          XsmmDtype<Tout>(),
+          XsmmDtype<Tcomp>());
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -2365,13 +2374,13 @@ class BrgemmTPP {
       l_shape.lda = p->ldb;
       l_shape.ldb = p->lda;
       l_shape.ldc = p->ldc;
-      l_shape.a_in_type = XsmmDtype<Tin>();
+      l_shape.a_in_type = XsmmDtype<Tw>();
       l_shape.b_in_type = XsmmDtype<Tin>();
       l_shape.out_type = XsmmDtype<Tout>();
-      l_shape.comp_type = LIBXSMM_DATATYPE_F32;
+      l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = p->str_b * sizeof(Tin);
+      l_brconfig.br_stride_a_hint = p->str_b * sizeof(Tw);
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
       l_brconfig.br_unroll_hint = p->unroll_hint;
 

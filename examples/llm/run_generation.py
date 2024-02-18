@@ -65,6 +65,13 @@ parser.add_argument(
     help="bfloat16, float32 or float16",
 )
 parser.add_argument(
+    "--weight-dtype",
+    type=str,
+    choices=["float32", "bfloat16", "bfloat8", "hfloat8", None],
+    default=None,
+    help="bfloat16, float32 or bfloat8 or hfloat8",
+)
+parser.add_argument(
     "--input-tokens",
     default="32",
     type=str,
@@ -194,22 +201,31 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
+    weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
     if model.config.architectures[0] == "GPTJForCausalLM":
         from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
 
-        OptimizeModelForGPTJ(model, dtype=amp_dtype, device=device)
+        OptimizeModelForGPTJ(
+            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+        )
     elif model.config.architectures[0] == "OPTForCausalLM":
         from tpp_pytorch_extension.llm.fused_opt_infer import OptimizeModelForOPT
 
-        OptimizeModelForOPT(model, dtype=amp_dtype, device=device)
+        OptimizeModelForOPT(
+            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+        )
     elif model.config.architectures[0] == "LLaMAForCausalLM":
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
-        OptimizeModelForLlama(model, dtype=amp_dtype, device=device)
+        OptimizeModelForLlama(
+            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+        )
     elif model.config.architectures[0] == "LlamaForCausalLM":
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
-        OptimizeModelForLlama(model, dtype=amp_dtype, device=device)
+        OptimizeModelForLlama(
+            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+        )
     else:
         print(type(model.config.architectures))
         print(model.config.architectures)

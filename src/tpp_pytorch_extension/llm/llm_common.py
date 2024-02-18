@@ -422,6 +422,7 @@ def FixLinear(
     layer_dtype=global_layer_dtype,
     parallel_dim=None,
     block_size=1,
+    weight_dtype=None,
 ):
     if not isinstance(self, torch.nn.Linear):
         return
@@ -431,6 +432,8 @@ def FixLinear(
     self.model_parallel = False
     if parallel_dim is not None:
         self.parallelize(parallel_dim, get_rank(), get_size(), block_size=block_size)
+    if weight_dtype is None:
+        weight_dtype = layer_dtype
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
@@ -451,7 +454,7 @@ def FixLinear(
                     ],
                 ],
                 [0, 2, 3, 1, 4],
-                layer_dtype,
+                weight_dtype,
             )
         )
 

@@ -13,6 +13,9 @@ OMP_NUM_THREADS=<physical cores num> numactl -m <node N> -C <cpu list> python -u
 For TPP Optimized code:
 OMP_NUM_THREADS=<physical cores num> numactl -m <node N> -C <cpu list> python -u run_generation.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use-tpp
 
+To use BFloat8 or HFloat8 weight in TPP Optimized code:
+OMP_NUM_THREADS=<physical cores num> numactl -m <node N> -C <cpu list> python -u run_generation.py --device cpu --dtype bfloat16 --max-new-tokens 32 --use-tpp --weight-dtype bfloat8
+
 To enable autograd profiling add "--profile" to above command line.
 
 To enable torchscript JIT tracing add "--jit" to above command line (effective only when using --use-tpp).

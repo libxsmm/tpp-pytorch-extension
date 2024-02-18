@@ -132,7 +132,13 @@ class GPTJBlock(BlockedModule):
         return outputs  # hidden_states, present, (attentions)
 
 
-def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
+def FixGPTJBlock(
+    self,
+    bk=None,
+    bc=None,
+    layer_dtype=global_layer_dtype,
+    weight_dtype=global_layer_dtype,
+):
     if not isinstance(self, transformers.models.gptj.modeling_gptj.GPTJBlock):
         return
     self.__class__ = GPTJBlock
@@ -161,7 +167,7 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             )
 
         if isinstance(m, torch.nn.Linear):
-            FixLinear(m, bk, bc, layer_dtype)
+            FixLinear(m, bk, bc, layer_dtype, weight_dtype=weight_dtype)
     block(self)
     if not hasattr(self, "cpp_block"):
         params = [self.ln_1.weight, self.ln_1.bias]
@@ -190,12 +196,14 @@ def FixGPTJBlock(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
 
-def OptimizeModelForGPTJ(model, dtype, device="cpu"):
+def OptimizeModelForGPTJ(model, dtype, device="cpu", weight_dtype=None):
     set_pg()
 
+    if weight_dtype is None:
+        weight_dtype = dtype
     for m in model.modules():
         if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
-            FixGPTJBlock(m, 16, 64, dtype)
+            FixGPTJBlock(m, 16, 64, dtype, weight_dtype=weight_dtype)
         elif isinstance(m, torch.nn.Linear):
             if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
                 FixLinear(m, 100, 64, dtype, parallel_dim=0, block_size=100)

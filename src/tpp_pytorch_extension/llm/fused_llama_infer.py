@@ -163,7 +163,13 @@ class LlamaDecoderLayer(BlockedModule):
         return outputs
 
 
-def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
+def FixLlamaDecoderLayer(
+    self,
+    bk=None,
+    bc=None,
+    layer_dtype=global_layer_dtype,
+    weight_dtype=global_layer_dtype,
+):
     if not isinstance(self, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
         return
     self.__class__ = LlamaDecoderLayer
@@ -196,7 +202,7 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
             )
 
         if isinstance(m, torch.nn.Linear):
-            FixLinear(m, bk, bc, layer_dtype)
+            FixLinear(m, bk, bc, layer_dtype, weight_dtype=weight_dtype)
     block(self)
 
     if not hasattr(self, "cpp_block"):
@@ -241,9 +247,11 @@ def FixLlamaDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype)
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
 
-def OptimizeModelForLlama(model, dtype, device="cpu"):
+def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
     set_pg()
 
+    if weight_dtype is None:
+        weight_dtype = dtype
     for m in model.modules():
         if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
             FixLlamaDecoderLayer(m, 16, 64, dtype)

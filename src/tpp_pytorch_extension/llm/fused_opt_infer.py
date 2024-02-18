@@ -127,7 +127,13 @@ class OPTDecoderLayer(BlockedModule):
         return outputs  # hidden_states, present, (attentions)
 
 
-def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
+def FixOPTDecoderLayer(
+    self,
+    bk=None,
+    bc=None,
+    layer_dtype=global_layer_dtype,
+    weight_dtype=global_layer_dtype,
+):
     if not isinstance(self, transformers.models.opt.modeling_opt.OPTDecoderLayer):
         return
     self.__class__ = OPTDecoderLayer
@@ -156,7 +162,7 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
             )
 
         if isinstance(m, torch.nn.Linear):
-            FixLinear(m, bk, bc, layer_dtype)
+            FixLinear(m, bk, bc, layer_dtype, weight_dtype=weight_dtype)
     block(self)
     if not hasattr(self, "cpp_block"):
         params = [
@@ -188,12 +194,14 @@ def FixOPTDecoderLayer(self, bk=None, bc=None, layer_dtype=global_layer_dtype):
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
 
 
-def OptimizeModelForOPT(model, dtype, device="cpu"):
+def OptimizeModelForOPT(model, dtype, device="cpu", weight_dtype=None):
     set_pg()
 
+    if weight_dtype is None:
+        weight_dtype = dtype
     for m in model.modules():
         if isinstance(m, transformers.models.opt.modeling_opt.OPTDecoderLayer):
-            FixOPTDecoderLayer(m, 16, 64, dtype)
+            FixOPTDecoderLayer(m, 16, 64, dtype, weight_dtype=weight_dtype)
         elif isinstance(m, torch.nn.Linear):
             FixLinear(m, 16, 64, dtype, parallel_dim=None)
             block(m)
