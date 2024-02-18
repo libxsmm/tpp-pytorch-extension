@@ -230,12 +230,14 @@ inline void apply_rotary_pos_emb_gptj(
   auto MP = t_emb_pos.size(0); // Max Pos
   auto HR = t_emb_pos.size(1); // rotary_dim
   auto B = in_sizes[0];
+  auto B_pos = t_pos.size(0);
   auto S = in_sizes[1];
   auto COFF = HR / 2;
 
   auto in = GetVLAPtr<T>(t_in, {S, N, H}); // [B][S][N][H]
   auto emb_pos = GetVLAPtr<float>(t_emb_pos, {HR}); // [MP][HR]
   auto pos = GetVLAPtr<long>(t_pos, {S}); // [MB][S]
+  TPP_ASSERT(B_pos == 1 || B_pos == B, "position_ids shape not compatible\n");
   // printf("MP=%ld HR=%ld B=%ld S=%ld N=%ld H=%ld\n", MP, HR, B, S, N, H);
   // std::cout << "pos: " << t_pos.sizes() << std::endl;
   // std::cout << "emb_pos: " << t_emb_pos.sizes() << std::endl;
@@ -250,7 +252,8 @@ inline void apply_rotary_pos_emb_gptj(
           for (int h = 0, h2 = 0; h < HR; h += 2, h2++) {
             float in0 = in[b][s][n][h];
             float in1 = in[b][s][n][h + 1];
-            int p = pos[b][s];
+            int b_pos = (B_pos == 1 ? 0 : b);
+            int p = pos[b_pos][s];
             if (p >= MP)
               continue;
             // TPP_ASSERT(p < MP, "Invalid idx: %d (max %ld)\n", p, MP);
@@ -284,11 +287,13 @@ inline void apply_rotary_pos_emb_llama(
   auto HR = t_emb_pos.size(2); // rotary_dim
   auto B = in_sizes[0];
   auto S = in_sizes[1];
+  auto B_pos = t_pos.size(0);
   auto COFF = HR / 2;
 
   auto in = GetVLAPtr<T>(t_in, {S, N, H}); // [B][S][N][H]
   auto emb_pos = GetVLAPtr<float>(t_emb_pos, {MP, HR}); // [MP][HR]
   auto pos = GetVLAPtr<long>(t_pos, {S}); // [MB][S]
+  TPP_ASSERT(B_pos == 1 || B_pos == B, "position_ids shape not compatible\n");
   // printf("MP=%ld HR=%ld B=%ld S=%ld N=%ld H=%ld\n", MP, HR, B, S, N, H);
 
   {
@@ -301,7 +306,10 @@ inline void apply_rotary_pos_emb_llama(
           for (int h2 = 0; h2 < HR / 2; h2++) {
             float in0 = in[b][s][n][h2];
             float in1 = in[b][s][n][COFF + h2];
-            int p = pos[b][s];
+            int b_pos = (B_pos == 1 ? 0 : b);
+            int p = pos[b_pos][s];
+            if (p >= MP)
+              continue;
             float cos = emb_pos[0][p][h2];
             float sin = emb_pos[1][p][h2];
             float out0 = in0 * cos - in1 * sin;
@@ -1973,7 +1981,8 @@ inline at::Tensor attn(
   constexpr long Sqb = 64;
   long qrem = Sq % Sqb;
   bool inline_trans = ((Sq + Sqb - 1) / Sqb == 1);
-  bool am_is_2d = t_AM.size(2) != 1;
+  const bool am_valid = (t_AM.numel() > 0);
+  bool am_is_2d = am_valid && t_AM.size(2) != 1;
 
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
@@ -1987,7 +1996,7 @@ inline at::Tensor attn(
   if (VBS != 1) {
     t_VL_V = t_VL.new_empty({B, Nkv, Sk_pad, H});
   }
-  if (Sk != Sk_pad) {
+  if (am_valid && Sk != Sk_pad) {
     // TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
     if (!am_is_2d) {
       auto t_tmp = t_AM.new_empty({B, pad});
@@ -2063,7 +2072,7 @@ inline at::Tensor attn(
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
-              if (t_AM.numel() != 0) {
+              if (am_valid) {
                 if (am_is_2d)
                   ak.add_2dmask_tpp(&AM2[b][sq][sk], AS[0], AS[0]);
                 else
