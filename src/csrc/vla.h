@@ -96,6 +96,9 @@ class VLAPtr {
   VLAAccessor<T, N - 1, index_t> operator[](index_t i) {
     return VLAAccessor<T, N - 1, index_t>(data_ + i * strides[0], strides + 1);
   }
+  VLAAccessor<T, N - 1, index_t> operator[](index_t i) const {
+    return VLAAccessor<T, N - 1, index_t>(data_ + i * strides[0], strides + 1);
+  }
   operator bool() {
     return data_ != nullptr;
   }
@@ -114,6 +117,9 @@ class VLAPtr<T, 1, int64_t> {
     strides[0] = sizes[0];
   }
   T* operator[](index_t i) {
+    return data_ + i * strides[0];
+  }
+  T* operator[](index_t i) const {
     return data_ + i * strides[0];
   }
   operator bool() {

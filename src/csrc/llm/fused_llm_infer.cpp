@@ -412,21 +412,20 @@ template <typename T, typename Tw = T, typename Tout = T>
 class TppBlockedLinearW {
   // protected:
  public:
-  long BS, C, Nc, Nk, Hc, Hk, K;
+  long C, Nc, Nk, Hc, Hk, K;
   long Ncb, BSb, rem;
-  bool with_bias;
   SCOPEIT_DECL(CpyBiasTPP<T>) copy_bias_tpp, copy_bias_tpp_rem;
   SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp, zero_tpp_rem;
   SCOPEIT_DECL(BrgemmTPP<T, Tout, Tw>) brgemm_tpp, brgemm_tpp_rem;
 
   std::string loop_scheme;
-  std::function<void(VLAPtr<T, 2, long>&, long, long, bool)> postOpCB;
+  std::function<void(const VLAPtr<T, 2, long>&, long, long, bool)> postOpCB;
 
  public:
   TppBlockedLinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
     auto in_sizes = t_in.sizes();
     auto wt_sizes = t_wt.sizes();
-    BS = in_sizes[0] * in_sizes[1];
+    auto BS = in_sizes[0] * in_sizes[1];
     C = in_sizes[2];
 
     Nc = wt_sizes[1];
@@ -441,7 +440,6 @@ class TppBlockedLinearW {
     if (large_cache_opt)
       Ncb = NCB_BLOCK_SIZE;
 
-    with_bias = (t_bias.numel() > 0);
     copy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(BSb, Hk, K), BIAS);
     copy_bias_tpp_rem = SCOPEIT(CpyBiasTPP<T>(rem, Hk, K), BIAS);
     zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
@@ -457,20 +455,12 @@ class TppBlockedLinearW {
   VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor& t) {
     return GetVLAPtr<T1>(t, {Nk, Hk});
   }
-  VLAPtr<T, 2, long> getInputVLAPtr(at::Tensor& t) {
-    return GetVLAPtr<T>(t, {Nc, Hc});
-  }
-  VLAPtr<Tw, 2, long> getWeightVLAPtr(at::Tensor& t) {
-    return GetVLAPtr<Tw>(t, {Nc, Hc * Hk});
-  }
-  VLAPtr<T, 1, long> getBiasVLAPtr(at::Tensor& t) {
-    return GetVLAPtr<T>(t, {Hk});
-  }
   std::tuple<long, long, long, long> getOutputShapes() {
     return std::make_tuple(BSb, rem, Hk, K);
   }
   void setPostOpCB(
-      const std::function<void(VLAPtr<Tout, 2, long>&, long, long, bool)>& f) {
+      const std::function<void(const VLAPtr<Tout, 2, long>&, long, long, bool)>&
+          f) {
     postOpCB = f;
   }
   at::Tensor new_empty(at::Tensor t_in) {
@@ -480,11 +470,18 @@ class TppBlockedLinearW {
   }
 
   std::function<void(int, int, int)> stepFunc(
-      VLAPtr<T, 2, long int>& in,
-      VLAPtr<Tw, 2, long int>& wt_V,
-      VLAPtr<T, 1, long int>& bias,
-      VLAPtr<Tout, 2, long int>& out) {
-    auto func = [&](int nc, int s1, int nk) __attribute__((always_inline)) {
+      at::Tensor& t_in,
+      at::Tensor& t_wt_V,
+      at::Tensor& t_bias,
+      at::Tensor& t_out,
+      long BS) {
+    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
+    auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, Hc * Hk});
+    auto bias = GetVLAPtr<T>(t_bias, {Hk});
+    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+    bool with_bias = (t_bias.numel() > 0);
+    auto func = [&, in, wt_V, bias, out, BS, with_bias ](int nc, int s1, int nk)
+        __attribute__((always_inline)) {
       auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
       bool is_rem = (s1 + BSb > BS);
       if (!is_rem) {
@@ -531,13 +528,10 @@ class TppBlockedLinearW {
       at::Tensor t_wt_V,
       at::Tensor t_bias,
       at::Tensor t_out) {
-#if 1
     t_in = t_in.contiguous();
-    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-    auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, Hc * Hk});
-    auto bias = GetVLAPtr<T>(t_bias, {Hk});
-    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
-    auto func = stepFunc(in, wt_V, bias, out);
+    auto in_sizes = t_in.sizes();
+    auto BS = in_sizes[0] * in_sizes[1];
+    auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
     {
       RECORD_OMP_TIME();
       auto gemm_loop = ThreadedLoop<3>(
@@ -557,62 +551,6 @@ class TppBlockedLinearW {
             TimerEnd();
           });
     }
-
-#else
-    t_in = t_in.contiguous();
-    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-    auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, Hc * Hk});
-    auto bias = GetVLAPtr<T>(t_bias, {Hk});
-    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
-    {
-      RECORD_OMP_TIME();
-      auto gemm_loop = ThreadedLoop<3>(
-          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-          loop_scheme);
-      gemm_loop(
-          [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-            bool is_rem = (s1 + BSb > BS);
-            if (!is_rem) {
-              if (nc == 0) {
-                if (with_bias) {
-                  copy_bias_tpp(bias[nk], out[s1][nk]);
-                } else {
-                  zero_tpp(out[s1][nk]);
-                }
-              }
-              brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-              if (!(nc + Ncb < Nc)) { // last nc iter
-                if (postOpCB)
-                  postOpCB(out, s1, nk, false);
-              }
-            } else {
-              if (nc == 0) {
-                if (with_bias) {
-                  copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-                } else {
-                  zero_tpp_rem(out[s1][nk]);
-                }
-              }
-              brgemm_tpp_rem(
-                  in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-              if (!(nc + Ncb < Nc)) { // last nc iter
-                if (postOpCB)
-                  postOpCB(out, s1, nk, true);
-              }
-            }
-          },
-          [&]() {
-            TimerStart();
-            brgemm_tpp.config();
-          },
-          [&]() {
-            brgemm_tpp.release();
-            TimerEnd();
-          });
-    }
-#endif
   }
 };
 
@@ -620,7 +558,7 @@ template <typename T, typename Tw = T, typename Tout = T>
 TppBlockedLinearW<T, Tw, Tout> getTppBlockedLinearW(
     at::Tensor t_in,
     at::Tensor t_wt,
-    at::Tensor bias) {
+    at::Tensor t_bias) {
   static ska::flat_hash_map<std::string, TppBlockedLinearW<T, Tw, Tout>*>
       gemm_cache;
   int BS, Nc, Nk, Hc, Hk, Ncb, BSb, rem;
@@ -657,7 +595,7 @@ TppBlockedLinearW<T, Tw, Tout> getTppBlockedLinearW(
   if (search != gemm_cache.end())
     gemm = search->second;
   if (gemm == NULL) {
-    gemm = new TppBlockedLinearW<T, Tw, Tout>(t_in, t_wt, bias);
+    gemm = new TppBlockedLinearW<T, Tw, Tout>(t_in, t_wt, t_bias);
     gemm_cache[hash] = gemm;
   }
   return *gemm;
@@ -761,13 +699,14 @@ inline void fc_mul(
   auto in1 = gemm.getOutputVLAPtr(t_in1);
   auto mul_tpp = SCOPEIT((MulTPP<T, T>(BSb, Hk, K, K)), EW_MUL);
   auto mul_tpp_rem = SCOPEIT((MulTPP<T, T>(rem, Hk, K, K)), EW_MUL);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
-    } else {
-      mul_tpp_rem(in1[s1][nk], out[s1][nk], out[s1][nk]);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          mul_tpp(in1[s1][nk], out[s1][nk], out[s1][nk]);
+        } else {
+          mul_tpp_rem(in1[s1][nk], out[s1][nk], out[s1][nk]);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -801,13 +740,14 @@ inline void fc_add(
   auto in1 = gemm.getOutputVLAPtr(t_in1);
   auto add_tpp = SCOPEIT((AddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
-    } else {
-      add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
+        } else {
+          add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -842,13 +782,14 @@ inline void fc_add_scale(
   auto in1 = gemm.getOutputVLAPtr(t_in1);
   auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      sadd_tpp(in1[s1][nk], out[s1][nk], scale);
-    } else {
-      sadd_tpp_rem(in1[s1][nk], out[s1][nk], scale);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          sadd_tpp(in1[s1][nk], out[s1][nk], scale);
+        } else {
+          sadd_tpp_rem(in1[s1][nk], out[s1][nk], scale);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -888,15 +829,16 @@ inline void fc_add2_scale(
   auto add_tpp_rem = SCOPEIT((AddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
   auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(BSb, Hk, K, K)), EW_ADD);
   auto sadd_tpp_rem = SCOPEIT((ScaleAddTPP<T, T>(rem, Hk, K, K)), EW_ADD);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
-      sadd_tpp(in2[s1][nk], out[s1][nk], scale);
-    } else {
-      add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
-      sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          add_tpp(out[s1][nk], in1[s1][nk], out[s1][nk]);
+          sadd_tpp(in2[s1][nk], out[s1][nk], scale);
+        } else {
+          add_tpp_rem(out[s1][nk], in1[s1][nk], out[s1][nk]);
+          sadd_tpp_rem(in2[s1][nk], out[s1][nk], scale);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -930,13 +872,14 @@ inline void fc_gelu(
   std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<T>(rem, Hk, K, K), ACT);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
-    } else {
-      gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
+        } else {
+          gelu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -968,13 +911,14 @@ inline void fc_silu(
   std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto silu_fwd_tpp = SCOPEIT(SiLUFwdTPP<T>(BSb, Hk, K, K), ACT);
   auto silu_fwd_tpp_rem = SCOPEIT(SiLUFwdTPP<T>(rem, Hk, K, K), ACT);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      silu_fwd_tpp(out[s1][nk], out[s1][nk]);
-    } else {
-      silu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          silu_fwd_tpp(out[s1][nk], out[s1][nk]);
+        } else {
+          silu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -1006,13 +950,14 @@ inline void fc_relu(
   std::tie(BSb, rem, Hk, K) = gemm.getOutputShapes();
   auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BSb, Hk, K, K, false), ACT);
   auto relu_fwd_tpp_rem = SCOPEIT(ReLUFwdTPP<T>(rem, Hk, K, K, false), ACT);
-  gemm.setPostOpCB([&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
-    if (!is_rem) {
-      relu_fwd_tpp(out[s1][nk], out[s1][nk]);
-    } else {
-      relu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
-    }
-  });
+  gemm.setPostOpCB(
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+        if (!is_rem) {
+          relu_fwd_tpp(out[s1][nk], out[s1][nk]);
+        } else {
+          relu_fwd_tpp_rem(out[s1][nk], out[s1][nk]);
+        }
+      });
   gemm(t_in, t_wt, t_bias, t_out);
 }
 
@@ -1052,7 +997,7 @@ inline void fused_qkvi_gemm(
   auto gelu_fwd_tpp = SCOPEIT(GeluFwdTPP<Tout>(BSb, Hk, K, K), ACT);
   auto gelu_fwd_tpp_rem = SCOPEIT(GeluFwdTPP<Tout>(rem, Hk, K, K), ACT);
   gemm_i.setPostOpCB(
-      [&](VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
+      [&](const VLAPtr<T, 2, long>& out, long s1, long nk, bool is_rem) {
         if (!is_rem) {
           gelu_fwd_tpp(out[s1][nk], out[s1][nk]);
         } else {
@@ -1065,28 +1010,15 @@ inline void fused_qkvi_gemm(
       gemm_q.Nc == gemm_k.Nc && gemm_k.Nc == gemm_v.Nc &&
           gemm_v.Nc == gemm_i.Nc,
       "Fused QKV weight block mismatch\n");
-  auto in = gemm_q.getInputVLAPtr(t_in);
-  auto wt_q = gemm_q.getWeightVLAPtr(t_wt[0]);
-  auto wt_k = gemm_k.getWeightVLAPtr(t_wt[1]);
-  auto wt_v = gemm_v.getWeightVLAPtr(t_wt[2]);
-  auto wt_i = gemm_i.getWeightVLAPtr(t_wt[3]);
-  auto bias_q = gemm_q.getBiasVLAPtr(t_bias[0]);
-  auto bias_k = gemm_k.getBiasVLAPtr(t_bias[1]);
-  auto bias_v = gemm_v.getBiasVLAPtr(t_bias[2]);
-  auto bias_i = gemm_i.getBiasVLAPtr(t_bias[3]);
-  auto out_q = gemm_q.getOutputVLAPtr(t_out[0]);
-  auto out_k = gemm_k.getOutputVLAPtr(t_out[1]);
-  auto out_v = gemm_v.getOutputVLAPtr(t_out[2]);
-  auto out_i = gemm_i.getOutputVLAPtr(t_out[3]);
-  auto func_q = gemm_q.stepFunc(in, wt_q, bias_q, out_q);
-  auto func_k = gemm_k.stepFunc(in, wt_k, bias_k, out_k);
-  auto func_v = gemm_v.stepFunc(in, wt_v, bias_v, out_v);
-  auto func_i = gemm_i.stepFunc(in, wt_i, bias_i, out_i);
+  auto func_q = gemm_q.stepFunc(t_in, t_wt[0], t_bias[0], t_out[0], BS);
+  auto func_k = gemm_k.stepFunc(t_in, t_wt[1], t_bias[1], t_out[1], BS);
+  auto func_v = gemm_v.stepFunc(t_in, t_wt[2], t_bias[2], t_out[2], BS);
+  auto func_i = gemm_i.stepFunc(t_in, t_wt[3], t_bias[3], t_out[3], BS);
   {
     RECORD_OMP_TIME();
     auto gemm_loop = ThreadedLoop<3>(
         {LoopSpecs{0, gemm_q.Nc, gemm_q.Ncb, false},
-         LoopSpecs{0L, gemm_q.BS, gemm_q.BSb},
+         LoopSpecs{0L, BS, gemm_q.BSb},
          LoopSpecs{totalN}},
         "aCb");
     gemm_loop(
@@ -1156,24 +1088,14 @@ inline void fused_qkv_gemm(
   TPP_ASSERT(
       t_wt[0].size(3) == t_wt[1].size(3) && t_wt[1].size(3) == t_wt[2].size(3),
       "Fused QKV weight block mismatch\n");
-  auto in = gemm_q.getInputVLAPtr(t_in);
-  auto wt_q = gemm_q.getWeightVLAPtr(t_wt[0]);
-  auto wt_k = gemm_k.getWeightVLAPtr(t_wt[1]);
-  auto wt_v = gemm_v.getWeightVLAPtr(t_wt[2]);
-  auto bias_q = gemm_q.getBiasVLAPtr(t_bias[0]);
-  auto bias_k = gemm_k.getBiasVLAPtr(t_bias[1]);
-  auto bias_v = gemm_v.getBiasVLAPtr(t_bias[2]);
-  auto out_q = gemm_q.getOutputVLAPtr(t_out[0]);
-  auto out_k = gemm_k.getOutputVLAPtr(t_out[1]);
-  auto out_v = gemm_v.getOutputVLAPtr(t_out[2]);
-  auto func_q = gemm_q.stepFunc(in, wt_q, bias_q, out_q);
-  auto func_k = gemm_k.stepFunc(in, wt_k, bias_k, out_k);
-  auto func_v = gemm_v.stepFunc(in, wt_v, bias_v, out_v);
+  auto func_q = gemm_q.stepFunc(t_in, t_wt[0], t_bias[0], t_out[0], BS);
+  auto func_k = gemm_k.stepFunc(t_in, t_wt[1], t_bias[1], t_out[1], BS);
+  auto func_v = gemm_v.stepFunc(t_in, t_wt[2], t_bias[2], t_out[2], BS);
   {
     RECORD_OMP_TIME();
     auto gemm_loop = ThreadedLoop<3>(
         {LoopSpecs{0, gemm_q.Nc, gemm_q.Ncb, false},
-         LoopSpecs{0L, gemm_q.BS, gemm_q.BSb},
+         LoopSpecs{0L, BS, gemm_q.BSb},
          LoopSpecs{totalN}},
         "aCb");
     gemm_loop(
