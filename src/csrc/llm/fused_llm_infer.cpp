@@ -2167,6 +2167,15 @@ struct LLMBlock : torch::CustomClassHolder {
         dt_in == at::kBFloat16 && dt == at::kBFloat16 && ldt == at::kBFloat16) {
       ret = self->template _forward<bfloat16, bfloat16, bfloat16>(
           t_inp, t_cache, use_cache);
+    } else if (dt_in == at::kHalf && dt == at::kHalf && ldt == at::kFloat) {
+      ret =
+          self->template _forward<half, half, float>(t_inp, t_cache, use_cache);
+    } else if (dt_in == at::kHalf && dt == at::kHalf && ldt == at::kHalf) {
+      ret =
+          self->template _forward<half, half, half>(t_inp, t_cache, use_cache);
+    } else if (dt_in == at::kHalf && dt == at::kHalf && ldt == at::kBFloat16) {
+      ret = self->template _forward<half, half, bfloat16>(
+          t_inp, t_cache, use_cache);
 #ifdef PYTORCH_SUPPORTS_FLOAT8
     } else if (
         dt_in == at::kBFloat16 && dt == at::kBFloat8 && ldt == at::kFloat) {
@@ -3017,6 +3026,8 @@ static at::Tensor fc_plain_wrap(
     fc_plain<float, float>(t_in, t_wt, t_bias, t_out);
   } else if (dt_in == at::kBFloat16 && dt == at::kBFloat16) {
     fc_plain<bfloat16, bfloat16>(t_in, t_wt, t_bias, t_out);
+  } else if (dt_in == at::kHalf && dt == at::kHalf) {
+    fc_plain<half, half>(t_in, t_wt, t_bias, t_out);
 #ifdef PYTORCH_SUPPORTS_FLOAT8
   } else if (dt_in == at::kBFloat16 && dt == at::kBFloat8) {
     fc_plain<bfloat16, bfloat8>(t_in, t_wt, t_bias, t_out);
@@ -3028,6 +3039,7 @@ static at::Tensor fc_plain_wrap(
     fc_plain<hfloat8, hfloat8>(t_in, t_wt, t_bias, t_out);
 #endif
   } else {
+    std::cout << "dtypes: input: " << dt_in << " wt: " << dt << std::endl;
     TPP_ASSERT(0, "Should not come here %s:%d\n", __FILE__, __LINE__);
   }
   if (my_size > 1) {
