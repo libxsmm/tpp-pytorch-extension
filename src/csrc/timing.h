@@ -47,6 +47,9 @@ inline const char* DebugTimerName(int t) {
 
 enum PassType { OTH, FWD, BWD, UPD };
 
+#ifdef DEBUG_TRACE_TPP
+extern int tpp_debug_trace;
+#endif
 extern PassType globalPass;
 extern int globalScope;
 constexpr int NUM_TIMERS = ((LAST_TIMER + 8) / 8) * 8;
@@ -139,6 +142,13 @@ class GlobalScope {
   GlobalScope(int t) : oldScope(globalScope), start(getTime()) {
     TPP_ASSERT(t < (int)get_scope_list().size(), "Invalid scope initialized");
     globalScope = t;
+#ifdef DEBUG_TRACE_TPP
+    if (tpp_debug_trace >= 2)
+      printf(
+          "Scope Enter: %d %s\n",
+          t,
+          get_scope_list()[globalScope].name.c_str());
+#endif
   }
   ~GlobalScope() {
     auto time = getTime() - start;
@@ -150,6 +160,14 @@ class GlobalScope {
       auto& outer_scope = get_scope_list()[oldScope];
       outer_scope.master_timer -= time;
     }
+#ifdef DEBUG_TRACE_TPP
+    if (tpp_debug_trace >= 2)
+      printf(
+          "Scope Exit:  %d %s  Time: %.3f ms\n",
+          globalScope,
+          scope.name.c_str(),
+          time * 1e3);
+#endif
     globalScope = oldScope;
   }
   int oldScope;
@@ -189,7 +207,6 @@ class GlobalPass {
   double start;
 };
 
-// #define DEBUG_TRACE_TPP
 #ifdef DEBUG_TRACE_TPP
 static thread_local std::string prev_class_name = "";
 #endif
@@ -202,7 +219,7 @@ class ScopedTPP {
   void operator()(Types... vars) {
     ScopedTimer _t(t);
 #ifdef DEBUG_TRACE_TPP
-    if (omp_get_thread_num() == 0) {
+    if (tpp_debug_trace >= 3 && omp_get_thread_num() == 0) {
       auto cur_class_name = get_class_name<T>();
       if (cur_class_name != prev_class_name) {
         std::cout << "Calling impl " << impl << " for " << cur_class_name

@@ -18,6 +18,9 @@
 
 double ifreq = 1.0 / getFreq();
 
+#ifdef DEBUG_TRACE_TPP
+int tpp_debug_trace = env2int("TPP_DEBUG_TRACE", 0);
+#endif
 PassType globalPass = OTH;
 REGISTER_SCOPE(other, "other");
 REGISTER_SCOPE(w_vnni, "w_vnni");

@@ -21,6 +21,13 @@ import platform
 
 cwd = os.path.dirname(os.path.realpath(__file__))
 
+# set debug_trace_tpp = True to enable call tracing inside extension
+# export TPP_DEBUG_TRACE=0 (default) No logging (may add little overhead though)
+# export TPP_DEBUG_TRACE=1 to log TPP creation
+# export TPP_DEBUG_TRACE=2 to log previous and scope tracing
+# export TPP_DEBUG_TRACE=3 to log previous and TPP call tracing
+debug_trace_tpp = False
+
 libxsmm_root = os.path.join(cwd, "libxsmm")
 if "LIBXSMM_ROOT" in os.environ:
     libxsmm_root = os.getenv("LIBXSMM_ROOT")
@@ -156,6 +163,9 @@ extra_compile_args.append("-march=native")
 
 if hasattr(torch, "float8_e5m2") and hasattr(torch, "float8_e4m3fn"):
     extra_compile_args.append("-DPYTORCH_SUPPORTS_FLOAT8")
+
+if debug_trace_tpp:
+    extra_compile_args.append("-DDEBUG_TRACE_TPP")
 
 USE_CXX_ABI = int(torch._C._GLIBCXX_USE_CXX11_ABI)
 

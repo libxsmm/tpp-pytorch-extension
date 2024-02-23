@@ -33,6 +33,10 @@
 #define omp_get_thread_num() 0
 #endif
 
+#ifdef DEBUG_TRACE_TPP
+extern int tpp_debug_trace;
+#endif
+
 #define TPP_ASSERT(cond, x...) \
   do {                         \
     if (!(cond)) {             \
@@ -379,12 +383,19 @@ class BaseTPP {
     if (search != kernel_cache.end())
       kernel = search->second;
     if (kernel == NULL) {
+#ifdef DEBUG_TRACE_TPP
+      if (tpp_debug_trace >= 1)
+        printf("TPP: building %s\n", hash.c_str());
+#endif
       kernel = build_kernel();
       if (kernel == NULL) {
         fprintf(stderr, "Unable to get JIT kernel for %s\n", hash.c_str());
         exit(1);
       }
-      // printf("TPP: %s @ %p\n", hash.c_str(), kernel);
+#ifdef DEBUG_TRACE_TPP
+      if (tpp_debug_trace >= 1)
+        printf("TPP: built    %s @ %p\n", hash.c_str(), kernel);
+#endif
       kernel_cache[hash] = kernel;
       // printf("Hash size = %ld\n", (long)kernel_cache.size());
     }
