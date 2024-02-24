@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #ifdef TORCH_API_INCLUDE_EXTENSION_H
+#include <c10/util/Backtrace.h>
 #include <torch/extension.h>
 #endif
 
@@ -143,11 +144,22 @@ inline T* pt_get_data_ptr(at::Tensor t) {
   if (!t.is_contiguous()) {
     std::cout << "Warning: Tensor t " << t.sizes() << " is not contiguous"
               << std::endl;
-#if 0
+#ifdef DEBUG_TRACE_TPP
     std::cout << c10::get_backtrace(0, 3) << std::endl;
     throw std::invalid_argument("Tensor is not contiguous");
 #endif
   }
+#ifdef DEBUG_TRACE_TPP
+  if (c10::CppTypeToScalarType<T>::value != t.dtype()) {
+    std::cout << "Warning: Tensor dtype " << t.dtype()
+              << " is not same as requested template type "
+              << c10::CppTypeToScalarType<T>::value << std::endl;
+
+    std::cout << c10::get_backtrace(0, 3) << std::endl;
+    throw std::invalid_argument("Tensor type doesn't match template type");
+  }
+#endif
+
   return t.data_ptr<T>();
 }
 typedef int64_t index_t;
