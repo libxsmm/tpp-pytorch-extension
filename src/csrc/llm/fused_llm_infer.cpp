@@ -2624,7 +2624,7 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer
 
     if (B * S > FT_OPT_SIZE && TPP_CACHE_REMAPPED_WEIGHTS) {
       if (!first_token_remapped)
-        remap_for_first_token<Tw>();
+        remap_for_first_token<T>();
 
       if (!std::is_same<T, Tw>::value) {
         return this->template _forward<T, T, LT>(t_inp, t_cache, use_cache);
@@ -2799,7 +2799,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
 
     if (B * S > FT_OPT_SIZE && TPP_CACHE_REMAPPED_WEIGHTS) {
       if (!first_token_remapped)
-        remap_for_first_token<Tw>();
+        remap_for_first_token<T>();
 
       if (!std::is_same<T, Tw>::value) {
         return this->template _forward<T, T, LT>(t_inp, t_cache, use_cache);
