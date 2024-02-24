@@ -277,10 +277,14 @@ if args.use_tpp:
             generate_kwargs["num_beams"],
             indirect_kv=True,
             enable_profile=cpp_profile,
+            only_last_logit=True,
         )
     else:
         model = optimize_for_first_token(
-            model, generate_kwargs["num_beams"], enable_profile=cpp_profile
+            model,
+            generate_kwargs["num_beams"],
+            enable_profile=cpp_profile,
+            only_last_logit=True,
         )
 
     # generate_kwargs["jit"] = True

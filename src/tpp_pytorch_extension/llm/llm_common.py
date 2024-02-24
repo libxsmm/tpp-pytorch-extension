@@ -331,7 +331,12 @@ class _ModelFallbackWrapper(GenerationMixin):
 
 
 def jit_trace_model(
-    model, tokenizer, num_beams, indirect_kv=True, enable_profile=False
+    model,
+    tokenizer,
+    num_beams,
+    indirect_kv=True,
+    enable_profile=False,
+    only_last_logit=False,
 ):
     torch._C._jit_set_texpr_fuser_enabled(False)
     jit_input_texts = ["enable jit"]
@@ -340,6 +345,7 @@ def jit_trace_model(
     jit_inputs = model.prepare_inputs_for_generation(**jit_inputs)
     jit_inputs["past_key_values"] = past_key_values
     model.config.return_dict = False
+    model.config.only_last_logit = only_last_logit
     if hasattr(model, "forward"):
         sig = inspect.signature(model.forward)
     else:
@@ -360,7 +366,10 @@ def jit_trace_model(
     return model
 
 
-def optimize_for_first_token(model, num_beams, enable_profile=False):
+def optimize_for_first_token(
+    model, num_beams, enable_profile=False, only_last_logit=False
+):
+    model.config.only_last_logit = only_last_logit
     model = _ModelFallbackWrapper(
         model, model, num_beams, enable_profile=enable_profile
     )

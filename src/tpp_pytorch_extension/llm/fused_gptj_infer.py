@@ -11,6 +11,7 @@
 import math
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 from typing import Optional, Tuple, Union
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
@@ -251,6 +252,12 @@ def GPTJForCausalLM_forward_patched(
         return_dict if return_dict is not None else self.config.use_return_dict
     )
 
+    only_last_logit = (
+        self.config.only_last_logit
+        if hasattr(self.config, "only_last_logit")
+        else False
+    )
+
     transformer_outputs = self.transformer(
         input_ids,
         past_key_values=past_key_values,
@@ -276,7 +283,7 @@ def GPTJForCausalLM_forward_patched(
     # https://github.com/EleutherAI/gpt-neo/blob/89ce74164da2fb16179106f54e2269b5da8db333/models/gpt2/gpt2.py#L179
 
     # We only need logits for last token doing text generation
-    if labels is None:
+    if only_last_logit == True and labels is None:
         hidden_states = hidden_states[:, -1:, :]
 
     lm_logits = self.lm_head(hidden_states).to(torch.float32)

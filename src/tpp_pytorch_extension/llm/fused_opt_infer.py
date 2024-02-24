@@ -11,6 +11,7 @@
 import math
 import torch
 from torch import nn
+from torch.nn import CrossEntropyLoss
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
     BlockedModule,
@@ -236,19 +237,76 @@ def OPTForCausalLM_forward_patched(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
-    return OPTForCausalLM_forward(
-        self,
+    output_attentions = False
+    output_hidden_states = False
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    only_last_logit = (
+        self.config.only_last_logit
+        if hasattr(self.config, "only_last_logit")
+        else False
+    )
+
+    # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+    outputs = self.model.decoder(
         input_ids=input_ids,
         attention_mask=attention_mask,
-        past_key_values=past_key_values,
         head_mask=head_mask,
+        past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
-        labels=labels,
         use_cache=use_cache,
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
     )
+    hidden_states = outputs[0]
+
+    # We only need logits for last token doing text generation
+    if only_last_logit == True and labels is None:
+        hidden_states = hidden_states[:, -1:, :]
+
+    logits = self.lm_head(hidden_states).contiguous()
+
+    loss = None
+    if labels is not None:
+        # move labels to correct device to enable model parallelism
+        labels = labels.to(logits.device)
+        # Shift so that tokens < n predict n
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        loss_fct = CrossEntropyLoss()
+        loss = loss_fct(
+            shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1)
+        )
+
+    if not return_dict:
+        output = (logits,) + outputs[1:]
+        return (loss,) + output if loss is not None else output
+
+    return CausalLMOutputWithPast(
+        loss=loss,
+        logits=logits,
+        past_key_values=outputs.past_key_values,
+        hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
+    )
+
+    # return OPTForCausalLM_forward(
+    #     self,
+    #     input_ids=input_ids,
+    #     attention_mask=attention_mask,
+    #     past_key_values=past_key_values,
+    #     head_mask=head_mask,
+    #     inputs_embeds=inputs_embeds,
+    #     labels=labels,
+    #     use_cache=use_cache,
+    #     output_attentions=output_attentions,
+    #     output_hidden_states=output_hidden_states,
+    #     return_dict=return_dict,
+    # )
 
 
 transformers.models.opt.modeling_opt.OPTForCausalLM.forward = (
