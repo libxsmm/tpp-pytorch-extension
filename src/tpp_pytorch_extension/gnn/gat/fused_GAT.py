@@ -933,6 +933,7 @@ class GATConvOpt(BlockedModule):
                 rst = self.bias_act_drop(rst, self.bias)
             elif self.add_bias is not None:
                 rst = self.add_bias(rst, self.bias)
+            rst = rst.view(*dst_prefix_shape, self._num_heads, self._out_feats)
 
             if get_attention:
                 return rst, graph.edata["a"]
