@@ -5062,7 +5062,7 @@ class SplitSGDTPP : public BaseTPP {
     eqn_param.inputs = arg_array;
     eqn_param.output.primary = (void*)lo;
     auto offset = (long long)((char*)hi - (char*)lo);
-    eqn_param.output.secondary = (void*)offset;
+    eqn_param.output.secondary = (void*)&offset;
 
     kernel(&eqn_param);
   }
@@ -5112,7 +5112,11 @@ class SplitSGDTPP : public BaseTPP {
   void* build_kernel() override {
     libxsmm_blasint ld = N;
     libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
-    meqn_push_unary_op(my_eqn0, LIBXSMM_MELTW_TYPE_UNARY_UNZIP);
+    meqn_push_unary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_UNARY_UNZIP,
+        LIBXSMM_MELTW_FLAG_UNARY_NONE,
+        LIBXSMM_DATATYPE_IMPLICIT);
     meqn_push_ternary_op(
         my_eqn0,
         LIBXSMM_MELTW_TYPE_TERNARY_MULADD,
@@ -5124,11 +5128,11 @@ class SplitSGDTPP : public BaseTPP {
     meqn_push_arg(my_eqn0, 1, 1, 1, 2, 0, LIBXSMM_DATATYPE_F32);
     meqn_push_binary_op(my_eqn0, LIBXSMM_MELTW_TYPE_BINARY_ZIP);
     /* This is the tensor with lo bits  */
-    meqn_push_arg(my_eqn0, N, 1, ld, 0, 0, LIBXSMM_DATATYPE_I16);
+    meqn_push_arg(my_eqn0, N, 1, ld, 0, 0, LIBXSMM_DATATYPE_U16);
     /* This is the tensor with hi bits  */
-    meqn_push_arg(my_eqn0, N, 1, ld, 1, 0, LIBXSMM_DATATYPE_I16);
+    meqn_push_arg(my_eqn0, N, 1, ld, 1, 0, LIBXSMM_DATATYPE_U16);
     debug_print_eqn_tree(my_eqn0);
-    auto func0 = meqn_dispatch(N, 1, &ld, LIBXSMM_DATATYPE_I16, my_eqn0);
+    auto func0 = meqn_dispatch(N, 1, &ld, LIBXSMM_DATATYPE_U16, my_eqn0);
     return (void*)func0;
   }
 
