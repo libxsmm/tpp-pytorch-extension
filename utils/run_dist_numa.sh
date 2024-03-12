@@ -30,6 +30,10 @@ while (( "$#" )); do
       ARGS_NTHREADS=$2
       shift 2
       ;;
+    -m)
+      ARGS_LIST=$2
+      shift 2
+      ;;
     --) # end argument parsing
       shift
       break
@@ -52,7 +56,20 @@ CORES_PER_NUMA=$(( (CORES_PER_SOCKET * NUM_SOCKETS) / NUM_NUMA_NODES ))
 
 NP=1
 
-if ! test -z $ARGS_NTASKS ; then NP=$ARGS_NTASKS ; fi
+if ! test -z $ARGS_NTASKS && ! test -z $ARGS_LIST ; then
+  echo "Either -n/-np or -m can be specified but not both at the same time"
+  exit 1
+fi
+if ! test -z $ARGS_NTASKS ; then
+  NP=$ARGS_NTASKS ;
+  NUMA_NODE_LIST=$(seq 0 $((NP-1)) )
+  I_MPI_PIN_DOMAIN=numa
+fi
+if ! test -z $ARGS_LIST ; then
+  NUMA_NODE_LIST=$(echo $ARGS_LIST | tr "," " ")
+  NP=$(echo $NUMA_NODE_LIST | awk '{print NF}')
+  I_MPI_PIN_DOMAIN=node
+fi
 
 
 echo "Running $NP tasks"
@@ -81,11 +98,10 @@ fi
 CCL_WORKER_AFFINITY=""
 PYTORCH_MPI_THREAD_AFFINITY=""
 
-for(( I=0; I < NP ; I++)) ; do
+for I in $NUMA_NODE_LIST ; do
   for((P=0;P < CCL_WORKER_COUNT ; P++)); do CCL_WORKER_AFFINITY="${CCL_WORKER_AFFINITY} $(( HT_WORKER_OFFSET + I * NUM_THREADS + P ))" ; done
   PYTORCH_MPI_THREAD_AFFINITY="${PYTORCH_MPI_THREAD_AFFINITY} $(( HT_WORKER_OFFSET + I * NUM_THREADS ))"
 done
-export I_MPI_PIN_DOMAIN=numa
 export CCL_WORKER_AFFINITY=`echo ${CCL_WORKER_AFFINITY} | tr " " ","`
 if ! test -z $ARGS_NTHREADS ; then 
   export OMP_NUM_THREADS=$ARGS_NTHREADS
@@ -110,10 +126,13 @@ CMD=$1
 shift
 ARGS="$@"
 
-MPI_CMD="`rank_cmd 0 $NUM_THREADS` $CMD ${ARGS}"
-for(( I=1; I < NP ; I++)) ; do
+for I in $NUMA_NODE_LIST ; do
   RANK_CMD=`rank_cmd $I $NUM_THREADS`
-  MPI_CMD="${MPI_CMD} : ${RANK_CMD} $CMD ${ARGS} "
+  if test -z "$MPI_CMD" ; then
+    MPI_CMD="${RANK_CMD} $CMD ${ARGS}"
+  else
+    MPI_CMD="${MPI_CMD} : ${RANK_CMD} $CMD ${ARGS} "
+  fi
 done
 MPIEXE_ARGS="-l -genv I_MPI_PIN_DOMAIN=$I_MPI_PIN_DOMAIN -genv CCL_WORKER_AFFINITY=$CCL_WORKER_AFFINITY -genv CCL_WORKER_COUNT=$CCL_WORKER_COUNT -genv OMP_NUM_THREADS=$OMP_NUM_THREADS -genv PYTORCH_MPI_THREAD_AFFINITY=$PYTORCH_MPI_THREAD_AFFINITY "
 
