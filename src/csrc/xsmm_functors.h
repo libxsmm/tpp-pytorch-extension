@@ -1966,8 +1966,8 @@ class XformExtTPP {
       zero = SetZeroTPP<T>(in_rows, in_cols_p - in_cols, in_cols_p);
       zero_offset = in_cols;
     }
-    if (std::is_same<T, bfloat16>::value)
-      cvt = ConvertTPP<float, bfloat16>(in_rows, in_cols);
+    if (!std::is_same<T, float>::value)
+      cvt = ConvertTPP<float, T>(in_rows, in_cols);
   }
   void operator()(T* in, T* out) {
     if (in != out) {
@@ -2033,8 +2033,11 @@ class XformExtTPP {
     }
   }
 
-  void operator()(float* in, bfloat16* out) {
-    bfloat16 tmp2[in_rows * in_cols];
+  template <
+      typename T1 = T,
+      std::enable_if_t<!std::is_same<T1, float>::value, bool> = true>
+  void operator()(float* in, T1* out) {
+    T1 tmp2[in_rows * in_cols];
     cvt(in, tmp2);
     if (in_rows_p != in_rows || in_cols_p != in_cols) {
       T tmp[in_rows_p * in_cols_p];
@@ -2045,7 +2048,10 @@ class XformExtTPP {
       kernel((void*)tmp2, (void*)out);
     }
   }
-  void ref(float* in, bfloat16* out) {
+  template <
+      typename T1 = T,
+      std::enable_if_t<!std::is_same<T1, float>::value, bool> = true>
+  void ref(float* in, T1* out) {
     auto BS = xsmm_get_vnni_block_size(dtype);
     if (xtype == XformTPP::XFORM_XPOSE_TPP) {
       for (int i = 0; i < out_rows; i++) {
@@ -2106,17 +2112,18 @@ class XformExtTPP {
       this->ref(&in[i * str_in], &out[i * str_out]);
     }
   }
-  void operator()(
-      int count,
-      long str_in,
-      long str_out,
-      float* in,
-      bfloat16* out) {
+  template <
+      typename T1 = T,
+      std::enable_if_t<!std::is_same<T1, float>::value, bool> = true>
+  void operator()(int count, long str_in, long str_out, float* in, T1* out) {
     for (int i = 0; i < count; i++) {
       this->operator()(&in[i * str_in], &out[i * str_out]);
     }
   }
-  void ref(int count, long str_in, long str_out, float* in, bfloat16* out) {
+  template <
+      typename T1 = T,
+      std::enable_if_t<!std::is_same<T1, float>::value, bool> = true>
+  void ref(int count, long str_in, long str_out, float* in, T1* out) {
     for (int i = 0; i < count; i++) {
       this->ref(&in[i * str_in], &out[i * str_out]);
     }
@@ -2135,7 +2142,7 @@ class XformExtTPP {
   libxsmm_datatype dtype;
   int zero_offset = 0;
   XformTPP kernel;
-  ConvertTPP<float, bfloat16> cvt;
+  ConvertTPP<float, T> cvt;
   CpyTPP<T> cpy;
   SetZeroTPP<T> zero;
 };
