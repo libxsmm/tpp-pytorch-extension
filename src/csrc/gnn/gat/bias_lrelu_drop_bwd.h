@@ -18,31 +18,38 @@ auto t_dp_mask = (p > 0) ? inputs[i++] : at::empty(0, at::kShort);
 
 auto in_sizes = t_grad_out.sizes();
 auto N = in_sizes[0];
+auto bn = align;
+auto nn = N / bn;
+auto rem = N % bn;
 long K = in_sizes[1];
 auto dK = (K + 15) / 16;
 
 auto t_grad_in = t_grad_out.new_empty({N, K});
 auto t_grad_bias = t_grad_out.new_empty({K});
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-auto inp = GetVLAPtr<T>(t_inp, {K});
-auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
+auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, K});
+auto inp = GetVLAPtr<T>(t_inp, {bn, K});
+auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {bn, dK});
 
-auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, K});
 auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
 
-auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
-auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 int threads = omp_get_max_threads();
 
 if (p > 0) {
-  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(1, K, p), DROPOUT);
-  auto dp_mask = GetVLAPtr<short>(t_dp_mask, {dK});
+  auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(bn, K, alpha), ACT);
+  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, K), BIAS);
+  auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
+  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(bn, K, p), DROPOUT);
+  auto copy_tpp = SCOPEIT(CpyTPP<T>(bn, K), EW_COPY);
+
+  auto dp_mask = GetVLAPtr<short>(t_dp_mask, {bn, dK});
+
   RECORD_SCOPE(gdo_bias_lrelu_drop, {t_grad_out});
   {
     tensor_set_zero(1, K, t_grad_bias);
     float* bias_ptrs[threads];
+    T tmp[bn][K];
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
     {
@@ -51,17 +58,47 @@ if (p > 0) {
       bias_ptrs[tid] = prv_grad_bias[0];
       set_zero_tpp(prv_grad_bias[0]);
 #pragma omp for
-      for (int n = 0; n < N; n++) {
-        dropout_bwd_tpp(grad_out[n], grad_in[n], dp_mask[n]);
-        leaky_relu_bwd_tpp(grad_in[n], grad_in[n], inp[n], lrelu_mask[n]);
-        grad_bias_tpp(grad_in[n], prv_grad_bias[0]);
+      for (int n = 0; n < nn; n++) {
+        dropout_bwd_tpp(grad_out[n][0], tmp[0], dp_mask[n][0]);
+        leaky_relu_bwd_tpp(tmp[0], tmp[0], inp[n][0], lrelu_mask[n][0]);
+        grad_bias_tpp(tmp[0], prv_grad_bias[0]);
+        copy_tpp(tmp[0], grad_in[n][0]);
       }
+#pragma omp barrier
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
+    }
+    if (rem > 0) {
+      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+      auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(1, K, p), DROPOUT);
+      auto copy_tpp = SCOPEIT(CpyTPP<T>(1, K), EW_COPY);
+
+      auto dp_mask = GetVLAPtr<short>(t_dp_mask, {dK});
+      auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
+      auto inp = GetVLAPtr<T>(t_inp, {K});
+      auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
+      auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+
+      float prv_grad_bias[1][K];
+      bias_ptrs[0] = prv_grad_bias[0];
+      set_zero_tpp(prv_grad_bias[0]);
+
+      for (int n = nn * bn; n < nn * bn + rem; n++) {
+        dropout_bwd_tpp(grad_out[n], tmp[0], dp_mask[n]);
+        leaky_relu_bwd_tpp(tmp[0], tmp[0], inp[n], lrelu_mask[n]);
+        grad_bias_tpp(tmp[0], prv_grad_bias[0]);
+        copy_tpp(tmp[0], grad_in[0]);
+      }
+      omp_reduce_buf(1, K, bias_ptrs, grad_bias[0], true);
     }
   }
 } else {
   RECORD_SCOPE(gdo_bias_lrelu_drop, {t_grad_out});
   {
+    auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(bn, K, alpha), ACT);
+    auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, K), BIAS);
+    auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
+
     tensor_set_zero(1, K, t_grad_bias);
     float* bias_ptrs[threads];
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
@@ -72,11 +109,32 @@ if (p > 0) {
       bias_ptrs[tid] = prv_grad_bias[0];
       set_zero_tpp(prv_grad_bias[0]);
 #pragma omp for
-      for (int n = 0; n < N; n++) {
+      for (int n = 0; n < nn; n++) {
+        leaky_relu_bwd_tpp(
+            grad_out[n][0], grad_in[n][0], inp[n][0], lrelu_mask[n][0]);
+        grad_bias_tpp(grad_in[n][0], prv_grad_bias[0]);
+      }
+#pragma omp barrier
+      omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
+    }
+    if (rem > 0) {
+      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+
+      auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
+      auto inp = GetVLAPtr<T>(t_inp, {K});
+      auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
+      auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+
+      float prv_grad_bias[1][K];
+      bias_ptrs[0] = prv_grad_bias[0];
+      set_zero_tpp(prv_grad_bias[0]);
+
+      for (int n = nn * bn; n < nn * bn + rem; n++) {
         leaky_relu_bwd_tpp(grad_out[n], grad_in[n], inp[n], lrelu_mask[n]);
         grad_bias_tpp(grad_in[n], prv_grad_bias[0]);
       }
-      omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
+      omp_reduce_buf(1, K, bias_ptrs, grad_bias[0], true);
     }
   }
 }

@@ -527,6 +527,14 @@ auto trans_tpp = SCOPEIT(
         }
       }
     }
+    if (nn == 0 and rem == 0) {
+      auto set_zero_tpp = SetZeroTPP<T>(bk, bc);
+      for (int k = 0; k < nk; k++) {
+        for (int c = 0; c < nc; c++) {
+          set_zero_tpp(grad_wt[k][c]);
+        }
+      }
+    }
   }
 }
 
