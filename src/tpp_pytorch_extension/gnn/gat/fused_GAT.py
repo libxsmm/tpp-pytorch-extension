@@ -73,13 +73,14 @@ class LinearOut(BlockedModule):
         self.reset_parameters()
 
         self.bk = out_features
-        self.bc = 64
+        self.bc = 32
         self.weight.set_blocking_param(
             (
                 [self.bk, self.bc],
                 [0, 2, 3, 1],
             )
         )
+        self.reset_parameters()
 
     def reset_parameters(self):
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -102,7 +103,7 @@ class LinearOut(BlockedModule):
 
 class LinearOutBF16(LinearOut):
     def __init__(self, in_features, out_features, bias=True):
-        super(LinearOutBF16, self).__init__(in_features, out_features)
+        super(LinearOutBF16, self).__init__(in_features, out_features, bias)
         self.weight.set_blocking_param(
             (
                 [self.bk, [self.bc // 2, 2]],
@@ -362,18 +363,22 @@ class FusedBiasReLUDrop(nn.Module):
 
 class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inp, bias, alpha, p, training):
+    def forward(ctx, inp, bias, alpha, p, training, align):
         inputs = [inp, bias]
+        N = inp.size(0)
+        align = align if (N > align or N == 0) else N
         if training and p > 0:
             (out, rmask, dpmask) = fused_gat_cpp.bias_lrelu_drop_fwd(
-                inputs, alpha, p, 1
+                align, inputs, alpha, p, 1
             )
             ctx.save_for_backward(inp, rmask, dpmask)
         else:
-            (out, rmask) = fused_gat_cpp.bias_lrelu_drop_fwd(inputs, alpha, p, 0)
-            ctx.save_for_backward(inp, rmask)
+            (out, rmask) = fused_gat_cpp.bias_lrelu_drop_fwd(align, inputs, alpha, p, 0)
+            if training:
+                ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
         ctx.p = p
+        ctx.align = align
 
         return out
 
@@ -382,10 +387,10 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
         grad_inp, grad_bias = fused_gat_cpp.bias_lrelu_drop_bwd(
-            inputs, ctx.alpha, ctx.p
+            ctx.align, inputs, ctx.alpha, ctx.p
         )
 
-        return (grad_inp, grad_bias, None, None, None)
+        return (grad_inp, grad_bias, None, None, None, None)
 
 
 class FusedBiasLeakyReLUDrop(nn.Module):
@@ -400,13 +405,14 @@ class FusedBiasLeakyReLUDrop(nn.Module):
             )
         self.alpha = alpha
         self.p = p
+        self.align = 64
 
     def extra_repr(self) -> str:
         return "alpha={}, p={}, inplace={}".format(self.alpha, self.p, self.inplace)
 
     def forward(self, inp, bias):
         output = FusedBiasLeakyReLUDropFn.apply(
-            inp, bias, self.alpha, self.p, self.training
+            inp, bias, self.alpha, self.p, self.training, self.align
         )
         return output
 

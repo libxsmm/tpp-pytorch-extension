@@ -49,7 +49,6 @@ if (p > 0) {
   {
     tensor_set_zero(1, K, t_grad_bias);
     float* bias_ptrs[threads];
-    T tmp[bn][K];
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
     {
@@ -59,10 +58,9 @@ if (p > 0) {
       set_zero_tpp(prv_grad_bias[0]);
 #pragma omp for
       for (int n = 0; n < nn; n++) {
-        dropout_bwd_tpp(grad_out[n][0], tmp[0], dp_mask[n][0]);
-        leaky_relu_bwd_tpp(tmp[0], tmp[0], inp[n][0], lrelu_mask[n][0]);
-        grad_bias_tpp(tmp[0], prv_grad_bias[0]);
-        copy_tpp(tmp[0], grad_in[n][0]);
+        dropout_bwd_tpp(grad_out[n][0], grad_in[n][0], dp_mask[n][0]);
+        leaky_relu_bwd_tpp(grad_in[n][0], grad_in[n][0], inp[n][0], lrelu_mask[n][0]);
+        grad_bias_tpp(grad_in[n][0], prv_grad_bias[0]);
       }
 #pragma omp barrier
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
@@ -84,10 +82,9 @@ if (p > 0) {
       set_zero_tpp(prv_grad_bias[0]);
 
       for (int n = nn * bn; n < nn * bn + rem; n++) {
-        dropout_bwd_tpp(grad_out[n], tmp[0], dp_mask[n]);
-        leaky_relu_bwd_tpp(tmp[0], tmp[0], inp[n], lrelu_mask[n]);
-        grad_bias_tpp(tmp[0], prv_grad_bias[0]);
-        copy_tpp(tmp[0], grad_in[0]);
+        dropout_bwd_tpp(grad_out[n], grad_in[n], dp_mask[n]);
+        leaky_relu_bwd_tpp(grad_in[n], grad_in[n], inp[n], lrelu_mask[n]);
+        grad_bias_tpp(grad_in[n], prv_grad_bias[0]);
       }
       omp_reduce_buf(1, K, bias_ptrs, grad_bias[0], true);
     }
