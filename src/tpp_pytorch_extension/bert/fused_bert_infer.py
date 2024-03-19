@@ -54,8 +54,7 @@ def generate_mask(attention_mask, use_unpad):
     S1, S2 = BlockedModule.default_blocking_factors(S)
     attention_mask = attention_mask.view([B, S]).clone()
     S2a = S2 if use_unpad else S
-    nnz = (((attention_mask + 10000).count_nonzero(dim=-1) + (S2a - 1)) // S2a) * S2a
-    # nnz = (((attention_mask+10000).count_nonzero(dim=-1) + (S - 1))//S)*S
+    nnz = (((attention_mask == 0).sum(dim=-1) + (S2a - 1)) // S2a) * S2a
     nnz1 = nnz.unsqueeze(dim=1).expand([-1, S])
     a = torch.arange(S).expand([B, -1])
     a1 = torch.arange(B).unsqueeze(dim=1).expand([B, S])

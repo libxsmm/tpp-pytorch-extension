@@ -52,8 +52,7 @@ def generate_mask(attention_mask):
     B, _, _, S = attention_mask.shape
     S1, S2 = BlockedModule.default_blocking_factors(S)
     attention_mask = attention_mask.view([B, S]).clone()
-    nnz = (((attention_mask + 10000).count_nonzero(dim=-1) + (S2 - 1)) // S2) * S2
-    # nnz = (((attention_mask+10000).count_nonzero(dim=-1) + (S - 1))//S)*S
+    nnz = (((attention_mask == 0).sum(dim=-1) + (S2 - 1)) // S2) * S2
     nnz1 = nnz.unsqueeze(dim=1).expand([-1, S])
     a = torch.arange(S).expand([B, -1])
     msk = a < nnz1
