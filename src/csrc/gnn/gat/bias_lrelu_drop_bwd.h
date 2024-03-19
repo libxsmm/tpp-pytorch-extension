@@ -59,7 +59,8 @@ if (p > 0) {
 #pragma omp for
       for (int n = 0; n < nn; n++) {
         dropout_bwd_tpp(grad_out[n][0], grad_in[n][0], dp_mask[n][0]);
-        leaky_relu_bwd_tpp(grad_in[n][0], grad_in[n][0], inp[n][0], lrelu_mask[n][0]);
+        leaky_relu_bwd_tpp(
+            grad_in[n][0], grad_in[n][0], inp[n][0], lrelu_mask[n][0]);
         grad_bias_tpp(grad_in[n][0], prv_grad_bias[0]);
       }
 #pragma omp barrier
