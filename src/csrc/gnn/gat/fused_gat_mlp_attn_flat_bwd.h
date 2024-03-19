@@ -244,7 +244,7 @@ auto brgemm_dw_bf16_tpp_b1 =
           add_tpp(
               attn_grad_in_H_F[r][0], grad_out_H_F[r][0], grad_out_H_F[r][0]);
         }
-        omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0]);
+        omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0], true);
       }
     }
   }
@@ -631,6 +631,15 @@ auto trans_tpp = SCOPEIT(
       for (int k = 0; k < nk; k++) {
         for (int c = 0; c < nc; c++) {
           n2v_wt_tpp(grad_wt_tmp[k][c], grad_wt[k][c]);
+        }
+      }
+    }
+    if (nn == 0 and rem == 0) {
+      auto set_zero_tpp = SetZeroTPP<T>(bk, bc);
+#pragma omp parallel for collapse(2)
+      for (int k = 0; k < nk; k++) {
+        for (int c = 0; c < nc; c++) {
+          set_zero_tpp(grad_wt[k][c]);
         }
       }
     }

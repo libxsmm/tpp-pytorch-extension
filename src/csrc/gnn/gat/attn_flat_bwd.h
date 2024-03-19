@@ -110,7 +110,7 @@ auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<T, T>(H, F)), EW_ADD);
                                                         // (HF) ->
                                                         // (HF)
         }
-        omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0]);
+        omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0], true);
       } // rem > 0
     }
   }

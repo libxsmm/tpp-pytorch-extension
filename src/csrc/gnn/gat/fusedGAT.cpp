@@ -360,6 +360,7 @@ at::Tensor leaky_relu_drop_bwd(
 // ######################################## Fuse Bias, LeakyReLU, Dropout
 // ################################################
 std::vector<at::Tensor> bias_lrelu_drop_fwd(
+    int align,
     std::vector<at::Tensor> inputs,
     float alpha,
     float p,
@@ -375,6 +376,7 @@ std::vector<at::Tensor> bias_lrelu_drop_fwd(
 }
 
 std::vector<at::Tensor> bias_lrelu_drop_bwd(
+    int align,
     std::vector<at::Tensor> inputs,
     float alpha,
     float p) {
