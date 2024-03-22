@@ -2235,6 +2235,26 @@ class BrgemmTPP {
       k_gemm_no_tc(&gemm_param);
     }
   }
+  void operator()(
+      Tin* A,
+      Tw* B,
+      Tw* B_scales,   
+      Tout* C,
+      unsigned long long count,
+      bool no_tile_cfg = false) {
+    libxsmm_gemm_param gemm_param;
+    memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+    gemm_param.op.tertiary = &count;
+    gemm_param.c.primary = (void*)C;
+    gemm_param.a.primary = (void*)B;
+    gemm_param.a.tertiary = (void*)B_scales;  
+    gemm_param.b.primary = (void*)A;
+    if (!no_tile_cfg) {
+      k_gemm_with_tc(&gemm_param);
+    } else {
+      k_gemm_no_tc(&gemm_param);
+    }
+  }
   void ref(
       Tin* A,
       Tw* B,
@@ -2364,6 +2384,9 @@ class BrgemmTPP {
       if (brgemm_type != 0) {
         if (p->b_vnni)
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
+        if (p->b_vnni == 2) {
+          l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;     
+        }
         if (p->a_trans == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
@@ -2392,13 +2415,13 @@ class BrgemmTPP {
       l_shape.lda = p->ldb;
       l_shape.ldb = p->lda;
       l_shape.ldc = p->ldc;
-      l_shape.a_in_type = XsmmDtype<Tw>();
+      l_shape.a_in_type = (p->b_vnni == 2) ? LIBXSMM_DATATYPE_I8 : XsmmDtype<Tw>();
       l_shape.b_in_type = XsmmDtype<Tin>();
       l_shape.out_type = XsmmDtype<Tout>();
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = p->str_b * sizeof(Tw);
+      l_brconfig.br_stride_a_hint = (p->b_vnni == 2) ? (p->str_b * sizeof(Tw))/4 : p->str_b * sizeof(Tw);
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
       l_brconfig.br_unroll_hint = p->unroll_hint;
 

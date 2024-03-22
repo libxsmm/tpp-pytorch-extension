@@ -160,6 +160,23 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout>, impl> {
     }
   }
 
+  void operator()(
+      Tin* A,
+      Tin* B,
+      Tin* B_s,    
+      Tout* C,
+      long count,
+      bool no_tile_cfg = false) {
+    ScopedTimer _t(BRGEMM, func.flops() * count);
+    if (impl == 0) {
+      func(A, B, B_s, C, count, no_tile_cfg);
+    } else if (impl == 1) {
+    } else {
+      printf("invalid impl requested\n");
+      exit(1);
+    }
+  }
+
   void config(void* ptr = nullptr) {
     func.config(ptr);
   }
@@ -188,6 +205,23 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout, Tw>, impl> {
       func(A, B, C, count, no_tile_cfg);
     } else if (impl == 1) {
       func.ref(A, B, C, count, no_tile_cfg);
+    } else {
+      printf("invalid impl requested\n");
+      exit(1);
+    }
+  }
+
+  void operator()(
+      Tin* A,
+      Tw* B,
+      Tw* B_s,
+      Tout* C,
+      long count,
+      bool no_tile_cfg = false) {
+    ScopedTimer _t(BRGEMM, func.flops() * count);
+    if (impl == 0) {
+      func(A, B, B_s, C, count, no_tile_cfg);
+    } else if (impl == 1) {
     } else {
       printf("invalid impl requested\n");
       exit(1);
