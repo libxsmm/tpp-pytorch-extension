@@ -1,24 +1,25 @@
-/*  MIT License
-    Copyright (c) Microsoft Corporation.
-
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
-
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE
- */
+//  MIT License
+//  Copyright (c) Microsoft Corporation.
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a copy
+//   of this software and associated documentation files (the "Software"), to deal
+//   in the Software without restriction, including without limitation the rights
+//   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//   copies of the Software, and to permit persons to whom the Software is
+//   furnished to do so, subject to the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included in all
+//   copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//   SOFTWARE
+//
+// This is a modified version of the routines here: https://github.com/microsoft/microxcaling/blob/main/mx/cpp/funcs.cpp
 
 
 #include <stdio.h>
@@ -339,6 +340,99 @@ void quantize_mx_func_cpp(
             rounding_mode, true, true);
 
         B_data[A_i] = scaled_out * scale;
+      }
+    }
+  }
+  return;
+}
+
+void quantize_mx_scale_func_cpp(
+    float *A, // Input tensor
+    unsigned char *B, // Output tensor
+    unsigned char *scf,
+    int axis_size,
+    int pre_axis_size,
+    int post_axis_size,
+    int scale_bits,
+    int elem_ebits,
+    int elem_mbits,
+    float elem_max_norm,
+    float *max_values,  // Max values in each block
+    const bool flush_fp32_subnorms,
+    const int rmode = 0 ) {
+  // Explicitly cast int to enum
+  RoundingMode rounding_mode = static_cast<RoundingMode>(rmode);
+
+  // Get data pointers
+  auto max_value_data = max_values;
+  auto A_data = A;
+
+  // Loop over dimension before shared axis
+  for (int i = 0; i < pre_axis_size; i++) {
+    // Loop over dimension after shared axis
+    for (int j = 0; j < post_axis_size; j++) {
+      // Get shared exponent
+      const long m_i = i * post_axis_size + j;
+      int shared_exp = (int) get_biased_exponent(max_value_data[m_i]);
+      bool flush_tile = (shared_exp == 0 && flush_fp32_subnorms);
+      unsigned int scale_int;
+      unsigned char scale_uchar;
+      unsigned int *scale_ptr;
+
+      // Compute the shared scale
+      const float scale = mx_get_shared_scale(
+          shared_exp, scale_bits, elem_max_norm);
+
+      scale_ptr = (unsigned int*)&scale;
+      scale_int = *scale_ptr;
+      scale_int = ((scale_int << 1) >> 24);
+      scale_uchar = (unsigned char)scale_int;
+      scf[0] = scale_uchar;
+
+      // Loop over axis
+      for (int k = 0; k < axis_size; k++) {
+        int A_i = i * post_axis_size * axis_size +
+          k * post_axis_size + j;
+
+        float scaled_in = (flush_tile) ? 0 : A_data[A_i] / scale;
+
+        float scaled_out = quantize_elemwise(
+            scaled_in, elem_mbits, elem_ebits, elem_max_norm,
+            rounding_mode, true, true);
+
+        if (scaled_out == 0.0) {
+          B[A_i] = 0;
+        } else if (scaled_out == 0.5) {
+          B[A_i] = 1;
+        } else if (scaled_out == 1.0) {
+          B[A_i] = 2;
+        } else if (scaled_out == 1.5) {
+          B[A_i] = 3;
+        } else if (scaled_out == 2.0) {
+          B[A_i] = 4;
+        } else if (scaled_out == 3.0) {
+          B[A_i] = 5;
+        } else if (scaled_out == 4.0) {
+          B[A_i] = 6;
+        } else if (scaled_out == 6.0) {
+          B[A_i] = 7;
+        } else if (scaled_out == -0.0) {
+          B[A_i] = 8;
+        } else if (scaled_out == -0.5) {
+          B[A_i] = 9;
+        } else if (scaled_out == -1.0) {
+          B[A_i] = 10;
+        } else if (scaled_out == -1.5) {
+          B[A_i] = 11;
+        } else if (scaled_out == -2.0) {
+          B[A_i] = 12;
+        } else if (scaled_out == -3.0) {
+          B[A_i] = 13;
+        } else if (scaled_out == -4.0) {
+          B[A_i] = 14;
+        } else if (scaled_out == -6.0) {
+          B[A_i] = 15;
+        }
       }
     }
   }

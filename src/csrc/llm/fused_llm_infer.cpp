@@ -26,6 +26,8 @@
 using namespace tpp;
 #include "shm_coll.h"
 #include "tensor_helper.h"
+#include "mxfp_quant.hpp"
+#include <libxsmm_utils.h>
 
 #define S_FIRST_KVC
 #define PER_THREAD_COPY
@@ -129,6 +131,81 @@ static inline void allreduce(at::Tensor t_in) {
   } else {
     shm_allreduce(t_in, process_group);
   }
+}
+
+inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
+  std::vector<at::Tensor> t_out_vec;
+  //t_in = t_in.contiguous();
+  auto in_sizes = t_in.sizes().vec();
+  auto mxfp4_wt_sizes = t_in.sizes().vec();
+  auto scale_sizes = t_in.sizes().vec();
+  auto ndim = t_in.dim();
+
+  mxfp4_wt_sizes[ndim-1] = mxfp4_wt_sizes[ndim-1]/2;
+  mxfp4_wt_sizes[ndim-3] = mxfp4_wt_sizes[ndim-3]/2;
+  scale_sizes[ndim-1] = scale_sizes[ndim-1]/2;
+  scale_sizes[ndim-3] = scale_sizes[ndim-3]/32;
+
+  auto t_out = t_in.new_empty(mxfp4_wt_sizes);
+  auto t_scf = t_in.new_empty(scale_sizes);
+
+  //printf("The weight tensor has %d dims: ", ndim);
+  //for (int i = 0; i < ndim-1; i++) {
+  //  printf("%d x ", in_sizes[i]);
+  //} 
+  //printf("%d\n", in_sizes[ndim-1]);
+  
+  int quant_block = 32;
+
+  auto _in = GetVLAPtr<bfloat16>(t_in, {1});
+  auto _out = GetVLAPtr<bfloat16>(t_out, {1});
+  auto _scf = GetVLAPtr<bfloat16>(t_scf, {1});
+  
+  bfloat16 *in_ptr = (bfloat16*)_in[0];
+  unsigned char *out_ptr = (unsigned char*)_out[0];
+  unsigned char *scf_ptr = (unsigned char*)_scf[0];
+  
+  long Kb = in_sizes[0];
+  long Cb = in_sizes[1];
+  long bc = in_sizes[2] * in_sizes[4];
+  long bk = in_sizes[3];
+
+#pragma omp parallel for
+  for (int i = 0; i < Kb; i++) {
+    for (int j = 0; j < Cb; j++) {
+      for (int l = 0; l < bk; l++) {
+        for (int k = 0; k < bc/32; k++) {
+          bfloat16 tmp_arr[32];
+          float input_chunk[32];
+          unsigned char mxfp4_vals[32];
+          unsigned char scf;
+          for (int kk = 0; kk < 32; kk++) {
+            int logical_k = k * 32 + kk;
+            tmp_arr[kk] = *((bfloat16*)in_ptr + i * (Cb*bc*bk) + j * (bc*bk) + (logical_k/2) * bk * 2 + l * 2 + (logical_k%2));
+          }
+          libxsmm_convert_bf16_f32( (libxsmm_bfloat16*)tmp_arr, (float*)input_chunk, 32 );
+          float max_val = find_max(input_chunk, quant_block);
+          quantize_mx_scale_func_cpp( input_chunk, mxfp4_vals, &scf, quant_block, 1, 1, 8, 2, 3, 6.0, &max_val, true, 2);
+          for (int kk = 0; kk < 32; kk++) {
+            int logical_k = k * 32 + kk;
+            if (logical_k % 2 == 0) {
+              unsigned char lo = mxfp4_vals[kk];
+              unsigned char hi = mxfp4_vals[kk+1];
+              unsigned char combined = (hi << 4) | lo;
+              unsigned char *dst  = (unsigned char*)out_ptr + i * (Cb*(bc/2)*bk) + j * ((bc/2)*bk) + (logical_k/2) * (bk/2) * 2 + l;
+              *dst = combined;
+            }
+          }
+          unsigned char *dst_scf  = (unsigned char*)scf_ptr + i * (Cb*(bc/32)*bk) + j * ((bc/32)*bk) + k * bk + l;
+          *dst_scf = scf;
+        }
+      }
+    }  
+  }
+  t_out_vec.push_back(t_out);
+  t_out_vec.push_back(t_scf);
+
+  return t_out_vec;
 }
 
 inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
@@ -644,7 +721,7 @@ class TppBlockedLinearW_MX {
         Tw *wt_ptr = wt_V[0][0];
         Tw *sc_ptr = wt_S[0][0];
         wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/4 + nc*(Hc*Hk)/4);      
-        sc_ptr = (Tw*)wt_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
+        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
         brgemm_tpp(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, true);
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
@@ -661,7 +738,7 @@ class TppBlockedLinearW_MX {
         Tw *wt_ptr = wt_V[0][0];
         Tw *sc_ptr = wt_S[0][0];
         wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/4 + nc*(Hc*Hk)/4);      
-        sc_ptr = (Tw*)wt_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
+        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
         brgemm_tpp_rem(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, false);
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
@@ -3051,6 +3128,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
 
     t_EP = params[i++]; // embed_positions
 
+#if 0
     t_Wq_mxfp4 = t_Wq;
     t_Wk_mxfp4 = t_Wk;
     t_Wv_mxfp4 = t_Wv;
@@ -3066,6 +3144,37 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
     t_Wg_scf = t_Wg;
     t_Wu_scf = t_Wu;
     t_Wd_scf = t_Wd;
+#else
+    if (use_mxfp4 > 0) {
+      auto cvt_q = mxfp4_quant(t_Wq);
+      t_Wq_mxfp4 = cvt_q[0];
+      t_Wq_scf = cvt_q[1];
+
+      auto cvt_k = mxfp4_quant(t_Wk);
+      t_Wk_mxfp4 = cvt_k[0];
+      t_Wk_scf = cvt_k[1];
+
+      auto cvt_v = mxfp4_quant(t_Wv);
+      t_Wv_mxfp4 = cvt_v[0];
+      t_Wv_scf = cvt_v[1];
+
+      auto cvt_p = mxfp4_quant(t_Wp);
+      t_Wp_mxfp4 = cvt_p[0];
+      t_Wp_scf = cvt_p[1];
+
+      auto cvt_g = mxfp4_quant(t_Wg);
+      t_Wg_mxfp4 = cvt_g[0];
+      t_Wg_scf = cvt_g[1];
+
+      auto cvt_u = mxfp4_quant(t_Wu);
+      t_Wu_mxfp4 = cvt_u[0];
+      t_Wu_scf = cvt_u[1];
+
+      auto cvt_d = mxfp4_quant(t_Wd);
+      t_Wd_mxfp4 = cvt_d[0];
+      t_Wd_scf = cvt_d[1];
+    }
+#endif
 
     Nq = t_Wq.size(0) * t_Wq.size(3) / H;
     Nkv = t_Wk.size(0) * t_Wk.size(3) / H;
