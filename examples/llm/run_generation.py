@@ -166,6 +166,11 @@ if args.device == "hpu":
     import habana_frameworks.torch as ht
 
 # dtype
+tpp_dtype = getattr(torch, args.dtype)
+# AMP doesn't work for Half on CPU so adding workaround
+if args.use_tpp and tpp_dtype == torch.half:
+    args.dtype = "float32"
+
 amp_enabled = True if args.dtype != "float32" else False
 amp_dtype = getattr(torch, args.dtype)
 
@@ -206,25 +211,25 @@ if args.use_tpp:
         from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
 
         OptimizeModelForGPTJ(
-            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
     elif model.config.architectures[0] == "OPTForCausalLM":
         from tpp_pytorch_extension.llm.fused_opt_infer import OptimizeModelForOPT
 
         OptimizeModelForOPT(
-            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
     elif model.config.architectures[0] == "LLaMAForCausalLM":
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
         OptimizeModelForLlama(
-            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
     elif model.config.architectures[0] == "LlamaForCausalLM":
         from tpp_pytorch_extension.llm.fused_llama_infer import OptimizeModelForLlama
 
         OptimizeModelForLlama(
-            model, dtype=amp_dtype, device=device, weight_dtype=weight_dtype
+            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
     else:
         print(type(model.config.architectures))

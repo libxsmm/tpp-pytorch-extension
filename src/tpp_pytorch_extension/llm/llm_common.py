@@ -480,19 +480,24 @@ def ShardLinear(m, dim, rank, size, block_size=1):
         dim_size % block_size == 0
     ), f"dim_size ({dim_size}) is not multiple of block_size ({block_size})"
     num_blocks = dim_size // block_size
-    split_size = ((num_blocks + size - 1) // size) * block_size
-    m.split_sizes = [split_size] * size
-    m.split_sizes[-1] -= split_size * size - dim_size
-    # print(m.split_sizes)
-    assert sum(m.split_sizes) == dim_size, "Sum of split sizes doesn't match dim size"
-    # m.weight.data = torch.chunk(m.weight.data, size, dim)[rank].contiguous()
-    m.weight.data = torch.split(m.weight.data, split_size, dim)[rank].contiguous()
+    split_offsets = [0] + [
+        ((num_blocks * (i + 1)) // size) * block_size for i in range(size)
+    ]
+    start = split_offsets[rank]
+    end = split_offsets[rank + 1]
+    m.split_sizes = [split_offsets[i + 1] - split_offsets[i] for i in range(size)]
+    # if rank == 0:
+    #     print(f"ShardLinear: offsets: {split_offsets}")
+    #     print(f"ShardLinear: split_sizes: {m.split_sizes}")
+    if dim == 0:
+        m.weight.data = m.weight.data[start:end, :].contiguous()
+    else:
+        m.weight.data = m.weight.data[:, start:end].contiguous()
     if m.weight.is_meta:
         m.weight = torch.nn.Parameter(torch.empty_like(m.weight.data, device="cpu"))
     if m.bias is not None:
         if dim == 0:
-            # m.bias.data = torch.chunk(m.bias.data, size, dim)[rank].contiguous()
-            m.bias.data = torch.split(m.bias.data, split_size, dim)[rank].contiguous()
+            m.bias.data = m.bias.data[start:end].contiguous()
         else:
             m.bias.data = m.bias.data / size
         if m.bias.is_meta:

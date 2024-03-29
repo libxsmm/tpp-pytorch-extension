@@ -10,3 +10,4 @@
 
 from . import Alpha_Attention
 from . import Alpha_TriangleMultiplication
+from . import Alpha_FusedTriangleMultiplication
