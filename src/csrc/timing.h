@@ -258,5 +258,6 @@ class ScopedTPP {
 #define RECORD_SCOPE(scope, ...) \
   GlobalScope gs_(sc_##scope);   \
   RECORD_FUNCTION(#scope, std::vector<c10::IValue>(__VA_ARGS__))
+#define SCOPE_ARG(scope) sc_##scope, #scope
 #define RECORD_OMP_TIME() OMPScope os_
 #endif //_BERT_TIMING_H_
