@@ -134,6 +134,7 @@ sources = [
     "src/csrc/xsmm.cpp",
     "src/csrc/shm_coll.cpp",
     "src/csrc/common_loops.cpp",
+    "src/csrc/qtypes.cpp",
 ]
 
 # AlphaFold sources
