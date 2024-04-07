@@ -3181,6 +3181,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer
     if (my_rank == 0) {
       std::cout << "my_size=" << my_size << " Nq=" << Nq << " Nkv=" << Nkv
                 << " wt dt=" << dt
+                << " USE_MXFP4 = " << use_mxfp4
 
                 << " H=" << H << std::endl;
     }
