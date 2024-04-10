@@ -914,7 +914,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   if (dim < 5)
     return t;
   auto sizes = t.sizes();
-  constexpr long RBS = 4;
+  constexpr long RBS = 2;
   auto K1 = sizes[0];
   if (K1 % RBS != 0)
     return t;
@@ -922,7 +922,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   auto C2 = sizes[2];
   auto K2 = sizes[3];
   auto C3 = sizes[4];
-  if (K2 >= 32)
+  if (K2 >= 64)
     return t;
 #if 0
   auto t_new = t.view({K1/RBS, RBS, C1, C2, K2, C3}).permute({0, 2, 3, 1, 4, 5}).contiguous().view({K1/RBS, C1, C2, RBS*K2, C3});
