@@ -17,6 +17,7 @@
 #endif
 
 double ifreq = 1.0 / getFreq();
+static int TPP_DEBUG_TIMER_RANK = env2int("TPP_DEBUG_TIMER_RANK", 0);
 
 #ifdef DEBUG_TRACE_TPP
 int tpp_debug_trace = env2int("TPP_DEBUG_TRACE", 0);
@@ -76,7 +77,7 @@ void reset_debug_timers() {
 
 void print_debug_timers(int tid, bool detailed) {
   int my_rank = guess_mpi_rank();
-  if (my_rank != 0)
+  if (my_rank != TPP_DEBUG_TIMER_RANK && TPP_DEBUG_TIMER_RANK != -1)
     return;
   int max_threads = omp_get_max_threads();
   constexpr int maxlen = 10000;
