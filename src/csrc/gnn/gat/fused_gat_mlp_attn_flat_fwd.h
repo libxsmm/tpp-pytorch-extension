@@ -13,11 +13,11 @@ RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
 at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias = at::empty(0);
 int i = 0;
 
-t_in_mlp = inputs[i++]; 
-t_wt = inputs[i++]; 
-t_attn_3d = inputs[i++]; 
+t_in_mlp = inputs[i++];
+t_wt = inputs[i++];
+t_attn_3d = inputs[i++];
 if (add_bias)
-  t_bias = inputs[i++]; 
+  t_bias = inputs[i++];
 
 auto in_sizes = t_in_mlp.sizes();
 auto wt_sizes = t_wt.sizes();
@@ -90,7 +90,7 @@ if (add_bias) {
         brgemm_tpp.config();
 
         for (int k = 0; k < nk; k++) {
-          for (int r = nn*bn; r < nn*bn+rem; r++)
+          for (int r = nn * bn; r < nn * bn + rem; r++)
             cpy_bias_tpp(bias[k], out[r][k]);
           brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
         }

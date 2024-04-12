@@ -40,6 +40,7 @@ torch.autograd.set_detect_anomaly(False)
 
 USE_BF16_PARAMS = True
 
+
 class DummyLinear(BlockedModule):
     def __init__(self, in_features, out_features, bias=True):
         super(DummyLinear, self).__init__()
@@ -126,14 +127,10 @@ class GATMLPAttentionFunction(torch.autograd.Function):
 
         if fuse_bias:
             (mlp_inp, wt, attn, bias) = inputs
-            (mlp_out, attn_out) = fused_gat_cpp.fused_gat_mlp_attn_fwd(
-                align, 1, inputs
-            )
+            (mlp_out, attn_out) = fused_gat_cpp.fused_gat_mlp_attn_fwd(align, 1, inputs)
         else:
             (mlp_inp, wt, attn) = inputs
-            (mlp_out, attn_out) = fused_gat_cpp.fused_gat_mlp_attn_fwd(
-                align, 0, inputs
-            )
+            (mlp_out, attn_out) = fused_gat_cpp.fused_gat_mlp_attn_fwd(align, 0, inputs)
 
         ctx.save_for_backward(mlp_out, attn, mlp_inp, wt)  # attn_input = mlp_out
         ctx.align = align
@@ -152,7 +149,9 @@ class GATMLPAttentionFunction(torch.autograd.Function):
                 grad_wt,
                 grad_attn,
                 grad_bias,
-            ) = fused_gat_cpp.fused_gat_mlp_attn_bwd(ctx.align, 1 if ctx.inp_needs_grad else 0, 1, inputs)
+            ) = fused_gat_cpp.fused_gat_mlp_attn_bwd(
+                ctx.align, 1 if ctx.inp_needs_grad else 0, 1, inputs
+            )
         else:
             grad_inp, grad_wt, grad_attn = fused_gat_cpp.fused_gat_mlp_attn_bwd(
                 ctx.align, 1 if ctx.inp_needs_grad else 0, 0, inputs
@@ -165,7 +164,7 @@ class GATMLPAttentionFunction(torch.autograd.Function):
 
 class GATMLPFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, fuse_bias, inp_needs_grad,  *inputs):
+    def forward(ctx, align, fuse_bias, inp_needs_grad, *inputs):
 
         if fuse_bias:
             (inp, wt, bias) = inputs
@@ -191,7 +190,9 @@ class GATMLPFunction(torch.autograd.Function):
             )
             return (None, None, None, grad_inp, grad_wt, grad_bias)
         else:
-            grad_inp, grad_wt = fused_gat_cpp.fused_mlp_bwd(ctx.align, 1 if ctx.inp_needs_grad else 0, 0, inputs)
+            grad_inp, grad_wt = fused_gat_cpp.fused_mlp_bwd(
+                ctx.align, 1 if ctx.inp_needs_grad else 0, 0, inputs
+            )
             return (None, None, None, grad_inp, grad_wt)
 
 
@@ -327,7 +328,8 @@ class FusedBiasReLUFn(torch.autograd.Function):
     def forward(ctx, inp, bias, training):
         inputs = [inp, bias]
         (out, rmask) = fused_gat_cpp.bias_relu_fwd(inputs)
-        if training: ctx.save_for_backward(rmask)
+        if training:
+            ctx.save_for_backward(rmask)
 
         return out
 
@@ -339,6 +341,7 @@ class FusedBiasReLUFn(torch.autograd.Function):
 
         return (grad_inp, grad_bias, None)
 
+
 class FusedBiasReLU(nn.Module):
     def __init__(self):
         super(FusedBiasReLU, self).__init__()
@@ -346,6 +349,7 @@ class FusedBiasReLU(nn.Module):
     def forward(self, inp, bias):
         output = FusedBiasReLUFn.apply(inp, bias, self.training)
         return output
+
 
 class FusedBiasReLUDropFn(torch.autograd.Function):
     @staticmethod
@@ -445,6 +449,7 @@ class FusedBiasLeakyReLUDrop(nn.Module):
         )
         return output
 
+
 class FusedBiasLeakyReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, bias, alpha, training):
@@ -460,11 +465,10 @@ class FusedBiasLeakyReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp, grad_bias = fused_gat_cpp.bias_lrelu_bwd(
-            inputs, ctx.alpha
-        )
+        grad_inp, grad_bias = fused_gat_cpp.bias_lrelu_bwd(inputs, ctx.alpha)
 
         return (grad_inp, grad_bias, None, None)
+
 
 class FusedBiasLeakyReLU(nn.Module):
     __constants__ = ["alpha"]
@@ -482,6 +486,7 @@ class FusedBiasLeakyReLU(nn.Module):
             inp, bias, self.alpha, self.training, self.align
         )
         return output
+
 
 class FusedReLUDropFn(torch.autograd.Function):
     @staticmethod
@@ -714,7 +719,9 @@ class GATConvOpt(BlockedModule):
                     [0, 2, 3, 1],
                 )
             )
-            self.fc_dst = DummyLinear(self._in_dst_feats, out_feats * num_heads, bias=False)
+            self.fc_dst = DummyLinear(
+                self._in_dst_feats, out_feats * num_heads, bias=False
+            )
             self.fc_dst.weight.set_blocking_param(
                 (
                     [self.bk, self.bc],
@@ -769,7 +776,7 @@ class GATConvOpt(BlockedModule):
             self.fuse_src_bias = False
             self.fuse_dst_bias = False
 
-        if bias and not(self.fuse_src_bias and self.fc_dst_bias):
+        if bias and not (self.fuse_src_bias and self.fc_dst_bias):
             self.bias = BlockedParameter(
                 torch.FloatTensor(size=(num_heads * out_feats,))
             )
@@ -949,7 +956,7 @@ class GATConvOpt(BlockedModule):
                         self.fuse_dst_bias,
                         self.inp_needs_grad,
                         *inputs_dst,
-                    )  
+                    )
                     feat_dst = feat_dst_.view(
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
@@ -987,7 +994,7 @@ class GATConvOpt(BlockedModule):
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
             else:
-                assert(hasattr(self, "fc"))
+                assert hasattr(self, "fc")
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
                 h_src = feat
                 inputs_src = [h_src, self.fc.weight, self.attn_l]
@@ -1006,11 +1013,11 @@ class GATConvOpt(BlockedModule):
                 )
 
                 if graph.is_block:
-                   feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
-                   h_dst = h_dst[: graph.number_of_dst_nodes()]
-                   dst_prefix_shape = (
-                       graph.number_of_dst_nodes(),
-                   ) + dst_prefix_shape[1:]
+                    feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
+                    h_dst = h_dst[: graph.number_of_dst_nodes()]
+                    dst_prefix_shape = (
+                        graph.number_of_dst_nodes(),
+                    ) + dst_prefix_shape[1:]
 
             inputs_dst = [feat_dst, self.attn_r]
             N = feat_dst.size(0)
@@ -1045,7 +1052,7 @@ class GATConvOpt(BlockedModule):
                 rst = self.act_drop(rst)
             elif self.activation is not None:
                 rst = self.activation(rst)
-            
+
             rst = rst.view(*dst_prefix_shape, self._num_heads, self._out_feats)
 
             if get_attention:
@@ -1116,7 +1123,7 @@ class GATConvOptBF16(GATConvOpt):
             self.attn_r.data = self.attn_r.to(torch.bfloat16)
             if self.set_explicit_bias:
                 self.bias.data = self.bias.to(torch.bfloat16)
-            else: 
+            else:
                 if not match_pyg_gatconv:
                     if self.fc_src.bias is not None:
                         self.fc_src.bias.data = self.fc_src.bias.to(torch.bfloat16)

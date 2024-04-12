@@ -336,7 +336,9 @@ std::vector<at::Tensor> bias_relu_drop_bwd(
 // ######################################## Fused Bias Add with LeakyReLU
 // ################################################
 
-std::vector<at::Tensor> bias_lrelu_fwd(std::vector<at::Tensor> inputs, float alpha) {
+std::vector<at::Tensor> bias_lrelu_fwd(
+    std::vector<at::Tensor> inputs,
+    float alpha) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
@@ -347,7 +349,9 @@ std::vector<at::Tensor> bias_lrelu_fwd(std::vector<at::Tensor> inputs, float alp
   }
 }
 
-std::vector<at::Tensor> bias_lrelu_bwd(std::vector<at::Tensor> inputs, float alpha) {
+std::vector<at::Tensor> bias_lrelu_bwd(
+    std::vector<at::Tensor> inputs,
+    float alpha) {
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;

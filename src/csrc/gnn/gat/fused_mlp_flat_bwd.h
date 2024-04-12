@@ -185,8 +185,7 @@ auto brgemm_dw_bf16_tpp_b1 =
   }
 }
 
-if(inp_needs_grad)
-{
+if (inp_needs_grad) {
   RECORD_SCOPE(gmdi_gemm, {t_grad_out, t_grad_in});
   {
     if (bk != bkp) {

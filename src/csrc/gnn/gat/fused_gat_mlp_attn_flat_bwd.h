@@ -292,8 +292,7 @@ if (add_bias) {
   }
 }
 
-if(inp_needs_grad)
-{
+if (inp_needs_grad) {
   RECORD_SCOPE(ga_fused_din, {t_grad_out, t_grad_in});
   {
     if (bk != bkp) {
