@@ -46,7 +46,7 @@ auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
 auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
 
 {
-  RECORD_SCOPE(gao_gemm, {t_in, t_wt_V});
+  RECORD_SCOPE(gmo_gemm, {t_in, t_wt_V});
   {
     if (add_bias) {
       auto bias = GetVLAPtr<T>(t_bias, {bk});

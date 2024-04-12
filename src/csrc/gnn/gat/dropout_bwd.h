@@ -24,7 +24,7 @@ if (p > 0.0) {
 
   auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(BS, p), DROPOUT);
   {
-    RECORD_SCOPE(gado_dropout, {t_grad_out});
+    RECORD_SCOPE(gdo_drop, {t_grad_out});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
       long n;

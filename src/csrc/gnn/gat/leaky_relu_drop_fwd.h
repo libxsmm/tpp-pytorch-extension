@@ -30,7 +30,7 @@ if (training) {
   auto leaky_relu_fwd_tpp = SCOPEIT(LeakyReLUFwdTPP<T>(BS, alpha), ACT);
   auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(BS, p), DROPOUT);
   {
-    RECORD_SCOPE(gao_lrelu_drop, {t_in});
+    RECORD_SCOPE(go_lrelu_drop, {t_in});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
       long n;

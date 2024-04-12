@@ -29,21 +29,21 @@ const int BS = 256; // Define the block size
 auto relu_bwd_tpp = SCOPEIT(ReLUBwdTPP<T>(BS, true), ACT);
 auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(BS, p), DROPOUT);
 {
-  RECORD_SCOPE(gado_relu_drop, {t_grad_out});
+  RECORD_SCOPE(gdo_relu_drop, {t_grad_out});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
     long n;
 #pragma omp parallel for lastprivate(n)
     for (n = 0; n < ALIGNDOWN(N, BS); n += BS) {
-      relu_bwd_tpp(&grad_out[n], &grad_in[n], (T*)NULL, &relu_mask[n / 16]);
-      dropout_bwd_tpp(&grad_in[n], &grad_in[n], &dp_mask[n / 16]);
+      dropout_bwd_tpp(&grad_out[n], &grad_in[n], &dp_mask[n / 16]);
+      relu_bwd_tpp(&grad_in[n], &grad_in[n], (T*)NULL, &relu_mask[n / 16]);
     }
 
     if (n < N) {
       auto relu_bwd_tpp = SCOPEIT(ReLUBwdTPP<T>(N - n, true), ACT);
       auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(N - n, p), DROPOUT);
-      relu_bwd_tpp(&grad_out[n], &grad_in[n], (T*)NULL, &relu_mask[n / 16]);
-      dropout_bwd_tpp(&grad_in[n], &grad_in[n], &dp_mask[n / 16]);
+      dropout_bwd_tpp(&grad_out[n], &grad_in[n], &dp_mask[n / 16]);
+      relu_bwd_tpp(&grad_in[n], &grad_in[n], (T*)NULL, &relu_mask[n / 16]);
     }
   }
 }

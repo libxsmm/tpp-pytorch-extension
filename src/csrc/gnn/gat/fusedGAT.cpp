@@ -28,16 +28,17 @@ static int my_rank = guess_mpi_rank();
 REGISTER_SCOPE(gao_gemm, "gao_gemm");
 REGISTER_SCOPE(gadi_gemm, "gadi_gemm");
 REGISTER_SCOPE(gadw_gemm, "gadw_gemm");
+REGISTER_SCOPE(gmo_gemm, "gmo_gemm");
+REGISTER_SCOPE(gmdi_gemm, "gmdi_gemm");
+REGISTER_SCOPE(gmdw_gemm, "gmdw_gemm");
 REGISTER_SCOPE(gobias, "gobias");
-REGISTER_SCOPE(gadbias, "gadbias");
-REGISTER_SCOPE(gao_dropout, "gao_dropout");
-REGISTER_SCOPE(gado_dropout, "gado_dropout");
+REGISTER_SCOPE(gm_dbias, "gm_dbias");
+REGISTER_SCOPE(go_drop, "go_drop");
+REGISTER_SCOPE(gdo_drop, "gdo_drop");
 REGISTER_SCOPE(go_lrelu, "go_lrelu");
 REGISTER_SCOPE(gdo_lrelu, "gdo_lrelu");
 REGISTER_SCOPE(go_relu, "go_relu");
 REGISTER_SCOPE(gdo_relu, "gdo_relu");
-REGISTER_SCOPE(go_bias_relu, "go_bias_relu");
-REGISTER_SCOPE(gdo_bias_relu, "gdo_bias_relu");
 REGISTER_SCOPE(go_add_bias, "go_add_bias");
 REGISTER_SCOPE(gdo_add_bias, "gdo_add_bias");
 REGISTER_SCOPE(go_attn, "go_attn");
@@ -55,14 +56,18 @@ REGISTER_SCOPE(ga_fused_din, "ga_fused_din");
 REGISTER_SCOPE(gao_gemm_attn, "gao_gemm_attn");
 REGISTER_SCOPE(gadi_gemm_attn, "gadi_gemm_attn");
 REGISTER_SCOPE(gadw_gemm_attn, "gadw_gemm_attn");
-REGISTER_SCOPE(gao_relu_drop, "gao_relu_drop");
-REGISTER_SCOPE(gado_relu_drop, "gado_relu_drop");
-REGISTER_SCOPE(gao_lrelu_drop, "gao_lrelu_drop");
-REGISTER_SCOPE(gado_lrelu_drop, "gado_lrelu_drop");
-REGISTER_SCOPE(go_bias_relu_drop, "gao_bias_relu_drop");
-REGISTER_SCOPE(gdo_bias_relu_drop, "gado_bias_relu_drop");
-REGISTER_SCOPE(go_bias_lrelu_drop, "gao_bias_lrelu_drop");
-REGISTER_SCOPE(gdo_bias_lrelu_drop, "gado_bias_lrelu_drop");
+REGISTER_SCOPE(go_relu_drop, "go_relu_drop");
+REGISTER_SCOPE(gdo_relu_drop, "gdo_relu_drop");
+REGISTER_SCOPE(go_lrelu_drop, "go_lrelu_drop");
+REGISTER_SCOPE(gdo_lrelu_drop, "gdo_lrelu_drop");
+REGISTER_SCOPE(go_bias_relu_drop, "go_bias_relu_drop");
+REGISTER_SCOPE(gdo_bias_relu_drop, "gdo_bias_relu_drop");
+REGISTER_SCOPE(go_bias_lrelu_drop, "go_bias_lrelu_drop");
+REGISTER_SCOPE(gdo_bias_lrelu_drop, "gdo_bias_lrelu_drop");
+REGISTER_SCOPE(go_bias_relu, "go_bias_relu");
+REGISTER_SCOPE(gdo_bias_relu, "gdo_bias_relu");
+REGISTER_SCOPE(go_bias_lrelu, "go_bias_lrelu");
+REGISTER_SCOPE(gdo_bias_lrelu, "gdo_bias_lrelu");
 
 // ######################################## FUSED GAT MLP & ATTENTION
 // ################################################
@@ -83,6 +88,7 @@ std::vector<at::Tensor> fused_gat_mlp_attn_fwd(
 
 std::vector<at::Tensor> fused_gat_mlp_attn_bwd(
     long align,
+    int inp_needs_grad,
     int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
@@ -111,6 +117,7 @@ at::Tensor fused_mlp_fwd(
 
 std::vector<at::Tensor> fused_mlp_bwd(
     long align,
+    int inp_needs_grad,
     int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
@@ -323,6 +330,35 @@ std::vector<at::Tensor> bias_relu_drop_bwd(
   } else {
     typedef bfloat16 T;
 #include "bias_relu_drop_bwd.h"
+  }
+}
+
+// ######################################## Fused Bias Add with LeakyReLU
+// ################################################
+
+std::vector<at::Tensor> bias_lrelu_fwd(
+    std::vector<at::Tensor> inputs,
+    float alpha) {
+  GlobalPass _gp(FWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_lrelu_fwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_lrelu_fwd.h"
+  }
+}
+
+std::vector<at::Tensor> bias_lrelu_bwd(
+    std::vector<at::Tensor> inputs,
+    float alpha) {
+  GlobalPass _gp(BWD);
+  if (inputs[0].dtype() == at::kFloat) {
+    typedef float T;
+#include "bias_lrelu_bwd.h"
+  } else {
+    typedef bfloat16 T;
+#include "bias_lrelu_bwd.h"
   }
 }
 
