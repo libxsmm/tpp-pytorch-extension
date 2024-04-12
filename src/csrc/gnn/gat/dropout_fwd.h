@@ -24,7 +24,7 @@ if (training && p > 0.0) {
 
   auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(BS, p), DROPOUT);
   {
-    RECORD_SCOPE(gao_dropout, {t_in});
+    RECORD_SCOPE(go_drop, {t_in});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
       long n;

@@ -24,11 +24,11 @@ auto relu_mask = t_relu_mask.data_ptr<short>();
 auto dp_mask = t_dp_mask.data_ptr<short>();
 const int BS = 256; // Define the block size
 
-if (training) {
+if (training && p > 0) {
   auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(BS, true), ACT);
   auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(BS, p), DROPOUT);
   {
-    RECORD_SCOPE(gao_relu_drop, {t_in});
+    RECORD_SCOPE(go_relu_drop, {t_in});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
       long n;

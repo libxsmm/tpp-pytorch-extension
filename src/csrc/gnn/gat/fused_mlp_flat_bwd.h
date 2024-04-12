@@ -62,7 +62,7 @@ const auto input_trans_flag =
 
 auto t_wt_TV = wt_tensor_for_bwd(nk, bk, nc, bc, t_wt);
 
-auto t_grad_in = t_in.new_empty({N, C});
+auto t_grad_in = inp_needs_grad ? t_in.new_empty({N, C}) : t_in.new_empty(0);
 
 auto t_grad_wt = at::empty_like(t_wt);
 at::Tensor t_grad_wt_tmp;
@@ -142,7 +142,7 @@ auto brgemm_dw_bf16_tpp_b1 =
              float>(bc, bk, bnp, bc* bnp, bk* bnp, bnp, bk, bk, 1.0, 0, 16)));
 
 {
-  RECORD_SCOPE(ga_dbias, {t_grad_out, t_grad_bias});
+  RECORD_SCOPE(gm_dbias, {t_grad_out, t_grad_bias});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
     if (add_bias) {
@@ -185,8 +185,9 @@ auto brgemm_dw_bf16_tpp_b1 =
   }
 }
 
+if(inp_needs_grad)
 {
-  RECORD_SCOPE(ga_din, {t_grad_out, t_grad_in});
+  RECORD_SCOPE(gmdi_gemm, {t_grad_out, t_grad_in});
   {
     if (bk != bkp) {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
@@ -293,7 +294,7 @@ auto trans_tpp = SCOPEIT(
         T>(bn, bc, bc, bnp, nc* bc, bnp, XformTPP::XFORM_XPOSE_TPP, true),
     XPOSE);
 {
-  RECORD_SCOPE(gadw_gemm, {t_in, t_grad_out});
+  RECORD_SCOPE(gmdw_gemm, {t_in, t_grad_out});
   {
     if (nn > 0) {
       int upd_n_weight_copies;

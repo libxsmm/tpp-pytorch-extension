@@ -12,13 +12,12 @@ RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
 
 at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias = at::empty(0);
 int i = 0;
-// #define PRINT_T(x) std::cout << #x << "==: " << x.sizes() << std::endl
 
-t_in_mlp = inputs[i++]; // [N, C]
-t_wt = inputs[i++]; // [nk, nc, bc, bk]
-t_attn_3d = inputs[i++]; // [1, H, F]
+t_in_mlp = inputs[i++]; 
+t_wt = inputs[i++]; 
+t_attn_3d = inputs[i++]; 
 if (add_bias)
-  t_bias = inputs[i++]; // [K]
+  t_bias = inputs[i++]; 
 
 auto in_sizes = t_in_mlp.sizes();
 auto wt_sizes = t_wt.sizes();
@@ -53,7 +52,7 @@ if (add_bias) {
   auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
       bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-  auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, bk), BIAS);
+  auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
 
   {
     RECORD_SCOPE(gao_gemm, {t_in_mlp, t_wt_V});
@@ -86,13 +85,13 @@ if (add_bias) {
         auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, bk), BIAS);
+        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
 
         brgemm_tpp.config();
 
         for (int k = 0; k < nk; k++) {
-          for (int r = 0; r < rem; r++)
-            cpy_bias_tpp(bias[k], out[nn * bn + r][k]);
+          for (int r = nn*bn; r < nn*bn+rem; r++)
+            cpy_bias_tpp(bias[k], out[r][k]);
           brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
         }
         brgemm_tpp.release();

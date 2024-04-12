@@ -8,7 +8,7 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("relu_drop_bwd", std::vector<c10::IValue>());
+RECORD_FUNCTION("lrelu_drop_bwd", std::vector<c10::IValue>());
 
 int i = 0;
 auto t_grad_out = inputs[i++];
@@ -31,7 +31,7 @@ const int BS = 256; // Define the block size
 auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(BS, alpha), ACT);
 auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(BS, p), DROPOUT);
 {
-  RECORD_SCOPE(gado_lrelu_drop, {t_grad_out});
+  RECORD_SCOPE(gdo_lrelu_drop, {t_grad_out});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
     long n;

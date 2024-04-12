@@ -96,7 +96,7 @@ const auto input_trans_flag =
 
 auto t_wt_TV = wt_tensor_for_bwd(nk, bk, nc, bc, t_wt);
 
-auto t_grad_in = t_in.new_empty({N, C});
+auto t_grad_in = inp_needs_grad ? t_in.new_empty({N, C}) : t_in.new_empty(0);
 
 auto t_grad_wt = at::empty_like(t_wt);
 at::Tensor t_grad_wt_tmp;
@@ -292,6 +292,7 @@ if (add_bias) {
   }
 }
 
+if(inp_needs_grad)
 {
   RECORD_SCOPE(ga_fused_din, {t_grad_out, t_grad_in});
   {
