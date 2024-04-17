@@ -133,6 +133,7 @@ static inline void allreduce(at::Tensor t_in) {
   }
 }
 
+#if 0
 inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
   std::vector<at::Tensor> t_out_vec;
   //t_in = t_in.contiguous();
@@ -206,6 +207,150 @@ inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
   t_out_vec.push_back(t_scf);
 
   return t_out_vec;
+}
+#else
+inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
+  std::vector<at::Tensor> t_out_vec;
+  //t_in = t_in.contiguous();
+  auto in_sizes = t_in.sizes().vec();
+  auto mxfp4_wt_sizes = t_in.sizes().vec();
+  auto scale_sizes = t_in.sizes().vec();
+  auto ndim = t_in.dim();
+
+  //for (int i = 0; i < ndim; i++) {
+  //  printf("Dim %d is %d\n", i , mxfp4_wt_sizes[i]);
+  //}
+  //mxfp4_wt_sizes[ndim-1] = mxfp4_wt_sizes[ndim-1]/8;
+  //scale_sizes[ndim-1] = scale_sizes[ndim-1]/4;
+  //scale_sizes[ndim-2] = scale_sizes[ndim-2]/32;
+
+  auto t_out = t_in.new_empty(mxfp4_wt_sizes);
+  auto t_scf = t_in.new_empty(scale_sizes);
+
+  //printf("The weight tensor has %d dims: ", ndim);
+  //for (int i = 0; i < ndim-1; i++) {
+  //  printf("%d x ", in_sizes[i]);
+  //} 
+  //printf("%d\n", in_sizes[ndim-1]);
+  
+  int quant_block = 32;
+
+  auto _in = GetVLAPtr<float>(t_in, {1});
+  auto _out = GetVLAPtr<float>(t_out, {1});
+  auto _scf = GetVLAPtr<float>(t_scf, {1});
+  
+  float *in_ptr = (float*)_in[0];
+  unsigned char *out_ptr = (unsigned char*)_out[0];
+  unsigned char *scf_ptr = (unsigned char*)_scf[0];
+  
+  long Kb = in_sizes[0];
+  long Cb = in_sizes[1];
+  long bc = in_sizes[2];
+  long bk = in_sizes[3];
+
+#pragma omp parallel for
+  for (int i = 0; i < Kb; i++) {
+    for (int j = 0; j < Cb; j++) {
+      for (int l = 0; l < bk; l++) {
+        for (int k = 0; k < bc/32; k++) {
+          float input_chunk[32];
+          unsigned char mxfp4_vals[32];
+          unsigned char scf;
+          for (int kk = 0; kk < 32; kk++) {
+            input_chunk[kk] = *((float*)in_ptr + i * (Cb*bc*bk) + j * (bc*bk) + (k * 32 + kk) * bk + l);
+          }
+          float max_val = find_max(input_chunk, quant_block);
+          quantize_mx_scale_func_cpp( input_chunk, mxfp4_vals, &scf, quant_block, 1, 1, 8, 2, 3, 6.0, &max_val, true, 2);
+          for (int kk = 0; kk < 32; kk++) {
+            int logical_k = k * 32 + kk;
+            if (logical_k % 2 == 0) {
+              unsigned char lo = mxfp4_vals[kk];
+              unsigned char hi = mxfp4_vals[kk+1];
+              unsigned char combined = (hi << 4) | lo;
+              unsigned char *dst  = (unsigned char*)out_ptr + i * (Cb*(bc/2)*bk) + j * ((bc/2)*bk) + (logical_k/2) * (bk/2) * 2 + l;
+              *dst = combined;
+            }
+          }
+          unsigned char *dst_scf  = (unsigned char*)scf_ptr + i * (Cb*(bc/32)*bk) + j * ((bc/32)*bk) + k * bk + l;
+          *dst_scf = scf;
+        }
+      }
+    }  
+  }
+  t_out_vec.push_back(t_out);
+  t_out_vec.push_back(t_scf);
+
+  return t_out_vec;
+}
+#endif
+
+void brgemm_microkernel_8m_4n_32k(unsigned char *a_ptr, unsigned char *scf_ptr, float *b_ptr, float *c_ptr, long ldb, long ldc, long brcount) {
+  long i_br, i_k;
+  __m256 acc00, acc01, acc02, acc03;
+  __m256 lut_mant = _mm256_set_ps(6.0f, 4.0f, 3.0f, 2.0f, 1.5f, 1.0f, 0.5f, 0.0f);
+  __m256 lut_sign = _mm256_set_ps(-0.0f, 0.0f, -0.0f, 0.0f, -0.0f, 0.0f, -0.0f, 0.0f);
+  __m256i scale_vreg0;
+  __m256 m_vreg_k0, m_vreg_k1;
+  __m256 n_vreg_k0, n_vreg_k1;
+  __m256 tmp_vreg;
+  __m256 acc0, acc1, acc2, acc3;
+
+  /* Load 8x4 C output */
+  acc00 = _mm256_setzero_ps();//_mm256_loadu_ps((float*)c_ptr + (0 + 0 * 8));
+  acc01 = _mm256_setzero_ps();//_mm256_loadu_ps((float*)c_ptr + (0 + 1 * 8));
+  acc02 = _mm256_setzero_ps();//_mm256_loadu_ps((float*)c_ptr + (0 + 2 * 8));
+  acc03 = _mm256_setzero_ps();//_mm256_loadu_ps((float*)c_ptr + (0 + 3 * 8));
+
+  /* batch reduce iteration */
+  for (i_br = 0; i_br < brcount; i_br++) {
+    /* Load scale factors for 32 K values */
+    scale_vreg0 = _mm256_cvtepu8_epi32(_mm_loadu_si64((unsigned char*)scf_ptr + (0 + i_br * 8)));
+    scale_vreg0 = _mm256_slli_epi32(scale_vreg0, 23);
+    acc0 = _mm256_setzero_ps();
+    acc1 = _mm256_setzero_ps();
+    acc2 = _mm256_setzero_ps();
+    acc3 = _mm256_setzero_ps();
+    for (i_k = 0; i_k < 16; i_k++) {
+      /* Load for 8m2k and 8 fmas */
+      m_vreg_k0 = (__m256)_mm256_cvtepu8_epi32(_mm_loadl_epi64( (const __m128i*)((unsigned char*)a_ptr + i_k * 8 + i_br * 128)));
+      m_vreg_k1 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k0, 4);
+      tmp_vreg  = _mm256_permutevar8x32_ps(lut_mant, (__m256i)m_vreg_k0);
+      m_vreg_k0 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k0, 3);
+      m_vreg_k0 = _mm256_permutevar8x32_ps(lut_sign, (__m256i)m_vreg_k0);
+      m_vreg_k0 = _mm256_or_ps(m_vreg_k0, tmp_vreg);
+      tmp_vreg  = _mm256_permutevar8x32_ps(lut_mant, (__m256i)m_vreg_k1);
+      m_vreg_k1 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k1, 3);
+      m_vreg_k1 = _mm256_permutevar8x32_ps(lut_sign, (__m256i)m_vreg_k1);
+      m_vreg_k1 = _mm256_or_ps(m_vreg_k1, tmp_vreg);
+      n_vreg_k0 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 0 + 0 * ldb + i_br * 32));
+      n_vreg_k1 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 1 + 0 * ldb + i_br * 32));
+      acc0     = _mm256_fmadd_ps(m_vreg_k0, n_vreg_k0, acc0);
+      acc0     = _mm256_fmadd_ps(m_vreg_k1, n_vreg_k1, acc0);
+      n_vreg_k0 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 0 + 1 * ldb + i_br * 32));
+      n_vreg_k1 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 1 + 1 * ldb + i_br * 32));
+      acc1     = _mm256_fmadd_ps(m_vreg_k0, n_vreg_k0, acc1);
+      acc1     = _mm256_fmadd_ps(m_vreg_k1, n_vreg_k1, acc1);
+      n_vreg_k0 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 0 + 2 * ldb + i_br * 32));
+      n_vreg_k1 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 1 + 2 * ldb + i_br * 32));
+      acc2     = _mm256_fmadd_ps(m_vreg_k0, n_vreg_k0, acc2);
+      acc2     = _mm256_fmadd_ps(m_vreg_k1, n_vreg_k1, acc2);
+      n_vreg_k0 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 0 + 3 * ldb + i_br * 32));
+      n_vreg_k1 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 1 + 3 * ldb + i_br * 32));
+      acc3     = _mm256_fmadd_ps(m_vreg_k0, n_vreg_k0, acc3);
+      acc3     = _mm256_fmadd_ps(m_vreg_k1, n_vreg_k1, acc3);
+    }
+    acc00     = _mm256_fmadd_ps((__m256)scale_vreg0, acc0, acc00);
+    acc01     = _mm256_fmadd_ps((__m256)scale_vreg0, acc1, acc01);
+    acc02     = _mm256_fmadd_ps((__m256)scale_vreg0, acc2, acc02);
+    acc03     = _mm256_fmadd_ps((__m256)scale_vreg0, acc3, acc03);
+  }
+
+  /* Store 8x4 C output */
+  _mm256_store_ps((float*)c_ptr + (0 + 0 * ldc), acc00);
+  _mm256_store_ps((float*)c_ptr + (0 + 1 * ldc), acc01);
+  _mm256_store_ps((float*)c_ptr + (0 + 2 * ldc), acc02);
+  _mm256_store_ps((float*)c_ptr + (0 + 3 * ldc), acc03);
+  return;
 }
 
 inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
@@ -527,7 +672,7 @@ class TppBlockedLinearW {
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
 
-    loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : GEMM_LOOP_SCHEME;
   }
   template <typename T1 = Tout>
   VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor& t) {
@@ -669,11 +814,11 @@ class TppBlockedLinearW_MX {
     zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
     zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
     brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, 2)));
+        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, 2)));
+        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
 
-    loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : "aCb";
+    loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : GEMM_LOOP_SCHEME;
   }
   template <typename T1 = Tout>
   VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor& t) {
@@ -720,9 +865,13 @@ class TppBlockedLinearW_MX {
         }
         Tw *wt_ptr = wt_V[0][0];
         Tw *sc_ptr = wt_S[0][0];
-        wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/4 + nc*(Hc*Hk)/4);      
-        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
+        wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/8 + nc*(Hc*Hk)/8);      
+        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/4 + nc*((Hc/32)*Hk)/4);
+#if 0
         brgemm_tpp(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, true);
+#else
+        brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+#endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
             postOpCB(out, s1, nk, false);
@@ -737,9 +886,13 @@ class TppBlockedLinearW_MX {
         }
         Tw *wt_ptr = wt_V[0][0];
         Tw *sc_ptr = wt_S[0][0];
-        wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/4 + nc*(Hc*Hk)/4);      
-        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
+        wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/8 + nc*(Hc*Hk)/8);      
+        sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/4 + nc*((Hc/32)*Hk)/4);
+#if 0
         brgemm_tpp_rem(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, false);
+#else
+        brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+#endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
             postOpCB(out, s1, nk, true);
@@ -914,7 +1067,7 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   if (dim < 5)
     return t;
   auto sizes = t.sizes();
-  constexpr long RBS = 2;
+  constexpr long RBS = 4;
   auto K1 = sizes[0];
   if (K1 % RBS != 0)
     return t;
