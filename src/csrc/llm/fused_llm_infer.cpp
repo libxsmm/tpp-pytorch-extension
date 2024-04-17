@@ -220,9 +220,9 @@ inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
   //for (int i = 0; i < ndim; i++) {
   //  printf("Dim %d is %d\n", i , mxfp4_wt_sizes[i]);
   //}
-  //mxfp4_wt_sizes[ndim-1] = mxfp4_wt_sizes[ndim-1]/8;
-  //scale_sizes[ndim-1] = scale_sizes[ndim-1]/4;
-  //scale_sizes[ndim-2] = scale_sizes[ndim-2]/32;
+  mxfp4_wt_sizes[ndim-2] = mxfp4_wt_sizes[ndim-2]/8;
+  scale_sizes[1] = scale_sizes[1]/4;
+  scale_sizes[ndim-2] = scale_sizes[ndim-2]/32;
 
   auto t_out = t_in.new_empty(mxfp4_wt_sizes);
   auto t_scf = t_in.new_empty(scale_sizes);
@@ -247,6 +247,8 @@ inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
   long Cb = in_sizes[1];
   long bc = in_sizes[2];
   long bk = in_sizes[3];
+
+  //printf("Tensor with C = %d and K %d\n", Cb*bc, Kb*bk);
 
 #pragma omp parallel for
   for (int i = 0; i < Kb; i++) {
