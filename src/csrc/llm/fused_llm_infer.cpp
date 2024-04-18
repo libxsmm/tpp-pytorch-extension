@@ -705,8 +705,8 @@ class TppBlockedLinearW_MX_ext{
 
     Nc = wt_sizes[1];
     Hc = C / Nc;
-    Nk = wt_sizes[0];
-    Hk = wt_sizes[3];
+    Nk = wt_sizes[0]/2;
+    Hk = wt_sizes[3]*2;
     K = Nk * Hk;
 
     Ncb = Nc;
@@ -770,16 +770,31 @@ class TppBlockedLinearW_MX_ext{
       Tw *sc_ptr = wt_S[0][0];
       Tw *scratch_ptr = wt_scratch[0][0];
 
-      wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/4 + nc*(Hc*Hk)/4);      
-      sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/2 + nc*((Hc/32)*Hk)/2);
+      wt_ptr = (Tw*)wt_ptr + ((2*nk+0)*(Nc*Hc*(Hk/2))/4 + nc*(Hc*(Hk/2))/4);      
+      sc_ptr = (Tw*)sc_ptr + ((2*nk+0)*(Nc*(Hc/32)*(Hk/2))/2 + nc*((Hc/32)*(Hk/2))/2);
       scratch_ptr = (Tw*)scratch_ptr + tid * Hc * Ncb * Hk;
       
       if (last_upcvt_slice != slice_id) {
-        //if (tid == 0) printf("Came to upconvert with bc = %d, bk_in = %d and bk_out = %d!!!\n", Hc, Hk, Hk);
+        //if (tid == 0) printf("Came to upconvert with bc = %d, bk_in = %d and bk_out = %d!!!\n", Hc, (Hk/2), Hk);
         cvt_kernel_mxfp4((unsigned char*)wt_ptr,
                          (unsigned char*)sc_ptr,
                          (libxsmm_bfloat16*)scratch_ptr,
-                         count, Hk, Hc, Hk); 
+                         count, (Hk/2), Hc, Hk);
+       
+        wt_ptr = wt_V[0][0];
+        sc_ptr = wt_S[0][0];
+        scratch_ptr = wt_scratch[0][0];     
+
+        wt_ptr = (Tw*)wt_ptr + ((2*nk+1)*(Nc*Hc*(Hk/2))/4 + nc*(Hc*(Hk/2))/4);      
+        sc_ptr = (Tw*)sc_ptr + ((2*nk+1)*(Nc*(Hc/32)*(Hk/2))/2 + nc*((Hc/32)*(Hk/2))/2); 
+        scratch_ptr = (Tw*)scratch_ptr + (tid * Hc * Ncb * Hk + Hk);
+
+        cvt_kernel_mxfp4((unsigned char*)wt_ptr,
+                         (unsigned char*)sc_ptr,
+                         (libxsmm_bfloat16*)scratch_ptr,
+                         count, (Hk/2), Hc, Hk);
+        scratch_ptr = wt_scratch[0][0];  
+        scratch_ptr = (Tw*)scratch_ptr + tid * Hc * Ncb * Hk; 
       }
 
       if (!is_rem) {
@@ -1836,7 +1851,7 @@ inline void fused_qkv_gemm(
       auto gemm_k = getTppBlockedLinearW_MX_ext<T, Tw, Tout>(t_in, t_wt[1], t_bias[1]);
       auto gemm_v = getTppBlockedLinearW_MX_ext<T, Tw, Tout>(t_in, t_wt[2], t_bias[2]);
 
-      totalN = t_wt[0].size(0) + t_wt[1].size(0) + t_wt[2].size(0);
+      totalN = (t_wt[0].size(0)/2) + (t_wt[1].size(0)/2) + (t_wt[2].size(0)/2);
       TPP_ASSERT(
           t_wt[0].size(3) == t_wt[1].size(3) && t_wt[1].size(3) == t_wt[2].size(3),
           "Fused QKV weight block mismatch\n");
