@@ -450,6 +450,56 @@ void affinitize_cores(const int nthreads, const int num_workers) {
   }
 }
 
+at::Tensor convert_1tb_file(std::string in_fn) {
+  int block = 32;
+  FILE* in_f = fopen(in_fn.c_str(), "rb");
+  fseek(in_f, 0L, SEEK_END);
+  long in_size = ftell(in_f);
+  rewind(in_f);
+  long elements = in_size / sizeof(float);
+  long rows = elements / 1024;
+  printf("file %s has %ld bytes and %ld rows\n", in_fn.c_str(), in_size, rows);
+  at::Tensor in_t = at::empty({rows, 1024});
+  at::Tensor out_t = at::empty({rows, 1024}, at::kBFloat16);
+  long nb = rows / block;
+  long rem = rows % block;
+
+  auto in_ptr = GetVLAPtr<float>(in_t, {block, 1024});
+  auto out_ptr = GetVLAPtr<bfloat16>(out_t, {block, 1024});
+
+  // fread((void*)in_p, sizeof(float), elements, in_f);
+  fclose(in_f);
+
+  auto cvt_in_out = ConvertTPP<float, bfloat16>(block, 1024);
+#pragma omp parallel
+  {
+    int nthreads = omp_get_num_threads();
+    int tid = omp_get_thread_num();
+    long work = nb % nthreads == 0 ? nb / nthreads : nb / nthreads + 1;
+    long tb = tid * work < nb ? tid * work : nb;
+    long te = (tid + 1) * work < nb ? (tid + 1) * work : nb;
+    FILE* f = fopen(in_fn.c_str(), "rb");
+    fseek(f, tb * sizeof(float), SEEK_SET);
+    for (long i = tb; i < te; i++) {
+      fread((void*)in_ptr[i][0], sizeof(float), block * 1024, f);
+      cvt_in_out(in_ptr[i][0], out_ptr[i][0]);
+    }
+    fclose(f);
+  }
+  if (rem > 0) {
+    auto in_ptr = GetVLAPtr<float>(in_t, {1024});
+    auto out_ptr = GetVLAPtr<bfloat16>(out_t, {1024});
+    auto cvt_in_out = ConvertTPP<float, bfloat16>(rem, 1024);
+    FILE* in_f = fopen(in_fn.c_str(), "rb");
+    fseek(in_f, nb * block * sizeof(float), SEEK_SET);
+    fread((void*)in_ptr[nb * block], sizeof(float), rem * 1024, in_f);
+    cvt_in_out(in_ptr[nb * block], out_ptr[nb * block]);
+    fclose(in_f);
+  }
+
+  return out_t;
+}
+
 REGISTER_SUBMODULE(_gnn_utils, m) {
   m.def("gather_features", &gather_features, "C++ Impl of feature gather");
   m.def("scatter_features", &scatter_features, "C++ Impl of feature scatter");
@@ -487,4 +537,8 @@ REGISTER_SUBMODULE(_gnn_utils, m) {
       &mapped_spmm_copy_lhs_add,
       "C++ impl of gspmm on halo feature graph (drpa)");
   m.def("affinitize_cores", &affinitize_cores, "Compute thread affinization");
+  m.def(
+      "convert_1tb_file",
+      &convert_1tb_file,
+      "Convert large float file to bf16");
 }

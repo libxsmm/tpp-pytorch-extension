@@ -120,6 +120,15 @@ def mapped_spmm_copy_lhs_add(dest, indptr, dind, sind, comms, source, edge, soff
     gnn_utils_cpp.mapped_spmm_copy_lhs_add(inputs, rank, soff)
 
 
+def convert_1tb_file(in_name, out_name):
+    out = gnn_utils_cpp.convert_1tb_file(in_name)
+
+    if out.dim() == 1:
+        rows = out.shape[0] // 1024
+        out = out.reshape(rows, 1024)
+    torch.save(out, out_name)
+
+
 def glorot_initializer(tensor: torch.Tensor):
     a = math.sqrt(6.0 / (tensor.size(-2) + tensor.size(-1)))
     tensor.data.uniform_(-a, a)
