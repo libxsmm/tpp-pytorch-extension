@@ -457,7 +457,6 @@ at::Tensor convert_1tb_file(std::string in_fn) {
   long in_size = ftell(in_f);
   rewind(in_f);
   long elements = in_size / sizeof(float);
-  long out_size = elements * sizeof(bfloat16);
   long rows = elements / 1024;
   printf("file %s has %ld bytes and %ld rows\n", in_fn.c_str(), in_size, rows);
   at::Tensor in_t = at::empty({rows, 1024});
@@ -465,10 +464,8 @@ at::Tensor convert_1tb_file(std::string in_fn) {
   long nb = rows / block;
   long rem = rows % block;
 
-  auto in_p = in_t.data_ptr<float>();
   auto in_ptr = GetVLAPtr<float>(in_t, {block, 1024});
   auto out_ptr = GetVLAPtr<bfloat16>(out_t, {block, 1024});
-  auto out_p = out_t.data_ptr<bfloat16>();
 
   // fread((void*)in_p, sizeof(float), elements, in_f);
   fclose(in_f);
