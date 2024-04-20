@@ -25,6 +25,8 @@ from contextlib import contextmanager
 from typing import Optional, List, Tuple, Union
 import transformers
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.cache_utils import Cache, DynamicCache, StaticCache
 
 from .llm_common import (
     BlockedLinear,
@@ -65,6 +67,8 @@ class LlamaDecoderLayer(BlockedModule):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Tuple[
         torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
     ]:
@@ -223,11 +227,14 @@ def FixLlamaDecoderLayer(
         ]  # since bias is False
 
         if hasattr(self.self_attn, "rotary_emb"):
+            position_ids = torch.arange(
+                self.self_attn.max_position_embeddings
+            ).unsqueeze(0)
             embed_positions = (
                 torch.cat(
                     self.self_attn.rotary_emb(
                         self.self_attn.q_proj.weight,
-                        self.self_attn.max_position_embeddings,
+                        position_ids,
                     ),
                     dim=0,
                 )
@@ -252,6 +259,11 @@ def FixLlamaDecoderLayer(
 def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
     set_pg()
 
+    model.config._attn_implementation = "tpp"
+    if hasattr(model.config, "attention_bias"):
+        assert (
+            model.config.attention_bias == False
+        ), "attention_bias is not supported for Llama yet!"
     if weight_dtype is None:
         weight_dtype = dtype
     for m in model.modules():
@@ -260,6 +272,9 @@ def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
         elif isinstance(m, torch.nn.Linear):
             if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
                 FixLinear(m, 100, 64, dtype, parallel_dim=1, block_size=64)
+                block(m)
+            elif m.weight.shape[0] % 64 == 0 and m.weight.shape[1] % 64 == 0:
+                FixLinear(m, 64, 64, dtype, parallel_dim=1, block_size=64)
                 block(m)
     for m in model.modules():
         for name in m._parameters.keys():
@@ -271,6 +286,133 @@ def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
                 torch.empty_like(m._parameters[name], device=device), **kwargs
             )
 
+
+def LlamaModel_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[List[torch.FloatTensor]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    output_attentions = False
+    output_hidden_states = False
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError(
+            "You cannot specify both input_ids and inputs_embeds at the same time, and must specify either one"
+        )
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    past_seen_tokens = 0
+    if use_cache:  # kept for BC (cache positions)
+        if not isinstance(past_key_values, StaticCache):
+            # past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            if past_key_values is not None:
+                past_seen_tokens = past_key_values[0][0].shape[-2]
+            else:
+                past_seen_tokens = 0
+
+    if cache_position is None:
+        if isinstance(past_key_values, StaticCache):
+            raise ValueError(
+                "cache_position is a required argument when using StaticCache."
+            )
+        cache_position = torch.arange(
+            past_seen_tokens,
+            past_seen_tokens + inputs_embeds.shape[1],
+            device=inputs_embeds.device,
+        )
+
+    if position_ids is None:
+        position_ids = cache_position.unsqueeze(0)
+
+    causal_mask = self._update_causal_mask(
+        attention_mask, inputs_embeds, cache_position, past_seen_tokens
+    )
+
+    # embed positions
+    hidden_states = inputs_embeds
+
+    # decoder layers
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    next_decoder_cache = () if use_cache else None
+
+    for idx, decoder_layer in enumerate(self.layers):
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        past_key_value = past_key_values[idx] if past_key_values is not None else None
+
+        if self.gradient_checkpointing and self.training:
+            layer_outputs = self._gradient_checkpointing_func(
+                decoder_layer.__call__,
+                hidden_states,
+                causal_mask,
+                position_ids,
+                past_key_value,
+                output_attentions,
+                use_cache,
+                cache_position,
+            )
+        else:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+            )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+
+        if output_attentions:
+            all_self_attns += (layer_outputs[1],)
+
+    hidden_states = self.norm(hidden_states)
+
+    # add hidden states from the last decoder layer
+    if output_hidden_states:
+        all_hidden_states += (hidden_states,)
+
+    next_cache = None
+    if use_cache:
+        next_cache = next_decoder_cache if use_cache else None
+        # next_cache = (
+        #    next_decoder_cache.to_legacy_cache() if isinstance(next_decoder_cache, Cache) else next_decoder_cache
+        # )
+    if not return_dict:
+        return tuple(
+            v
+            for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+            if v is not None
+        )
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+    )
+
+
+transformers.models.llama.modeling_llama.LlamaModel.forward = LlamaModel_forward
 
 transformers.models.llama.modeling_llama.LlamaForCausalLM._reorder_cache = staticmethod(
     _reorder_cache
@@ -287,6 +429,7 @@ def LlamaForCausalLM_forward_patched(
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     past_key_values: Optional[List[torch.FloatTensor]] = None,
+    cache_position: Optional[torch.LongTensor] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
     use_cache: Optional[bool] = None,
@@ -296,6 +439,7 @@ def LlamaForCausalLM_forward_patched(
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     output_attentions = False
     output_hidden_states = False
+
     return_dict = (
         return_dict if return_dict is not None else self.config.use_return_dict
     )
@@ -317,9 +461,11 @@ def LlamaForCausalLM_forward_patched(
         output_attentions=output_attentions,
         output_hidden_states=output_hidden_states,
         return_dict=return_dict,
+        cache_position=cache_position,
     )
 
     hidden_states = outputs[0]
+
     # We only need logits for last token doing text generation
     if only_last_logit == True and labels is None:
         hidden_states = hidden_states[:, -1:, :]
