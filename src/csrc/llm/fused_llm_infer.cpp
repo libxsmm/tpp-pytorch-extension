@@ -355,6 +355,51 @@ void brgemm_microkernel_8m_4n_32k(unsigned char *a_ptr, unsigned char *scf_ptr, 
   return;
 }
 
+void brgemm_microkernel_8m_1n_32k(unsigned char *a_ptr, unsigned char *scf_ptr, float *b_ptr, float *c_ptr, long ldb, long ldc, long brcount) {
+  long i_br, i_k;
+  __m256 acc00;
+  __m256 lut_mant = _mm256_set_ps(6.0f, 4.0f, 3.0f, 2.0f, 1.5f, 1.0f, 0.5f, 0.0f);
+  __m256 lut_sign = _mm256_set_ps(-0.0f, 0.0f, -0.0f, 0.0f, -0.0f, 0.0f, -0.0f, 0.0f);
+  __m256i scale_vreg0;
+  __m256 m_vreg_k0, m_vreg_k1;
+  __m256 n_vreg_k0, n_vreg_k1;
+  __m256 tmp_vreg;
+  __m256 acc0;
+
+  /* Load 8x1 C output */
+  acc00 = _mm256_setzero_ps();//_mm256_loadu_ps((float*)c_ptr + (0 + 0 * 8));
+
+  /* batch reduce iteration */
+  for (i_br = 0; i_br < brcount; i_br++) {
+    /* Load scale factors for 32 K values */
+    scale_vreg0 = _mm256_cvtepu8_epi32(_mm_loadu_si64((unsigned char*)scf_ptr + (0 + i_br * 8)));
+    scale_vreg0 = _mm256_slli_epi32(scale_vreg0, 23);
+    acc0 = _mm256_setzero_ps();
+    for (i_k = 0; i_k < 16; i_k++) {
+      /* Load for 8m2k and 8 fmas */
+      m_vreg_k0 = (__m256)_mm256_cvtepu8_epi32(_mm_loadl_epi64( (const __m128i*)((unsigned char*)a_ptr + i_k * 8 + i_br * 128)));
+      m_vreg_k1 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k0, 4);
+      tmp_vreg  = _mm256_permutevar8x32_ps(lut_mant, (__m256i)m_vreg_k0);
+      m_vreg_k0 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k0, 3);
+      m_vreg_k0 = _mm256_permutevar8x32_ps(lut_sign, (__m256i)m_vreg_k0);
+      m_vreg_k0 = _mm256_or_ps(m_vreg_k0, tmp_vreg);
+      tmp_vreg  = _mm256_permutevar8x32_ps(lut_mant, (__m256i)m_vreg_k1);
+      m_vreg_k1 = (__m256)_mm256_srli_epi32((__m256i)m_vreg_k1, 3);
+      m_vreg_k1 = _mm256_permutevar8x32_ps(lut_sign, (__m256i)m_vreg_k1);
+      m_vreg_k1 = _mm256_or_ps(m_vreg_k1, tmp_vreg);
+      n_vreg_k0 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 0 + 0 * ldb + i_br * 32));
+      n_vreg_k1 = _mm256_broadcast_ss((float*)b_ptr + (i_k * 2 + 1 + 0 * ldb + i_br * 32));
+      acc0     = _mm256_fmadd_ps(m_vreg_k0, n_vreg_k0, acc0);
+      acc0     = _mm256_fmadd_ps(m_vreg_k1, n_vreg_k1, acc0);
+    }
+    acc00     = _mm256_fmadd_ps((__m256)scale_vreg0, acc0, acc00);
+  }
+
+  /* Store 8x1 C output */
+  _mm256_store_ps((float*)c_ptr + (0 + 0 * ldc), acc00);
+  return;
+}
+
 inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
   RECORD_SCOPE(allred, {t_in});
   if (!process_group) {
@@ -872,7 +917,11 @@ class TppBlockedLinearW_MX {
 #if 0
         brgemm_tpp(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, true);
 #else
-        brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+        if ( BS == 1 ) {
+          brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+        } else {
+          brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+        }
 #endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
@@ -893,7 +942,11 @@ class TppBlockedLinearW_MX {
 #if 0
         brgemm_tpp_rem(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, false);
 #else
-        brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+        if ( BS == 1 ) {
+          brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+        } else {
+          brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+        }
 #endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
