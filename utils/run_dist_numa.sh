@@ -119,8 +119,11 @@ echo "#### INITIAL ENV ####"
 echo "PyTorch version: `python -c "import torch; print(torch.__version__)" 2> /dev/null`"
 
 export MASTER_ADDR="127.0.0.1"
-export MASTER_PORT=29500
+if test -z $MASTER_PORT ; then
+  export MASTER_PORT=29500
+fi
 echo "MASTER_ADDR=$MASTER_ADDR"
+echo "MASTER_PORT=$MASTER_PORT"
 
 CMD=$1
 shift

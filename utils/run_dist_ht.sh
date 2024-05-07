@@ -175,8 +175,11 @@ srun hostname | sort -u
 fi
 
 export MASTER_ADDR=`$PREFIX hostname`
-export MASTER_PORT=29500
+if test -z $MASTER_PORT ; then
+  export MASTER_PORT=29500
+fi
 echo "MASTER_ADDR=$MASTER_ADDR"
+echo "MASTER_PORT=$MASTER_PORT"
 
 CMD=$1
 shift
