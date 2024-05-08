@@ -17,6 +17,9 @@
 #define BS 512
 static const long TPP_SHM_BUF_SIZE =
     env2int("TPP_SHM_BUF_SIZE", 64 * 1024 * 1024);
+// Using master port to distinguist multiple distributed instances for setting
+// up shared memory
+static const long master_port = env2int("MASTER_PORT", 0);
 using namespace tpp;
 namespace shm_tpp {
 template <typename T, int S = BS>
@@ -50,8 +53,8 @@ TppOps<half> getOps<half>() {
 
 class SHMBuffer {
  public:
-  static const int SHMID = 100;
-  static const int BARID = 10000;
+  static int SHMID;
+  static int BARID;
   static const int MAX_RANKS = 64;
   static const int DIRECT_THRESHOLD = 32 * 1024;
   c10::intrusive_ptr<c10d::ProcessGroup> pg;
@@ -283,6 +286,9 @@ class SHMBuffer {
     }
   }
 };
+
+int SHMBuffer::SHMID = 100 + master_port;
+int SHMBuffer::BARID = 10000 + master_port;
 
 void shm_allreduce(
     at::Tensor t_in,
