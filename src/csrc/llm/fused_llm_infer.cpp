@@ -50,8 +50,11 @@ static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
-static const char* GEMM_LOOP_SCHEME =
-    getenv("GEMM_LOOP_SCHEME") ? getenv("GEMM_LOOP_SCHEME") : "aCB";
+static const char* GEMM_LOOP_SCHEME_REUSE =
+    getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
+static const char* GEMM_LOOP_SCHEME_STREAMING =
+    getenv("GEMM_LOOP_SCHEME_STREAMING") ? getenv("GEMM_LOOP_SCHEME_STREAMING")
+                                         : "aCb";
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
@@ -611,7 +614,8 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, b_vnni)));
 
-    loop_scheme = weight_reuse ? GEMM_LOOP_SCHEME : "aCb";
+    loop_scheme =
+        weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
   }
   std::function<void(int, int, int)> stepFunc(
       at::Tensor& t_in,
