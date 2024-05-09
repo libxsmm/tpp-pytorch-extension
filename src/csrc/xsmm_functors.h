@@ -2381,7 +2381,7 @@ class BrgemmTPP {
 
       if (p->a_trans == 1)
         l_flags |= LIBXSMM_GEMM_FLAG_TRANS_B;
-      if (brgemm_type != 0) {
+      if (brgemm_type != 0 || 1) {
         if (p->b_vnni)
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
         if (p->b_vnni == 2) {
@@ -2421,7 +2421,7 @@ class BrgemmTPP {
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = (p->b_vnni == 2) ? (p->str_b * sizeof(Tw))/4 : p->str_b * sizeof(Tw);
+      l_brconfig.br_stride_a_hint = (p->b_vnni == 2) ? (p->str_b)/2 : p->str_b * sizeof(Tw);
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
       l_brconfig.br_unroll_hint = p->unroll_hint;
 

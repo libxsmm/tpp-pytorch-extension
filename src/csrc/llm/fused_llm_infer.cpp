@@ -31,6 +31,7 @@ using namespace tpp;
 
 #define S_FIRST_KVC
 #define PER_THREAD_COPY
+#define USE_INTRINSICS
 
 static long get_batch_dim_in_kv_cache() {
 #ifdef S_FIRST_KVC
@@ -45,6 +46,7 @@ static int my_size = 1;
 static int large_cache_opt = false;
 static int TPP_CACHE_REMAPPED_WEIGHTS =
     env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
+static int use_jit_mxfp4 = env2int("USE_JIT_MXFP4", 1); 
 static int use_mxfp4 = env2int("USE_MXFP4", 0);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
@@ -286,6 +288,7 @@ inline std::vector<at::Tensor> mxfp4_quant(at::Tensor t_in) {
 }
 #endif
 
+#ifdef USE_INTRINSICS
 void brgemm_microkernel_8m_4n_32k(unsigned char *a_ptr, unsigned char *scf_ptr, float *b_ptr, float *c_ptr, long ldb, long ldc, long brcount) {
   long i_br, i_k;
   __m256 acc00, acc01, acc02, acc03;
@@ -399,6 +402,7 @@ void brgemm_microkernel_8m_1n_32k(unsigned char *a_ptr, unsigned char *scf_ptr, 
   _mm256_store_ps((float*)c_ptr + (0 + 0 * ldc), acc00);
   return;
 }
+#endif
 
 inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
   RECORD_SCOPE(allred, {t_in});
@@ -861,9 +865,9 @@ class TppBlockedLinearW_MX {
     zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
     zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
     brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, 2)));
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb)));
+        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, 2)));
 
     loop_scheme = large_cache_opt ? GEMM_LOOP_SCHEME : GEMM_LOOP_SCHEME;
   }
@@ -914,15 +918,15 @@ class TppBlockedLinearW_MX {
         Tw *sc_ptr = wt_S[0][0];
         wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/8 + nc*(Hc*Hk)/8);      
         sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/4 + nc*((Hc/32)*Hk)/4);
-#if 0
-        brgemm_tpp(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, true);
-#else
-        if ( BS == 1 ) {
-          brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+        if (use_jit_mxfp4 > 0) {
+          brgemm_tpp(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, true);
         } else {
-          brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+          if ( BS == 1 ) {
+            brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+          } else {
+            brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+          }
         }
-#endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
             postOpCB(out, s1, nk, false);
@@ -939,15 +943,15 @@ class TppBlockedLinearW_MX {
         Tw *sc_ptr = wt_S[0][0];
         wt_ptr = (Tw*)wt_ptr + (nk*(Nc*Hc*Hk)/8 + nc*(Hc*Hk)/8);      
         sc_ptr = (Tw*)sc_ptr + (nk*(Nc*(Hc/32)*Hk)/4 + nc*((Hc/32)*Hk)/4);
-#if 0
-        brgemm_tpp_rem(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, false);
-#else
-        if ( BS == 1 ) {
-          brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+        if (use_jit_mxfp4 > 0) {
+          brgemm_tpp_rem(in[s1][nc], wt_ptr, sc_ptr, out[s1][nk], count, false);
         } else {
-          brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+          if ( BS == 1 ) {
+            brgemm_microkernel_8m_1n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);     
+          } else {
+            brgemm_microkernel_8m_4n_32k((unsigned char*)wt_ptr, (unsigned char*)sc_ptr, (float*)in[s1][nc], (float*)out[s1][nk], C, K, count);
+          }
         }
-#endif
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCB)
             postOpCB(out, s1, nk, true);
