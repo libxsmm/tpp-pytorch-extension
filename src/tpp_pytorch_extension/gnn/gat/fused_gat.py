@@ -82,7 +82,7 @@ class MLPAttentionFunction(torch.autograd.Function):
             return (None, None, None, grad_inp, grad_wt, grad_attn)
 
 
-class GATMLPFunction(torch.autograd.Function):
+class MLPFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, fuse_bias, inp_needs_grad, *inputs):
 
@@ -135,6 +135,37 @@ class AttentionFunction(torch.autograd.Function):
         grad_inp, grad_attn = fused_gat_cpp.attn_bwd(ctx.align, inputs)
         return (None, grad_inp, grad_attn)
 
+class LinearOut(BlockedModule):
+    def __init__(self, in_features, out_features, layer_dtype, bias=True):
+        super(LinearOut, self).__init__()
+        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
+        if bias:
+            self.bias = BlockedParameter(torch.Tensor(out_features))
+        else:
+            self.register_parameter("bias", None)
+
+        self.bk = out_features
+        self.bc = 32
+        FixLinear(self, self.bk, self.bc, layer_dtype)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            init.uniform_(self.bias, -bound, bound)
+
+    def maybe_block_params(self):
+        self.weight.block()
+
+    def forward(self, input):
+        inputs = [input, self.weight, self.bias]
+        N = input.size(0)
+        align = 64 if (N > 64 or N == 0) else N
+        out = MLPFunction.apply(align, 1, 1, *inputs)
+
+        return out
 
 class GATConvOpt(BlockedModule):
     r"""
@@ -270,14 +301,13 @@ class GATConvOpt(BlockedModule):
         self.attn_l = BlockedParameter(
             torch.FloatTensor(size=(1, num_heads, out_feats))
         )
-        self.attn_l.set_blocking_param(None, None, layer_dtype)
+        self.attn_l.set_blocking_param((None, None, layer_dtype))
         self.attn_r = BlockedParameter(
             torch.FloatTensor(size=(1, num_heads, out_feats))
         )
-        self.attn_r.set_blocking_param(None, None, layer_dtype)
+        self.attn_r.set_blocking_param((None, None, layer_dtype))
 
-        self.feat_drop = Dropout(feat_drop)
-        self.attn_drop = Dropout(attn_drop)
+        self.attn_drop = torch.nn.Dropout(attn_drop)
 
         self.leaky_relu = LeakyReLU(negative_slope)
         if residual:
@@ -301,6 +331,8 @@ class GATConvOpt(BlockedModule):
 
         if bias and not (self.fuse_src_bias and self.fc_dst_bias):
             self.set_explicit_bias = True
+            self.bias = BlockedParameter(torch.FloatTensor(size=(num_heads*out_feats,)))
+            self.bias.set_blocking_param((None, None, layer_dtype))
         else:
             self.register_buffer("bias", None)
 
@@ -340,12 +372,24 @@ class GATConvOpt(BlockedModule):
 
         if hasattr(self, "fc"):
             self.fc.weight.block()
+            if self.fc.bias is not None:
+                self.fc.bias.block()
         else:
             self.fc_src.weight.block()
+            if self.fc_src.bias is not None:
+                self.fc_src.bias.block()
             self.fc_dst.weight.block()
+            if self.fc_dst.bias is not None:
+                self.fc_dst.bias.block()
+
+        self.attn_l.block()
+        self.attn_r.block()
 
         if self.res_fc is not None:
             self.res_fc.weight.block()
+
+        if self.bias is not None:
+            self.bias.block()
 
     def reset_parameters(self):
         """
@@ -443,7 +487,7 @@ class GATConvOpt(BlockedModule):
                 h_dst = feat[1]
 
                 if not hasattr(self, "fc"):
-                    assert(hasattr(self, fc_src) and hasattr(self, fc_dst))
+                    assert(hasattr(self, "fc_src") and hasattr(self, "fc_dst"))
                     inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                     if self.fuse_src_bias:
                         inputs_src.append(self.fc_src.bias)
@@ -504,7 +548,7 @@ class GATConvOpt(BlockedModule):
 
                     align = self.align if (N > self.align or N == 0) else N
 
-                    feat_dst_ = GATMLPFunction.apply(
+                    feat_dst_ = MLPFunction.apply(
                         align,
                         False,
                         self.inp_needs_grad,
@@ -552,11 +596,11 @@ class GATConvOpt(BlockedModule):
             # compute edge attention, el and er are a_l Wh_i and a_r Wh_j respectively.
             graph.apply_edges(fn.u_add_v("el", "er", "e"))
             e = self.leaky_relu(graph.edata.pop("e"))
+            etype = e.dtype
             # compute softmax
             graph.edata["a"] = self.attn_drop(edge_softmax(graph, e.float()))
 
-            if self.use_bf16:
-                graph.edata["a"] = graph.edata["a"].to(torch.bfloat16)
+            graph.edata["a"] = graph.edata["a"].to(etype)
 
             # message passing
             graph.update_all(fn.u_mul_e("ft", "a", "m"), fn.sum("m", "ft"))

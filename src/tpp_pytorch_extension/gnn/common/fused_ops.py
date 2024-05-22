@@ -25,6 +25,8 @@ from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedTensor,
 )
 from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
+from tpp_pytorch_extension._C import _fused_ops as fused_ops_cpp
+
 
 USE_LOW_PREC_PARAMS = True
 global_layer_dtype = torch.float32
@@ -67,88 +69,11 @@ def FixLinear(
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
 
-class LinearOut(BlockedModule):
-    def __init__(self, in_features, out_features, layer_dtype, bias=True):
-        super(LinearOut, self).__init__()
-        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
-        if bias:
-            self.bias = BlockedParameter(torch.Tensor(out_features))
-        else:
-            self.register_parameter("bias", None)
-
-        self.bk = out_features
-        self.bc = 32
-        FixLinear(self, self.bk, self.bc, layer_dtype)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            init.uniform_(self.bias, -bound, bound)
-
-    def maybe_block_params(self):
-        self.weight.block()
-
-    def forward(self, input):
-        inputs = [input, self.weight, self.bias]
-        N = input.size(0)
-        align = 64 if (N > 64 or N == 0) else N
-        out = GATMLPFunction.apply(align, 1, 1, *inputs)
-
-        return out
-
-#################Dropout##############
-class DropoutFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, p, inp, training):
-        outputs = fused_gat_cpp.gat_dropout_fwd(p, inp, training)
-        (out, dp_mask) = outputs
-        ctx.save_for_backward(dp_mask)
-        ctx.p = p
-        return out
-
-    @staticmethod
-    def backward(ctx, *grad_outs):
-        inputs = list(grad_outs)
-        inputs += ctx.saved_tensors
-        # breakpoint()
-        grad_inp = fused_gat_cpp.gat_dropout_bwd(ctx.p, inputs)
-        return (None, grad_inp, None)
-
-class Dropout_(nn.Module):
-    __constants__ = ["p", "inplace"]
-    p: float
-    inplace: bool
-
-    def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
-        super(Dropout_, self).__init__()
-        if p < 0 or p > 1:
-            raise ValueError(
-                "dropout probability has to be between 0 and 1, " "but got {}".format(p)
-            )
-        self.p = p
-        self.inplace = inplace
-
-    def extra_repr(self) -> str:
-        return "p={}, inplace={}".format(self.p, self.inplace)
-
-
-class Dropout(Dropout_):
-    r"""Train"""
-
-    def forward(self, input):
-        input = input.contiguous()
-        output = DropoutFunction.apply(self.p, input, self.training)
-
-        return output
-
 ##################LeakyReLU#################
 class LeakyReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, alpha, input):
-        (out, mask) = fused_gat_cpp.leakyrelu_fwd(alpha, input)
+        (out, mask) = fused_ops_cpp.leakyrelu_fwd(alpha, input)
         ctx.save_for_backward(input, mask)
         ctx.alpha = alpha
 
@@ -158,7 +83,7 @@ class LeakyReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp = fused_gat_cpp.leakyrelu_bwd(ctx.alpha, inputs)
+        grad_inp = fused_ops_cpp.leakyrelu_bwd(ctx.alpha, inputs)
 
         return (None, grad_inp)
 
@@ -180,7 +105,7 @@ class LeakyReLU(nn.Module):
 class ReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp):
-        (out, mask) = fused_gat_cpp.relu_fwd(inp)
+        (out, mask) = fused_ops_cpp.relu_fwd(inp)
         ctx.save_for_backward(mask)
 
         return out
@@ -189,7 +114,7 @@ class ReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp = fused_gat_cpp.relu_bwd(inputs)
+        grad_inp = fused_ops_cpp.relu_bwd(inputs)
 
         return grad_inp
 
@@ -211,7 +136,7 @@ class FusedBiasReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, bias, training):
         inputs = [inp, bias]
-        (out, rmask) = fused_gat_cpp.bias_relu_fwd(inputs)
+        (out, rmask) = fused_ops_cpp.bias_relu_fwd(inputs)
         if training:
             ctx.save_for_backward(rmask)
 
@@ -221,7 +146,7 @@ class FusedBiasReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp, grad_bias = fused_gat_cpp.bias_relu_bwd(inputs)
+        grad_inp, grad_bias = fused_ops_cpp.bias_relu_bwd(inputs)
 
         return (grad_inp, grad_bias, None)
 
@@ -241,10 +166,10 @@ class FusedBiasReLUDropFn(torch.autograd.Function):
     def forward(ctx, inp, bias, p, training):
         inputs = [inp, bias]
         if training and p > 0:
-            (out, rmask, dpmask) = fused_gat_cpp.bias_relu_drop_fwd(inputs, p, 1)
+            (out, rmask, dpmask) = fused_ops_cpp.bias_relu_drop_fwd(inputs, p, 1)
             ctx.save_for_backward(rmask, dpmask)
         else:
-            (out, rmask) = fused_gat_cpp.bias_relu_drop_fwd(inputs, p, 0)
+            (out, rmask) = fused_ops_cpp.bias_relu_drop_fwd(inputs, p, 0)
             ctx.save_for_backward(rmask)
         ctx.p = p
 
@@ -254,7 +179,7 @@ class FusedBiasReLUDropFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp, grad_bias = fused_gat_cpp.bias_relu_drop_bwd(inputs, ctx.p)
+        grad_inp, grad_bias = fused_ops_cpp.bias_relu_drop_bwd(inputs, ctx.p)
 
         return (grad_inp, grad_bias, None, None)
 
@@ -287,12 +212,12 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
         N = inp.size(0)
         align = align if (N > align or N == 0) else N
         if training and p > 0:
-            (out, rmask, dpmask) = fused_gat_cpp.bias_lrelu_drop_fwd(
+            (out, rmask, dpmask) = fused_ops_cpp.bias_lrelu_drop_fwd(
                 align, inputs, alpha, p, 1
             )
             ctx.save_for_backward(inp, rmask, dpmask)
         else:
-            (out, rmask) = fused_gat_cpp.bias_lrelu_drop_fwd(align, inputs, alpha, p, 0)
+            (out, rmask) = fused_ops_cpp.bias_lrelu_drop_fwd(align, inputs, alpha, p, 0)
             if training:
                 ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
@@ -305,7 +230,7 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp, grad_bias = fused_gat_cpp.bias_lrelu_drop_bwd(
+        grad_inp, grad_bias = fused_ops_cpp.bias_lrelu_drop_bwd(
             ctx.align, inputs, ctx.alpha, ctx.p
         )
 
@@ -341,7 +266,7 @@ class FusedBiasLeakyReLUFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, bias, alpha, training):
         inputs = [inp, bias]
-        (out, rmask) = fused_gat_cpp.bias_lrelu_fwd(inputs, alpha)
+        (out, rmask) = fused_ops_cpp.bias_lrelu_fwd(inputs, alpha)
         if training:
             ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
@@ -352,7 +277,7 @@ class FusedBiasLeakyReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp, grad_bias = fused_gat_cpp.bias_lrelu_bwd(inputs, ctx.alpha)
+        grad_inp, grad_bias = fused_ops_cpp.bias_lrelu_bwd(inputs, ctx.alpha)
 
         return (grad_inp, grad_bias, None, None)
 
@@ -379,7 +304,7 @@ class FusedBiasLeakyReLU(nn.Module):
 class FusedReLUDropFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, p, inp, training):
-        (out, rmask, dpmask) = fused_gat_cpp.relu_drop_fwd(p, inp, 1 if training else 0)
+        (out, rmask, dpmask) = fused_ops_cpp.relu_drop_fwd(p, inp, 1 if training else 0)
         if training:
             ctx.save_for_backward(rmask, dpmask)
             ctx.p = p
@@ -389,7 +314,7 @@ class FusedReLUDropFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp = fused_gat_cpp.relu_drop_bwd(ctx.p, inputs)
+        grad_inp = fused_ops_cpp.relu_drop_bwd(ctx.p, inputs)
         return (None, grad_inp, None)
 
 
@@ -419,7 +344,7 @@ class FusedReLUDrop(nn.Module):
 class FusedLeakyReLUDropFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, alpha, p, inp, training):
-        (out, rmask, dpmask) = fused_gat_cpp.leaky_relu_drop_fwd(
+        (out, rmask, dpmask) = fused_ops_cpp.leaky_relu_drop_fwd(
             alpha, p, inp, 1 if training else 0
         )
         if training:
@@ -433,7 +358,7 @@ class FusedLeakyReLUDropFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp = fused_gat_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
+        grad_inp = fused_ops_cpp.leaky_relu_drop_bwd(ctx.alpha, ctx.p, inputs)
         return (None, None, grad_inp, None)
 
 
@@ -467,14 +392,14 @@ class AddBiasFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inp, bias):
         inputs = [inp, bias]
-        out = fused_gat_cpp.add_bias_fwd(inputs)
+        out = fused_ops_cpp.add_bias_fwd(inputs)
 
         return out
 
     @staticmethod
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
-        grad_bias = fused_gat_cpp.add_bias_bwd(inputs)
+        grad_bias = fused_ops_cpp.add_bias_bwd(inputs)
 
         return (grad_outs[0], grad_bias)
 

@@ -154,12 +154,12 @@ auto H = attn_sizes[1]; // 4
 auto F = attn_sizes[2]; // 128
 
 auto t_out_attn = t_out_mlp.new_empty({N, H});
+auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
 
 auto t_attn = t_attn_3d.view({H * F});
+auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
 
 auto in_attn = GetVLAPtr<T>(t_out_mlp, {H, F});
-auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
-auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
 
 auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, T>(H, F)), EW_MUL);
 {
