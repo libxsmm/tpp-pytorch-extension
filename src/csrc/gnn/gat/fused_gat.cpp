@@ -53,9 +53,6 @@ REGISTER_SCOPE(ga_din, "ga_din");
 REGISTER_SCOPE(ga_fused_dattn, "ga_fused_dattn");
 REGISTER_SCOPE(ga_fused_dbias, "ga_fused_dbias");
 REGISTER_SCOPE(ga_fused_din, "ga_fused_din");
-REGISTER_SCOPE(gao_gemm_attn, "gao_gemm_attn");
-REGISTER_SCOPE(gadi_gemm_attn, "gadi_gemm_attn");
-REGISTER_SCOPE(gadw_gemm_attn, "gadw_gemm_attn");
 REGISTER_SCOPE(go_relu_drop, "go_relu_drop");
 REGISTER_SCOPE(gdo_relu_drop, "gdo_relu_drop");
 REGISTER_SCOPE(go_lrelu_drop, "go_lrelu_drop");
@@ -72,21 +69,29 @@ REGISTER_SCOPE(gdo_bias_lrelu, "gdo_bias_lrelu");
 // ######################################## FUSED GAT MLP & ATTENTION
 // ################################################
 
-std::vector<at::Tensor> fused_gat_mlp_attn_fwd(
+std::vector<at::Tensor> mlp_attn_fwd(
     long align,
     int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_gat_mlp_attn_flat_fwd.h"
-  } else {
+#include "mlp_attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_gat_mlp_attn_flat_fwd.h"
+#include "mlp_attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_attn_flat_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
-std::vector<at::Tensor> fused_gat_mlp_attn_bwd(
+std::vector<at::Tensor> mlp_attn_bwd(
     long align,
     int inp_needs_grad,
     int add_bias,
@@ -94,28 +99,44 @@ std::vector<at::Tensor> fused_gat_mlp_attn_bwd(
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_gat_mlp_attn_flat_bwd.h"
-  } else {
+#include "mlp_attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_gat_mlp_attn_flat_bwd.h"
+#include "mlp_attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_attn_flat_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
-at::Tensor fused_mlp_fwd(
+at::Tensor mlp_fwd(
     long align,
     int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_mlp_flat_fwd.h"
-  } else {
+#include "mlp_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_mlp_flat_fwd.h"
+#include "mlp_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_flat_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
-std::vector<at::Tensor> fused_mlp_bwd(
+std::vector<at::Tensor> mlp_bwd(
     long align,
     int inp_needs_grad,
     int add_bias,
@@ -123,84 +144,62 @@ std::vector<at::Tensor> fused_mlp_bwd(
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_mlp_flat_bwd.h"
-  } else {
+#include "mlp_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_mlp_flat_bwd.h"
+#include "mlp_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_flat_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
-at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
-  GlobalPass _gp(FWD);
-  if (inputs[0].dtype() == at::kFloat) {
-    typedef float T;
-#include "attn_flat_fwd.h"
-  } else {
-    typedef bfloat16 T;
-#include "attn_flat_fwd.h"
-  }
-}
-
-std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
-  GlobalPass _gp(BWD);
-  if (inputs[0].dtype() == at::kFloat) {
-    typedef float T;
-#include "attn_flat_bwd.h"
-  } else {
-    typedef bfloat16 T;
-#include "attn_flat_bwd.h"
-  }
-}
-
-at::Tensor gemm_attn_fwd(long align, std::vector<at::Tensor> inputs) {
-  GlobalPass _gp(FWD);
-  if (inputs[0].dtype() == at::kFloat) {
-    typedef float T;
-#include "gemm_attn_flat_fwd.h"
-  } else {
-    typedef bfloat16 T;
-#include "gemm_attn_flat_fwd.h"
-  }
-}
-
-std::vector<at::Tensor> gemm_attn_bwd(
+at::Tensor attn_fwd(
     long align,
+    int add_bias,
     std::vector<at::Tensor> inputs) {
-  GlobalPass _gp(BWD);
-  if (inputs[0].dtype() == at::kFloat) {
-    typedef float T;
-#include "gemm_attn_flat_bwd.h"
-  } else {
-    typedef bfloat16 T;
-#include "gemm_attn_flat_bwd.h"
-  }
-}
-
-// ######################################## Dropout
-// ################################################
-
-std::vector<at::Tensor> gat_dropout_fwd(
-    float p,
-    at::Tensor inp,
-    bool training) {
   GlobalPass _gp(FWD);
-  if (inp.dtype() == at::kFloat) {
+  if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "dropout_fwd.h"
-  } else {
+#include "attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "dropout_fwd.h"
+#include "attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "attn_flat_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "attn_flat_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
-at::Tensor gat_dropout_bwd(float p, std::vector<at::Tensor> inputs) {
-  GlobalPass _gp(BWD);
+std::vector<at::Tensor> attn_bwd(
+    long align,
+    int add_bias,
+    std::vector<at::Tensor> inputs) {
+  GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "dropout_bwd.h"
-  } else {
+#include "attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "dropout_bwd.h"
+#include "attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "attn_flat_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "attn_flat_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -210,12 +209,19 @@ at::Tensor gat_dropout_bwd(float p, std::vector<at::Tensor> inputs) {
 std::vector<at::Tensor> leakyrelu_fwd(float alpha, at::Tensor inp) {
   GlobalPass _gp(FWD);
   if (inp.dtype() == at::kFloat) {
-    // std::cout << " In Cpp "<< inp << std::endl;
     typedef float T;
 #include "leakyrelu_fwd.h"
-  } else {
+  } else if(inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "leakyrelu_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "leakyrelu_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "leakyrelu_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -224,9 +230,17 @@ at::Tensor leakyrelu_bwd(float alpha, std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "leakyrelu_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "leakyrelu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "leakyrelu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "leakyrelu_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -238,9 +252,17 @@ std::vector<at::Tensor> relu_fwd(at::Tensor inp) {
   if (inp.dtype() == at::kFloat) {
     typedef float T;
 #include "relu_fwd.h"
-  } else {
+  } else if(inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "relu_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "relu_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "relu_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -249,9 +271,17 @@ at::Tensor relu_bwd(std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "relu_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "relu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "relu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "relu_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -263,9 +293,17 @@ std::vector<at::Tensor> bias_relu_fwd(std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_relu_fwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_relu_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_relu_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_relu_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -274,9 +312,17 @@ std::vector<at::Tensor> bias_relu_bwd(std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_relu_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_relu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_relu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_relu_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -287,9 +333,17 @@ std::vector<at::Tensor> relu_drop_fwd(float p, at::Tensor inp, int training) {
   if (inp.dtype() == at::kFloat) {
     typedef float T;
 #include "relu_drop_fwd.h"
-  } else {
+  } else if(inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "relu_drop_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "relu_drop_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "relu_drop_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -298,9 +352,17 @@ at::Tensor relu_drop_bwd(float p, std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "relu_drop_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "relu_drop_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -314,9 +376,17 @@ std::vector<at::Tensor> bias_relu_drop_fwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_relu_drop_fwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_relu_drop_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_relu_drop_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_relu_drop_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -327,9 +397,17 @@ std::vector<at::Tensor> bias_relu_drop_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_relu_drop_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_relu_drop_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -343,9 +421,17 @@ std::vector<at::Tensor> bias_lrelu_fwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_lrelu_fwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_lrelu_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_lrelu_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_lrelu_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -356,9 +442,17 @@ std::vector<at::Tensor> bias_lrelu_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_lrelu_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_lrelu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_lrelu_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_lrelu_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -373,9 +467,17 @@ std::vector<at::Tensor> leaky_relu_drop_fwd(
   if (inp.dtype() == at::kFloat) {
     typedef float T;
 #include "leaky_relu_drop_fwd.h"
-  } else {
+  } else if(inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "leaky_relu_drop_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "leaky_relu_drop_fwd.h"
+  } else if(inp.dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "leaky_relu_drop_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -387,9 +489,17 @@ at::Tensor leaky_relu_drop_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "leaky_relu_drop_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "leaky_relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "leaky_relu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "leaky_relu_drop_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -405,9 +515,17 @@ std::vector<at::Tensor> bias_lrelu_drop_fwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_lrelu_drop_fwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_lrelu_drop_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_lrelu_drop_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_lrelu_drop_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -420,9 +538,17 @@ std::vector<at::Tensor> bias_lrelu_drop_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "bias_lrelu_drop_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "bias_lrelu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "bias_lrelu_drop_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "bias_lrelu_drop_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -434,9 +560,17 @@ at::Tensor add_bias_fwd(std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "add_bias_fwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "add_bias_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "add_bias_fwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "add_bias_fwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
@@ -445,29 +579,33 @@ at::Tensor add_bias_bwd(std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "add_bias_bwd.h"
-  } else {
+  } else if(inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "add_bias_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "add_bias_bwd.h"
+  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "add_bias_bwd.h"
+  } else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
 
 REGISTER_SUBMODULE(_fused_gat, m) {
   m.def(
-      "fused_gat_mlp_attn_fwd",
-      &fused_gat_mlp_attn_fwd,
+      "mlp_attn_fwd",
+      &mlp_attn_fwd,
       "Tpp fused MLP-Attention forward");
   m.def(
-      "fused_gat_mlp_attn_bwd",
-      &fused_gat_mlp_attn_bwd,
+      "mlp_attn_bwd",
+      &mlp_attn_bwd,
       "Tpp fused MLP-Attention backward");
-  m.def("fused_mlp_fwd", &fused_mlp_fwd, "Tpp fused MLP forward");
-  m.def("fused_mlp_bwd", &fused_mlp_bwd, "Tpp GAT fused MLP backward");
+  m.def("mlp_fwd", &mlp_fwd, "Tpp fused MLP forward");
+  m.def("mlp_bwd", &mlp_bwd, "Tpp GAT fused MLP backward");
   m.def("attn_fwd", &attn_fwd, "Tpp Attention forward");
   m.def("attn_bwd", &attn_bwd, "Tpp Attention backward");
-  m.def("gemm_attn_fwd", &gemm_attn_fwd, "Tpp GEMM Attention forward");
-  m.def("gemm_attn_bwd", &gemm_attn_bwd, "Tpp GEMM Attention backward");
-  m.def("gat_dropout_fwd", &gat_dropout_fwd, "Tpp Optimized Dropout FWD");
-  m.def("gat_dropout_bwd", &gat_dropout_bwd, "Tpp Optimized Dropout BWD");
   m.def("leakyrelu_fwd", &leakyrelu_fwd, "Tpp Optimized Leaky Relu FWD");
   m.def("leakyrelu_bwd", &leakyrelu_bwd, "Tpp Optimized Leaky Relu BWD");
   m.def("relu_fwd", &relu_fwd, "Tpp Optimized Relu FWD");

@@ -36,14 +36,15 @@ auto rem = N % bn;
 auto nk = wt_sizes[0];
 auto nc = wt_sizes[1];
 auto bc = wt_sizes[2];
-if (t_wt.dtype() == at::kBFloat16)
+if (t_wt.dim() == 5)
   bc = bc * wt_sizes[4];
 auto bk = wt_sizes[3];
 auto bcp = bc;
 auto K = nk * bk;
 
-if (t_wt.dtype() == at::kBFloat16) {
-  bcp = bc + bc % 2;
+if (t_wt.dim() == 5) {
+  auto lp = get_vnni_block_size(t_wt.dtype());
+  bcp = bc + bc % lp;
 }
 
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
@@ -55,14 +56,7 @@ if (res) {
 }
 
 auto t_out = t_in.new_empty({N, K});
-at::Tensor t_out_f32;
-if (t_out.dtype() == at::kFloat)
-  t_out_f32 = t_out;
-else
-  t_out_f32 = at::empty({N, K});
-
 long rd = (bk + 15) / 16;
-
 at::Tensor t_relu_mask = at::empty({N, nk* rd}, at::kShort);
 at::Tensor t_dp_mask = at::empty({N, nk* rd}, at::kShort);
 
@@ -70,22 +64,20 @@ auto in = GetVLAPtr<T>(t_in, {bn, nc, bcp});
 auto in_res = GetVLAPtr<T>(t_in_res, {bn, nc, bcp});
 auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
 auto wt_res_V = GetVLAPtr<T>(t_wt_res_V, {nc, bcp* bk});
-auto bias = GetVLAPtr<float>(t_bias, {bk});
+auto bias = GetVLAPtr<T>(t_bias, {bk});
 auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
-auto out_f32 = GetVLAPtr<float>(t_out_f32, {bn, nk, bk});
 auto relu_mask = GetVLAPtr<short>(t_relu_mask, {bn, nk, rd});
 auto dp_mask = GetVLAPtr<short>(t_dp_mask, {bn, nk, rd});
 
 auto brgemm_tpp = SCOPEIT(
     (BrgemmTPP<
         T,
-        float>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 1.0, 0, nc)));
-auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(bn, bk, K), BIAS);
+        T>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 1.0, 0, nc)));
+auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
 auto relu_fwd_tpp =
-    SCOPEIT(ReLUFwdTPP<float>(bn, bk, nk* bk, nk* bk, true), ACT);
+    SCOPEIT(ReLUFwdTPP<T>(bn, bk, nk* bk, nk* bk, true), ACT);
 auto dropout_fwd_tpp =
-    SCOPEIT((DropOutFwdTPP<float, T>(bn, bk, nk* bk, nk* bk, p)), DROPOUT);
-auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
+    SCOPEIT(DropOutFwdTPP<T>(bn, bk, nk* bk, nk* bk, p), DROPOUT);
 
 {
   RECORD_SCOPE(go_gemm, {t_in, t_wt_V});
@@ -107,23 +99,22 @@ auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
         int n = n3k / nk;
         int k = n3k % nk;
         if (apply_bias)
-          cpy_bias_tpp(bias[k], out_f32[n][0][k]);
-        brgemm_tpp(in[n][0][0], wt_V[k][0], out_f32[n][0][k], nc, true);
+          cpy_bias_tpp(bias[k], out[n][0][k]);
+        brgemm_tpp(in[n][0][0], wt_V[k][0], out[n][0][k], nc, true);
         if (res) {
           brgemm_tpp(
-              in_res[n][0][0], wt_res_V[k][0], out_f32[n][0][k], nc, true);
+              in_res[n][0][0], wt_res_V[k][0], out[n][0][k], nc, true);
         }
         if (act == "relu") {
-          relu_fwd_tpp(out_f32[n][0][k], out_f32[n][0][k], relu_mask[n][0][k]);
+          relu_fwd_tpp(out[n][0][k], out[n][0][k], relu_mask[n][0][k]);
         }
         if (p > 0 && training) {
           dropout_fwd_tpp(
-              out_f32[n][0][k],
+              out[n][0][k],
               (void*)get_rng_state(),
               out[n][0][k],
               dp_mask[n][0][k]);
-        } else
-          cvt_tpp(out_f32[n][0][k], out[n][0][k]);
+        }
       }
       brgemm_tpp.release();
     }
@@ -131,33 +122,28 @@ auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
       auto in = GetVLAPtr<T>(t_in, {nc, bcp});
       auto in_res = GetVLAPtr<T>(t_in_res, {nc, bcp});
       auto out = GetVLAPtr<T>(t_out, {nk, bk});
-      auto out_f32 = GetVLAPtr<float>(t_out_f32, {nk, bk});
       auto relu_mask = GetVLAPtr<short>(t_relu_mask, {nk, rd});
       auto dp_mask = GetVLAPtr<short>(t_dp_mask, {nk, rd});
 
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, float>(
+      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
           rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<float>(1, bk, K), BIAS);
+      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
       auto relu_fwd_tpp =
-          SCOPEIT(ReLUFwdTPP<float>(1, bk, nk * bk, nk * bk, true), ACT);
-      auto dropout_fwd_tpp = SCOPEIT(
-          (DropOutFwdTPP<float, T>(1, bk, nk * bk, nk * bk, p)), DROPOUT);
-      auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, bk, K, K)), EW_COPY);
+          SCOPEIT(ReLUFwdTPP<T>(1, bk, nk * bk, nk * bk, true), ACT);
+      auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(1, bk, nk * bk, nk * bk, p), DROPOUT);
 
-#pragma omp parallel
       {
         brgemm_tpp.config();
-#pragma omp for
         for (int k = 0; k < nk; k++) {
           if (apply_bias)
             for (int r = 0; r < rem; r++)
-              cpy_bias_tpp(bias[k], out_f32[nn * bn + r][k]);
-          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out_f32[nn * bn][k], nc, true);
+              cpy_bias_tpp(bias[k], out[nn * bn + r][k]);
+          brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc, true);
           if (res) {
             brgemm_tpp(
                 in_res[nn * bn][0],
                 wt_res_V[k][0],
-                out_f32[nn * bn][k],
+                out[nn * bn][k],
                 nc,
                 true);
           }
@@ -165,18 +151,17 @@ auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
           for (int r = 0; r < rem; r++) {
             if (act == "relu") {
               relu_fwd_tpp(
-                  out_f32[nn * bn + r][k],
-                  out_f32[nn * bn + r][k],
+                  out[nn * bn + r][k],
+                  out[nn * bn + r][k],
                   relu_mask[nn * bn + r][k]);
             }
             if (p > 0 && training) {
               dropout_fwd_tpp(
-                  out_f32[nn * bn + r][k],
+                  out[nn * bn + r][k],
                   (void*)get_rng_state(),
                   out[nn * bn + r][k],
                   dp_mask[nn * bn + r][k]);
-            } else
-              cvt_tpp(out_f32[nn * bn + r][k], out[nn * bn + r][k]);
+            }
           }
         }
         brgemm_tpp.release();

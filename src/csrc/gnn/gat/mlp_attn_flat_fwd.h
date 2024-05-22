@@ -10,15 +10,16 @@
 
 RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
 
-at::Tensor t_in, t_wt, t_bias = at::empty(0);
+at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias = at::empty(0);
 int i = 0;
 
-t_in = inputs[i++]; // [N, C]
-t_wt = inputs[i++]; // [nk, nc, bc, bk]
+t_in_mlp = inputs[i++];
+t_wt = inputs[i++];
+t_attn_3d = inputs[i++];
 if (add_bias)
-  t_bias = inputs[i++]; // [K]
+  t_bias = inputs[i++];
 
-auto in_sizes = t_in.sizes();
+auto in_sizes = t_in_mlp.sizes();
 auto wt_sizes = t_wt.sizes();
 auto N = in_sizes[0];
 auto bn = align;
@@ -28,32 +29,35 @@ auto rem = N % bn;
 auto nk = wt_sizes[0];
 auto nc = wt_sizes[1];
 auto bc = wt_sizes[2];
-if (t_wt.dtype() == at::kBFloat16)
+if (t_wt.dim() == 5)
   bc = bc * wt_sizes[4];
 auto bk = wt_sizes[3];
 auto bcp = bc;
 auto K = nk * bk;
 
-if (t_wt.dtype() == at::kBFloat16) {
-  bcp = bc + bc % 2;
+if (t_wt.dim() == 5) {
+  auto lp = get_vnni_block_size(t_wt.dtype());
+  bcp = bc + bc % lp;
 }
 
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 
-auto t_out = t_in.new_empty({N, K}); // [N,  K]
-auto in = GetVLAPtr<T>(t_in, {bn, nc, bcp});
-auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
-auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
+auto t_out_mlp = t_in_mlp.new_empty({N, K}); // [N,  K]
 
-{
-  RECORD_SCOPE(gmo_gemm, {t_in, t_wt_V});
+if (add_bias) {
+  auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
+  auto bias = GetVLAPtr<T>(t_bias, {bk});
+  auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
+
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
+
+  auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
+
   {
-    if (add_bias) {
-      auto bias = GetVLAPtr<T>(t_bias, {bk});
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
-          bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
-
+    RECORD_SCOPE(gao_gemm, {t_in_mlp, t_wt_V});
+    {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
       {
@@ -76,8 +80,8 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out, {nk, bk});
+        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
 
         auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
@@ -87,15 +91,25 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.config();
 
         for (int k = 0; k < nk; k++) {
-          for (int r = 0; r < rem; r++)
-            cpy_bias_tpp(bias[k], out[nn * bn + r][k]);
+          for (int r = nn * bn; r < nn * bn + rem; r++)
+            cpy_bias_tpp(bias[k], out[r][k]);
           brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc);
         }
         brgemm_tpp.release();
       }
-    } else {
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
-          bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
+    }
+  }
+} else {
+  auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
+  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
+  auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
+
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
+
+  {
+    RECORD_SCOPE(gao_gemm, {t_in_mlp, t_wt_V});
+    {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
       {
@@ -118,8 +132,8 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out, {nk, bk});
+        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
 
         auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
@@ -134,4 +148,29 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
   }
 }
 
-return t_out;
+auto attn_sizes = t_attn_3d.sizes(); // 3D shape [1, H, F] = [1, 4, 128] let
+
+auto H = attn_sizes[1]; // 4
+auto F = attn_sizes[2]; // 128
+
+auto t_out_attn = t_out_mlp.new_empty({N, H});
+
+auto t_attn = t_attn_3d.view({H * F});
+
+auto in_attn = GetVLAPtr<T>(t_out_mlp, {H, F});
+auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
+auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
+
+auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, T>(H, F)), EW_MUL);
+{
+  RECORD_SCOPE(go_attn, {t_out_attn});
+  {
+    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel for
+    for (int n = 0; n < N; n++) {
+      mul_reduce_tpp(attn[0], in_attn[n][0], out_attn[n]);
+    }
+  }
+}
+
+return {t_out_mlp, t_out_attn.view({N, H, 1})};

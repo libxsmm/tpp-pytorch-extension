@@ -33,7 +33,7 @@ REGISTER_SCOPE(gdout, "gdout");
 REGISTER_SCOPE(go_dropout, "go_dropout");
 REGISTER_SCOPE(gdo_dropout, "gdo_dropout");
 
-std::vector<at::Tensor> fused_gsage_mlp_fwd(
+std::vector<at::Tensor> mlp_fwd(
     long align,
     bool apply_bias,
     float p,
@@ -44,14 +44,20 @@ std::vector<at::Tensor> fused_gsage_mlp_fwd(
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_gsage_mlp_flat_fwd.h"
-  } else {
+#include "mlp_flat_fwd.h"
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_gsage_mlp_flat_fwd.h"
+#include "mlp_flat_fwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_flat_fwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_flat_fwd.h"
   }
 }
 
-std::vector<at::Tensor> fused_gsage_mlp_bwd(
+std::vector<at::Tensor> mlp_bwd(
     long align,
     bool apply_bias,
     float p,
@@ -61,10 +67,16 @@ std::vector<at::Tensor> fused_gsage_mlp_bwd(
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
-#include "fused_gsage_mlp_flat_bwd.h"
-  } else {
+#include "mlp_flat_bwd.h"
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
-#include "fused_gsage_mlp_flat_bwd.h"
+#include "mlp_flat_bwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "mlp_flat_bwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+#include "mlp_flat_bwd.h"
   }
 }
 
@@ -73,8 +85,14 @@ std::vector<at::Tensor> dropout_fwd(float p, at::Tensor inp, bool training) {
   if (inp.dtype() == at::kFloat) {
     typedef float T;
 #include "dropout_fwd.h"
-  } else {
+  } else if (inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
+#include "dropout_fwd.h"
+  } else if (inp.dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "dropout_fwd.h"
+  } else if (inp.dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
 #include "dropout_fwd.h"
   }
 }
@@ -84,19 +102,22 @@ at::Tensor dropout_bwd(float p, std::vector<at::Tensor> inputs) {
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "dropout_bwd.h"
-  } else {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
+#include "dropout_bwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+#include "dropout_bwd.h"
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
 #include "dropout_bwd.h"
   }
 }
 
 REGISTER_SUBMODULE(_fused_gsage, m) {
   m.def(
-      "fused_gsage_mlp_fwd", &fused_gsage_mlp_fwd, "Tpp GraphSAGE MLP forward");
-  m.def(
-      "fused_gsage_mlp_bwd",
-      &fused_gsage_mlp_bwd,
-      "Tpp GraphSAGE MLP backward");
+      "mlp_fwd", &mlp_fwd, "Tpp GraphSAGE MLP forward");
+  m.def( "mlp_bwd", &mlp_bwd, "Tpp GraphSAGE MLP backward");
   m.def("dropout_fwd", &dropout_fwd, "Tpp Optimized Dropout FWD");
   m.def("dropout_bwd", &dropout_bwd, "Tpp Optimized Dropout BWD");
 }
