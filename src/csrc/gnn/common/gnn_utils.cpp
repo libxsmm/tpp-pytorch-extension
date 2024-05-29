@@ -103,6 +103,24 @@ at::Tensor gather_features(const long alignN, std::vector<at::Tensor> inputs) {
       typedef int Tind;
 #include "gather.h"
     }
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+    if (inputs[1].dtype() == at::kLong) {
+      typedef long Tind;
+#include "gather.h"
+    } else if (inputs[1].dtype() == at::kInt) {
+      typedef int Tind;
+#include "gather.h"
+    }
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+    if (inputs[1].dtype() == at::kLong) {
+      typedef long Tind;
+#include "gather.h"
+    } else if (inputs[1].dtype() == at::kInt) {
+      typedef int Tind;
+#include "gather.h"
+    }
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -127,7 +145,22 @@ void scatter_features(
     } else {
 #include "scatter.h"
     }
-  } else {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+    if (reduction) {
+#include "scatter_reduce.h"
+    } else {
+#include "scatter.h"
+    }
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+    if (reduction) {
+#include "scatter_reduce.h"
+    } else {
+#include "scatter.h"
+    }
+  }
+  else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }

@@ -35,14 +35,19 @@ from contextlib import contextmanager
 
 torch.autograd.set_detect_anomaly(False)
 
-global_layer_dtype=torch.float32
+global_layer_dtype = torch.float32
+
 
 class SAGEMLPFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, align, apply_bias, p, act, res, training, *inputs):
         if res:
             (inp, inp_res, wt, res_wt, bias) = inputs
-            (out, act_mask, dp_mask,) = fused_gsage_cpp.mlp_fwd(
+            (
+                out,
+                act_mask,
+                dp_mask,
+            ) = fused_gsage_cpp.mlp_fwd(
                 align, apply_bias, p, act, res, training, inputs
             )
         else:
@@ -370,5 +375,3 @@ class SAGEConvOpt(BlockedModule):
             if self.norm is not None:
                 rst = self.norm(rst)
             return rst
-
-

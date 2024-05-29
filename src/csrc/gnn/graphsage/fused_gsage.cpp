@@ -115,9 +115,8 @@ at::Tensor dropout_bwd(float p, std::vector<at::Tensor> inputs) {
 }
 
 REGISTER_SUBMODULE(_fused_gsage, m) {
-  m.def(
-      "mlp_fwd", &mlp_fwd, "Tpp GraphSAGE MLP forward");
-  m.def( "mlp_bwd", &mlp_bwd, "Tpp GraphSAGE MLP backward");
+  m.def("mlp_fwd", &mlp_fwd, "Tpp GraphSAGE MLP forward");
+  m.def("mlp_bwd", &mlp_bwd, "Tpp GraphSAGE MLP backward");
   m.def("dropout_fwd", &dropout_fwd, "Tpp Optimized Dropout FWD");
   m.def("dropout_bwd", &dropout_bwd, "Tpp Optimized Dropout BWD");
 }

@@ -36,7 +36,8 @@ auto K = nk * bk;
 
 if (t_wt.dim() == 5) {
   auto lp = get_vnni_block_size(t_wt.dtype());
-  bcp = bc + bc % lp;
+  auto d = bc % lp;
+  bcp = d > 0 ? bc + (lp - d) : bc;
 }
 
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);

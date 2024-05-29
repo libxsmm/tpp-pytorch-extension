@@ -412,7 +412,7 @@ if (res)
         }
       }
     }
-      // printf("grad_wt_tmp %p, grad_wt %p\n",grad_wt_tmp,grad_wt);
+    // printf("grad_wt_tmp %p, grad_wt %p\n",grad_wt_tmp,grad_wt);
 #if 1
 #pragma omp parallel for collapse(2)
     for (int k = 0; k < nk; k++) {

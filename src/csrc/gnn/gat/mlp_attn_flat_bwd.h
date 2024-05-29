@@ -56,14 +56,18 @@ auto remp = rem;
 auto K = nk * bk;
 auto lp = get_vnni_block_size(t_in.dtype());
 
-if (t_in.dim() == 5) {
-  bnp = bn + bn % lp;
-  remp = rem + rem % lp;
+if (lp > 1) {
+  auto d = bn % lp;
+  bnp = d > 0 ? bn + (lp - d) : bn;
+  d = rem % lp;
+  remp = d > 0 ? rem + (lp - d) : rem;
 }
 
 if (t_wt.dim() == 5) {
-  bcp = bc + bc % lp;
-  bkp = bk + bk % lp;
+  auto d = bc % lp;
+  bcp = d > 0 ? bc + (lp - d) : bc;
+  d = bk % lp;
+  bkp = d > 0 ? bk + (lp - d) : bk;
 }
 
 // Attention-----------------
@@ -448,8 +452,7 @@ auto trans_tpp = SCOPEIT(
       at::Tensor t_global_tmp_go = at::empty(0);
       at::Tensor t_global_tmp_inT = at::empty(0);
 
-      if (t_grad_out.dim() == 5 &&
-          t_wt.dim() == 5) {
+      if (t_wt.dim() == 5) {
         t_global_tmp_go =
             at::empty({threads, (nn / BF + 1), bnp * bk}, t_grad_out.dtype());
         t_global_tmp_inT =
@@ -490,14 +493,14 @@ auto trans_tpp = SCOPEIT(
             ? (my_mb_blocks / BF)
             : ((my_mb_blocks / BF) + 1);
 
-        if (t_grad_out.dim() == 5)
+        if (lp > 1)
           brgemm_dw_lp_tpp_b1.config();
 
         for (int bfn = my_mb_start; bfn < my_mb_end; bfn += mb_block_step) {
           blocks = (bfn + mb_block_step <= my_mb_end) ? mb_block_step
                                                       : my_mb_end - bfn;
           for (int ofm1 = 0; ofm1 < nk; ++ofm1) {
-            if (t_in.dim() == 5) {
+            if (lp > 1) {
               n2v_tpp(
                   blocks,
                   K * bnp,
@@ -510,13 +513,13 @@ auto trans_tpp = SCOPEIT(
                 /* initiaize current work task to zero */
                 setzero_delwt_tpp(grad_wt_priv[team_id][ofm1][ifm1]);
               }
-              if (t_in.dim() == 4) {
+              if (lp == 1) {
                 brgemm_dw_f32_tpp_b1(
                     in[bfn][0][ifm1],
                     grad_out[bfn][0][ofm1],
                     grad_wt_priv[team_id][ofm1][ifm1],
                     blocks);
-              } else if (t_in.dim() == 5) {
+              } else if (lp > 1) {
                 if (ofm1 == 0)
                   trans_tpp(
                       blocks,
@@ -536,7 +539,7 @@ auto trans_tpp = SCOPEIT(
           }
         }
 
-        if (t_grad_out.dim() == 5)
+        if (lp > 1)
           brgemm_dw_lp_tpp_b1.release();
 
         const int reduce_thr_begin = (tid * reduce_chunksize < reduce_work)
@@ -562,7 +565,7 @@ auto trans_tpp = SCOPEIT(
       auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
       auto in = GetVLAPtr<T>(t_in, {nc, bc});
 
-      auto brgemm_dw_f32_tpp_b1 = SCOPEITGEMM2((BrgemmTPP<T, float>(
+      auto brgemm_dw_f32_tpp_b1 = SCOPEIT((BrgemmTPP<T, float>(
           bc,
           bk,
           remp,
@@ -574,7 +577,7 @@ auto trans_tpp = SCOPEIT(
           1.0,
           input_trans_flag,
           1)));
-      auto brgemm_dw_lp_tpp_b1 = SCOPEITGEMM((BrgemmTPP<T, float>(
+      auto brgemm_dw_lp_tpp_b1 = SCOPEIT((BrgemmTPP<T, float>(
           bc, bk, remp, bc * remp, bk * remp, remp, bk, bk, 1.0, 0, 1)));
       auto n2v_tpp = SCOPEIT(
           XformExtTPP<T>(

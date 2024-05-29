@@ -69,13 +69,12 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
 auto relu_mask = GetVLAPtr<short>(t_relu_mask, {bn, nk, rd});
 auto dp_mask = GetVLAPtr<short>(t_dp_mask, {bn, nk, rd});
 
-auto brgemm_tpp = SCOPEIT(
-    (BrgemmTPP<
-        T,
-        T>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 1.0, 0, nc)));
+auto brgemm_tpp =
+    SCOPEIT((BrgemmTPP<
+             T,
+             T>(bn, bk, bcp, bcp, bk* bcp, nc* bcp, bk, nk* bk, 1.0, 0, nc)));
 auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
-auto relu_fwd_tpp =
-    SCOPEIT(ReLUFwdTPP<T>(bn, bk, nk* bk, nk* bk, true), ACT);
+auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<T>(bn, bk, nk* bk, nk* bk, true), ACT);
 auto dropout_fwd_tpp =
     SCOPEIT(DropOutFwdTPP<T>(bn, bk, nk* bk, nk* bk, p), DROPOUT);
 
@@ -102,8 +101,7 @@ auto dropout_fwd_tpp =
           cpy_bias_tpp(bias[k], out[n][0][k]);
         brgemm_tpp(in[n][0][0], wt_V[k][0], out[n][0][k], nc, true);
         if (res) {
-          brgemm_tpp(
-              in_res[n][0][0], wt_res_V[k][0], out[n][0][k], nc, true);
+          brgemm_tpp(in_res[n][0][0], wt_res_V[k][0], out[n][0][k], nc, true);
         }
         if (act == "relu") {
           relu_fwd_tpp(out[n][0][k], out[n][0][k], relu_mask[n][0][k]);
@@ -130,7 +128,8 @@ auto dropout_fwd_tpp =
       auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
       auto relu_fwd_tpp =
           SCOPEIT(ReLUFwdTPP<T>(1, bk, nk * bk, nk * bk, true), ACT);
-      auto dropout_fwd_tpp = SCOPEIT(DropOutFwdTPP<T>(1, bk, nk * bk, nk * bk, p), DROPOUT);
+      auto dropout_fwd_tpp =
+          SCOPEIT(DropOutFwdTPP<T>(1, bk, nk * bk, nk * bk, p), DROPOUT);
 
       {
         brgemm_tpp.config();
@@ -141,11 +140,7 @@ auto dropout_fwd_tpp =
           brgemm_tpp(in[nn * bn][0], wt_V[k][0], out[nn * bn][k], nc, true);
           if (res) {
             brgemm_tpp(
-                in_res[nn * bn][0],
-                wt_res_V[k][0],
-                out[nn * bn][k],
-                nc,
-                true);
+                in_res[nn * bn][0], wt_res_V[k][0], out[nn * bn][k], nc, true);
           }
 
           for (int r = 0; r < rem; r++) {

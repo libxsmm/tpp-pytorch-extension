@@ -31,6 +31,7 @@ from tpp_pytorch_extension._C import _fused_ops as fused_ops_cpp
 USE_LOW_PREC_PARAMS = True
 global_layer_dtype = torch.float32
 
+
 def FixLinear(
     self,
     bk=None,
@@ -69,6 +70,7 @@ def FixLinear(
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
 
+
 ##################LeakyReLU#################
 class LeakyReLUFn(torch.autograd.Function):
     @staticmethod
@@ -101,6 +103,7 @@ class LeakyReLU(nn.Module):
         output = LeakyReLUFn.apply(self.alpha, input)
         return output
 
+
 ####################ReLU########################
 class ReLUFn(torch.autograd.Function):
     @staticmethod
@@ -130,7 +133,9 @@ class ReLU(nn.Module):
         output = ReLUFn.apply(inp)
         return output
 
+
 #######################FusedBiasReLU################
+
 
 class FusedBiasReLUFn(torch.autograd.Function):
     @staticmethod

@@ -53,7 +53,8 @@ auto remp = rem;
 auto K = nk * bk;
 auto in_dtype = t_in.dtype();
 auto lp = get_vnni_block_size(in_dtype);
-if ((in_dtype == at::kBFloat16) || (in_dtype == at::kFloat8_e5m2) || (in_dtype == at::kFloat8_e4m3fn)) {
+if ((in_dtype == at::kBFloat16) || (in_dtype == at::kFloat8_e5m2) ||
+    (in_dtype == at::kFloat8_e4m3fn)) {
   bnp = bn + bn % lp;
   remp = rem + rem % lp;
 }
@@ -102,7 +103,6 @@ if (res) {
 
 auto t_grad_bias = t_wt.new_empty({nk * bk});
 
-
 auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, nk, bk});
 auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, nc, bc});
 auto grad_in_res = GetVLAPtr<T>(t_grad_in_res, {bn, nc, bc});
@@ -123,8 +123,7 @@ auto in_res = GetVLAPtr<T>(t_in_res, {bn, nc, bc});
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(nk * bk), EW_ZERO);
 auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(bn, 1, bkp), EW_ZERO);
 auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, bk, K), BIAS);
-auto dropout_bwd_tpp =
-    SCOPEIT(DropOutBwdTPP<T>(bn, bk, K, K, p), DROPOUT);
+auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(bn, bk, K, K, p), DROPOUT);
 auto relu_bwd_tpp = SCOPEIT(ReLUBwdTPP<T>(bn, bk, K, K, true), ACT);
 auto n2v_tpp = SCOPEIT(
     XformExtTPP<T>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
@@ -193,7 +192,7 @@ if (apply_bias) {
             if (p > 0) {
               dropout_bwd_tpp(
                   grad_out[n][0][k], grad_out[n][0][k], dp_mask[n][0][k]);
-            } 
+            }
 
             if (act == "relu") {
               relu_bwd_tpp(

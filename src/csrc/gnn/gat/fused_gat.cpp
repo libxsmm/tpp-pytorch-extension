@@ -55,13 +55,13 @@ std::vector<at::Tensor> mlp_attn_fwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "mlp_attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "mlp_attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "mlp_attn_flat_fwd.h"
   } else {
@@ -78,13 +78,13 @@ std::vector<at::Tensor> mlp_attn_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "mlp_attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "mlp_attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "mlp_attn_flat_bwd.h"
   } else {
@@ -92,21 +92,18 @@ std::vector<at::Tensor> mlp_attn_bwd(
   }
 }
 
-at::Tensor mlp_fwd(
-    long align,
-    int add_bias,
-    std::vector<at::Tensor> inputs) {
+at::Tensor mlp_fwd(long align, int add_bias, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "mlp_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "mlp_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "mlp_flat_fwd.h"
   } else {
@@ -123,13 +120,13 @@ std::vector<at::Tensor> mlp_bwd(
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "mlp_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "mlp_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "mlp_flat_bwd.h"
   } else {
@@ -137,20 +134,18 @@ std::vector<at::Tensor> mlp_bwd(
   }
 }
 
-at::Tensor attn_fwd(
-    long align,
-    std::vector<at::Tensor> inputs) {
+at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "attn_flat_fwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "attn_flat_fwd.h"
   } else {
@@ -158,37 +153,28 @@ at::Tensor attn_fwd(
   }
 }
 
-std::vector<at::Tensor> attn_bwd(
-    long align,
-    std::vector<at::Tensor> inputs) {
+std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;
 #include "attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kBFloat16) {
+  } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e5m2) {
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
     typedef bfloat8 T;
 #include "attn_flat_bwd.h"
-  } else if(inputs[0].dtype() == at::kFloat8_e4m3fn) {
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
     typedef hfloat8 T;
 #include "attn_flat_bwd.h"
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
-
 
 REGISTER_SUBMODULE(_fused_gat, m) {
-  m.def(
-      "mlp_attn_fwd",
-      &mlp_attn_fwd,
-      "Tpp fused MLP-Attention forward");
-  m.def(
-      "mlp_attn_bwd",
-      &mlp_attn_bwd,
-      "Tpp fused MLP-Attention backward");
+  m.def("mlp_attn_fwd", &mlp_attn_fwd, "Tpp fused MLP-Attention forward");
+  m.def("mlp_attn_bwd", &mlp_attn_bwd, "Tpp fused MLP-Attention backward");
   m.def("mlp_fwd", &mlp_fwd, "Tpp fused MLP forward");
   m.def("mlp_bwd", &mlp_bwd, "Tpp GAT fused MLP backward");
   m.def("attn_fwd", &attn_fwd, "Tpp Attention forward");

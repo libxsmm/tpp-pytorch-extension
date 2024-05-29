@@ -37,9 +37,10 @@ from contextlib import contextmanager
 
 import numpy as np
 
-torch.autograd.set_detect_anomaly(False)
+torch.autograd.set_detect_anomaly(True)
 
-global_layer_dtype=torch.float32
+global_layer_dtype = torch.float32
+
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
@@ -135,6 +136,7 @@ class AttentionFunction(torch.autograd.Function):
         grad_inp, grad_attn = fused_gat_cpp.attn_bwd(ctx.align, inputs)
         return (None, grad_inp, grad_attn)
 
+
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, layer_dtype, bias=True):
         super(LinearOut, self).__init__()
@@ -166,6 +168,7 @@ class LinearOut(BlockedModule):
         out = MLPFunction.apply(align, 1, 1, *inputs)
 
         return out
+
 
 class GATConvOpt(BlockedModule):
     r"""
@@ -253,7 +256,7 @@ class GATConvOpt(BlockedModule):
         allow_zero_in_degree=False,
         bias=True,
         match_pyg_gatconv=True,
-        layer_dtype=global_layer_dtype
+        layer_dtype=global_layer_dtype,
     ):
         super(GATConvOpt, self).__init__()
         self._in_src_feats, self._in_dst_feats = expand_as_pair(in_feats)
@@ -268,13 +271,14 @@ class GATConvOpt(BlockedModule):
         self.adp = attn_drop
         self.inp_needs_grad = input_needs_grad
 
-        for cbf in [50, 32, 16]:
-            if self._in_dst_feats % cbf == 0:
+        
+        for cbf in [64, 32, 16]:
+            if self.bc % cbf == 0:
                 self.bc = cbf
                 break
 
-        for kbf in [50, 32, 16]:
-            if self._out_feats % kbf == 0:
+        for kbf in [64, 32, 16]:
+            if self.bk % kbf == 0:
                 self.bk = kbf
                 break
 
@@ -331,7 +335,9 @@ class GATConvOpt(BlockedModule):
 
         if bias and not (self.fuse_src_bias and self.fc_dst_bias):
             self.set_explicit_bias = True
-            self.bias = BlockedParameter(torch.FloatTensor(size=(num_heads*out_feats,)))
+            self.bias = BlockedParameter(
+                torch.FloatTensor(size=(num_heads * out_feats,))
+            )
             self.bias.set_blocking_param((None, None, layer_dtype))
         else:
             self.register_buffer("bias", None)
@@ -340,6 +346,7 @@ class GATConvOpt(BlockedModule):
         self.activation = None
         self.bias_act_drop = None
         self.add_bias = None
+        self.bias_act = None
 
         if self.set_explicit_bias:
             if activation is not None and feat_drop > 0.0:
@@ -413,7 +420,9 @@ class GATConvOpt(BlockedModule):
         glorot_initializer(self.attn_r)
 
         if self.set_explicit_bias:
-            nn.init.constant_(self.bias, 0)
+            #nn.init.constant_(self.bias, 0)
+            bound = 1 / math.sqrt(self._in_src_feats)
+            init.uniform_(self.bias, -bound, bound)
 
     def set_allow_zero_in_degree(self, set_value):
         r"""
@@ -487,7 +496,7 @@ class GATConvOpt(BlockedModule):
                 h_dst = feat[1]
 
                 if not hasattr(self, "fc"):
-                    assert(hasattr(self, "fc_src") and hasattr(self, "fc_dst"))
+                    assert hasattr(self, "fc_src") and hasattr(self, "fc_dst")
                     inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                     if self.fuse_src_bias:
                         inputs_src.append(self.fc_src.bias)
@@ -616,6 +625,8 @@ class GATConvOpt(BlockedModule):
                 rst = self.act_drop(rst)
             elif self.activation is not None:
                 rst = self.activation(rst)
+            elif self.bias_act is not None:
+                rst = self.bias_act(rst, self.bias)
 
             rst = rst.view(*dst_prefix_shape, self._num_heads, self._out_feats)
 
@@ -623,4 +634,3 @@ class GATConvOpt(BlockedModule):
                 return rst, graph.edata["a"]
             else:
                 return rst
-
