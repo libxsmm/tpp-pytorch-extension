@@ -337,6 +337,7 @@ std::vector<at::Tensor> bias_relu_drop_bwd(
 // ################################################
 
 std::vector<at::Tensor> bias_lrelu_fwd(
+    int align,
     std::vector<at::Tensor> inputs,
     float alpha) {
   GlobalPass _gp(FWD);
@@ -488,6 +489,7 @@ REGISTER_SUBMODULE(_fused_gat, m) {
       "Fused Leaky Relu + Dropout BWD");
   m.def("bias_relu_drop_fwd", &bias_relu_drop_fwd, "Fuse Bias,ReLU,Dropout");
   m.def("bias_relu_drop_bwd", &bias_relu_drop_bwd, "Fuse Bias,ReLU,Dropout");
+  m.def("bias_lrelu_fwd", &bias_lrelu_fwd, "Fuse Bias,LeakyReLU, No-dropout");
   m.def(
       "bias_lrelu_drop_fwd",
       &bias_lrelu_drop_fwd,
