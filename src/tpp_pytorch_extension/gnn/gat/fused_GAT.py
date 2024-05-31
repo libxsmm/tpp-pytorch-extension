@@ -452,9 +452,11 @@ class FusedBiasLeakyReLUDrop(nn.Module):
 
 class FusedBiasLeakyReLUFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inp, bias, alpha, training):
+    def forward(ctx, inp, bias, alpha, training, align):
         inputs = [inp, bias]
-        (out, rmask) = fused_gat_cpp.bias_lrelu_fwd(inputs, alpha)
+        N = inp.size(0)
+        align = align if (N > align or N == 0) else N
+        (out, rmask) = fused_gat_cpp.bias_lrelu_fwd(align, inputs, alpha)
         if training:
             ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
@@ -788,6 +790,7 @@ class GATConvOpt(BlockedModule):
         self.activation = None
         self.bias_act_drop = None
         self.add_bias = None
+        self.bias_act = None
 
         if self.set_explicit_bias:
             if activation is not None and feat_drop > 0.0:
@@ -1046,6 +1049,8 @@ class GATConvOpt(BlockedModule):
 
             if self.bias_act_drop is not None:
                 rst = self.bias_act_drop(rst, self.bias)
+            elif self.bias_act is not None:
+                rst = self.bias_act(rst, self.bias)
             elif self.add_bias is not None:
                 rst = self.add_bias(rst, self.bias)
             elif self.act_drop is not None:
