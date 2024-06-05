@@ -20,13 +20,13 @@ auto K = in_sizes[1];
 
 auto t_out = t_in.new_empty({N, K});
 
-auto in = GetVLAPtr<T>(t_in, {K});
-auto out = GetVLAPtr<T>(t_out, {K});
-auto bias = GetVLAPtr<T>(t_bias, {K});
+auto in = GetVLAPtr<Tact>(t_in, {K});
+auto out = GetVLAPtr<Tact>(t_out, {K});
+auto bias = GetVLAPtr<Tprm>(t_bias, {K});
 
-auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(1, K), BIAS);
-auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
-auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(1, K)), EW_COPY);
+auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
+auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
+auto cvt_tpp = SCOPEIT((ConvertTPP<float, Tact>(1, K)), EW_COPY);
 {
   RECORD_SCOPE(go_add_bias, {t_in});
   {

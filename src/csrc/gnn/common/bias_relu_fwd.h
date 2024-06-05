@@ -22,14 +22,14 @@ auto t_relu_mask = at::empty({N, dK}, at::kShort);
 
 auto t_out = t_in.new_empty({N, K}); // [N,  K]
 
-auto in = GetVLAPtr<T>(t_in, {K});
-auto bias = GetVLAPtr<T>(t_bias, {K});
-auto out = GetVLAPtr<T>(t_out, {K});
+auto in = GetVLAPtr<Tact>(t_in, {K});
+auto bias = GetVLAPtr<Tprm>(t_bias, {K});
+auto out = GetVLAPtr<Tact>(t_out, {K});
 auto relu_mask = GetVLAPtr<short>(t_relu_mask, {dK});
 
-auto relu_fwd_tpp = SCOPEIT((ReLUFwdTPP<float, T>(1, K, true)), ACT);
-auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(1, K), BIAS);
-auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
+auto relu_fwd_tpp = SCOPEIT((ReLUFwdTPP<float, Tact>(1, K, true)), ACT);
+auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
+auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
 {
   RECORD_SCOPE(go_bias_relu, {t_in});
   {

@@ -8,7 +8,7 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("gat_mlp_fwd", std::vector<c10::IValue>());
+RECORD_FUNCTION("gat_mlp_attn_fwd", std::vector<c10::IValue>());
 
 at::Tensor t_in_mlp, t_attn_3d, t_wt, t_bias = at::empty(0);
 int i = 0;
@@ -46,15 +46,15 @@ auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 auto t_out_mlp = t_in_mlp.new_empty({N, K}); // [N,  K]
 
 if (add_bias) {
-  auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
-  auto bias = GetVLAPtr<T>(t_bias, {bk});
-  auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
+  auto in = GetVLAPtr<Tact>(t_in_mlp, {bn, nc, bcp});
+  auto wt_V = GetVLAPtr<Tprm>(t_wt_V, {nc, bcp * bk});
+  auto bias = GetVLAPtr<Tprm>(t_bias, {bk});
+  auto out = GetVLAPtr<Tact>(t_out_mlp, {bn, nk, bk});
 
-  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
       bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-  auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
+  auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<Tprm, Tact>(bn, bk, K)), BIAS);
 
   {
     RECORD_SCOPE(gao_gemm, {t_in_mlp, t_wt_V});
@@ -81,13 +81,13 @@ if (add_bias) {
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
+        auto in = GetVLAPtr<Tact>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<Tact>(t_out_mlp, {nk, bk});
 
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
+        auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<Tprm, Tact>(1, bk, K)), BIAS);
 
         brgemm_tpp.config();
 
@@ -101,11 +101,11 @@ if (add_bias) {
     }
   }
 } else {
-  auto in = GetVLAPtr<T>(t_in_mlp, {bn, nc, bcp});
-  auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp * bk});
-  auto out = GetVLAPtr<T>(t_out_mlp, {bn, nk, bk});
+  auto in = GetVLAPtr<Tact>(t_in_mlp, {bn, nc, bcp});
+  auto wt_V = GetVLAPtr<Tprm>(t_wt_V, {nc, bcp * bk});
+  auto out = GetVLAPtr<Tact>(t_out_mlp, {bn, nk, bk});
 
-  auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+  auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
       bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
 
   {
@@ -133,10 +133,10 @@ if (add_bias) {
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in_mlp, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out_mlp, {nk, bk});
+        auto in = GetVLAPtr<Tact>(t_in_mlp, {nc, bcp});
+        auto out = GetVLAPtr<Tact>(t_out_mlp, {nk, bk});
 
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
 
         brgemm_tpp.config();
@@ -155,14 +155,14 @@ auto H = attn_sizes[1]; // 4
 auto F = attn_sizes[2]; // 128
 
 auto t_out_attn = t_out_mlp.new_empty({N, H});
-auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
+auto out_attn = GetVLAPtr<Tact>(t_out_attn, {H}); // N, H
 
 auto t_attn = t_attn_3d.view({H * F});
-auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
+auto attn = GetVLAPtr<Tprm>(t_attn, {F}); // nk, bk
 
-auto in_attn = GetVLAPtr<T>(t_out_mlp, {H, F});
+auto in_attn = GetVLAPtr<Tact>(t_out_mlp, {H, F});
 
-auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, T>(H, F)), EW_MUL);
+auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<Tprm, Tact, Tact>(H, F)), EW_MUL);
 {
   RECORD_SCOPE(go_attn, {t_out_attn});
   {

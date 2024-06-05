@@ -52,8 +52,8 @@ namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
 #ifdef PYTORCH_SUPPORTS_FLOAT8
-typedef at::Float8_e5m2 bfloat8;
-typedef at::Float8_e4m3fn hfloat8;
+typedef at::Float8_e5m2fnuz bfloat8;
+typedef at::Float8_e4m3fnuz hfloat8;
 #endif
 
 inline float upconvert_to_float(float val) {
@@ -1360,7 +1360,7 @@ class ReduceAddRowTPP {
 
 // ############################# Broadcast & Multiplication TPP
 // #####################################
-template <typename Tin, typename Tout = Tin>
+template <typename Tin, typename Tprm, typename Tout = Tin>
 class BCastMulTPP {
  public:
   BCastMulTPP() {}
@@ -1377,20 +1377,20 @@ class BCastMulTPP {
             ldi,
             ldo,
             XsmmDtype<Tin>(),
-            XsmmDtype<Tin>(),
+            XsmmDtype<Tprm>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_0, // Broadcast in Row
                                                       // Dimension
             LIBXSMM_MELTW_TYPE_BINARY_MUL) // Multiplication
   {}
-  void operator()(Tin* in0, Tin* in1, Tout* out) {
+  void operator()(Tin* in0, Tprm* in1, Tout* out) {
     kernel((void*)in0, (void*)in1, (void*)out);
   }
-  void ref(Tin* in0, Tin* in1, Tout* out) {
+  void ref(Tin* in0, Tprm* in1, Tout* out) {
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        out[c * ldo + r] = (Tin)in0[r] * in1[c * ldi + r];
+        out[c * ldo + r] = (Tin)in1[r] * in0[c * ldi + r];
       }
     }
   }
@@ -1405,7 +1405,7 @@ class BCastMulTPP {
 
 // ############################# Broadcast & Multiplication Addition TPP
 // #####################################
-template <typename Tin, typename Tout = Tin>
+template <typename Tin, typename Tout>
 class BCastMulAddTPP {
  public:
   BCastMulAddTPP() {}
@@ -1434,11 +1434,15 @@ class BCastMulAddTPP {
   }
 
   void ref(Tin* in0, Tin* in1, Tout* out) {
+#if 0
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
         out[c * ldo + r] += (Tin)in0[r] * (Tin)in1[c * ldi + r];
       }
     }
+#else
+    kernel((void*)in0, (void*)in1, (void*)out);
+#endif
   }
 
  private:

@@ -17,11 +17,21 @@ auto in_sizes = t_grad_out.sizes();
 auto N = in_sizes[0];
 long K = in_sizes[1];
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-auto t_grad_bias = t_grad_out.new_empty({K});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
 
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+auto t_grad_bias = at::empty(0);
+if(dparam == 0) 
+  t_grad_bias = at::empty({K});
+else if(dparam == 1)
+  t_grad_bias = at::empty({K}, at::kBFloat16);
+else if(dparam == 2)
+  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
+else if(dparam == 3)
+  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
+
+auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
+
+auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 
 int threads = omp_get_max_threads();
@@ -43,7 +53,7 @@ int threads = omp_get_max_threads();
         grad_bias_tpp(grad_out[n], prv_grad_bias[0]);
       }
 #pragma omp barrier
-      omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
+      omp_reduce_buf<Tprm,float>(threads, K, bias_ptrs, grad_bias[0]);
     }
   }
 }

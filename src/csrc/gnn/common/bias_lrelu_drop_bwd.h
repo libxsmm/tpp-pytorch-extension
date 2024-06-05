@@ -25,23 +25,30 @@ long K = in_sizes[1];
 auto dK = (K + 15) / 16;
 
 auto t_grad_in = t_grad_out.new_empty({N, K});
-auto t_grad_bias = t_grad_out.new_empty({K});
+auto t_grad_bias = at::empty(0);
+if(dparam == 0)
+  t_grad_bias = at::empty({K});
+else if(dparam == 1)
+  t_grad_bias = at::empty({K}, at::kBFloat16);
+else if(dparam == 2)
+  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
+else if(dparam == 3)
+  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, K});
-auto inp = GetVLAPtr<T>(t_inp, {bn, K});
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, K});
+auto inp = GetVLAPtr<Tact>(t_inp, {bn, K});
 auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {bn, dK});
 
-auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, K});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
+auto grad_in = GetVLAPtr<Tact>(t_grad_in, {bn, K});
+auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
 
 int threads = omp_get_max_threads();
 
 if (p > 0) {
-  auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(bn, K, alpha), ACT);
-  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, K), BIAS);
+  auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(bn, K, alpha), ACT);
+  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(bn, K), BIAS);
   auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
-  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(bn, K, p), DROPOUT);
-  auto copy_tpp = SCOPEIT(CpyTPP<T>(bn, K), EW_COPY);
+  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<Tact>(bn, K, p), DROPOUT);
 
   auto dp_mask = GetVLAPtr<short>(t_dp_mask, {bn, dK});
 
@@ -67,16 +74,15 @@ if (p > 0) {
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
     }
     if (rem > 0) {
-      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
-      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
-      auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(1, K, p), DROPOUT);
-      auto copy_tpp = SCOPEIT(CpyTPP<T>(1, K), EW_COPY);
+      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
+      auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<Tact>(1, K, p), DROPOUT);
 
       auto dp_mask = GetVLAPtr<short>(t_dp_mask, {dK});
-      auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-      auto inp = GetVLAPtr<T>(t_inp, {K});
+      auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
+      auto inp = GetVLAPtr<Tact>(t_inp, {K});
       auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
-      auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+      auto grad_in = GetVLAPtr<Tact>(t_grad_in, {K});
 
       float prv_grad_bias[1][K];
       bias_ptrs[0] = prv_grad_bias[0];
@@ -93,8 +99,8 @@ if (p > 0) {
 } else {
   RECORD_SCOPE(gdo_bias_lrelu_drop, {t_grad_out});
   {
-    auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(bn, K, alpha), ACT);
-    auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, K), BIAS);
+    auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(bn, K, alpha), ACT);
+    auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(bn, K), BIAS);
     auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 
     tensor_set_zero(1, K, t_grad_bias);
@@ -116,13 +122,13 @@ if (p > 0) {
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
     }
     if (rem > 0) {
-      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
-      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 
-      auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-      auto inp = GetVLAPtr<T>(t_inp, {K});
+      auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
+      auto inp = GetVLAPtr<Tact>(t_inp, {K});
       auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
-      auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+      auto grad_in = GetVLAPtr<Tact>(t_grad_in, {K});
 
       float prv_grad_bias[1][K];
       bias_ptrs[0] = prv_grad_bias[0];

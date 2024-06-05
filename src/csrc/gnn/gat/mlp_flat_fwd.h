@@ -43,18 +43,18 @@ if (t_wt.dim() == 5) {
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 
 auto t_out = t_in.new_empty({N, K}); // [N,  K]
-auto in = GetVLAPtr<T>(t_in, {bn, nc, bcp});
-auto wt_V = GetVLAPtr<T>(t_wt_V, {nc, bcp* bk});
-auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
+auto in = GetVLAPtr<Tact>(t_in, {bn, nc, bcp});
+auto wt_V = GetVLAPtr<Tprm>(t_wt_V, {nc, bcp* bk});
+auto out = GetVLAPtr<Tact>(t_out, {bn, nk, bk});
 
 {
   RECORD_SCOPE(gmo_gemm, {t_in, t_wt_V});
   {
     if (add_bias) {
-      auto bias = GetVLAPtr<T>(t_bias, {bk});
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      auto bias = GetVLAPtr<Tprm>(t_bias, {bk});
+      auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
           bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-      auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(bn, bk, K), BIAS);
+      auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<Tprm, Tact>(bn, bk, K)), BIAS);
 
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
@@ -78,13 +78,13 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out, {nk, bk});
+        auto in = GetVLAPtr<Tact>(t_in, {nc, bcp});
+        auto out = GetVLAPtr<Tact>(t_out, {nk, bk});
 
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
 
-        auto cpy_bias_tpp = SCOPEIT(CpyBiasTPP<T>(1, bk, K), BIAS);
+        auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<Tprm, Tact>(1, bk, K)), BIAS);
 
         brgemm_tpp.config();
 
@@ -96,7 +96,7 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.release();
       }
     } else {
-      auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
           bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
@@ -120,10 +120,10 @@ auto out = GetVLAPtr<T>(t_out, {bn, nk, bk});
         brgemm_tpp.release();
       }
       if (rem > 0) {
-        auto in = GetVLAPtr<T>(t_in, {nc, bcp});
-        auto out = GetVLAPtr<T>(t_out, {nk, bk});
+        auto in = GetVLAPtr<Tact>(t_in, {nc, bcp});
+        auto out = GetVLAPtr<Tact>(t_out, {nk, bk});
 
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<T, T>(
+        auto brgemm_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
             rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
 
         brgemm_tpp.config();

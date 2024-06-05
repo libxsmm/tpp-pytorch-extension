@@ -21,21 +21,29 @@ long K = in_sizes[1];
 auto dK = (K + 15) / 16;
 
 auto t_grad_in = t_grad_out.new_empty({N, K});
-auto t_grad_bias = t_grad_out.new_empty({K});
+auto t_grad_bias = at::empty(0);
+if(dparam == 0)
+  t_grad_bias = at::empty({K});
+else if(dparam == 1)
+  t_grad_bias = at::empty({K}, at::kBFloat16);
+else if(dparam == 2)
+  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
+else if(dparam == 3)
+  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
 auto relu_mask = GetVLAPtr<short>(t_relu_mask, {dK});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
-auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
+auto grad_in = GetVLAPtr<Tact>(t_grad_in, {K});
 
-auto relu_bwd_tpp = SCOPEIT(ReLUBwdTPP<T>(1, K, true), ACT);
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+auto relu_bwd_tpp = SCOPEIT(ReLUBwdTPP<Tact>(1, K, true), ACT);
+auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 
 int threads = omp_get_max_threads();
 
 if (p > 0) {
-  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<T>(1, K, p), DROPOUT);
+  auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<Tact>(1, K, p), DROPOUT);
   auto dp_mask = GetVLAPtr<short>(t_dp_mask, {dK});
 
   RECORD_SCOPE(gdo_bias_relu_drop, {t_grad_out});
@@ -52,7 +60,7 @@ if (p > 0) {
 #pragma omp for
       for (int n = 0; n < N; n++) {
         dropout_bwd_tpp(grad_out[n], grad_in[n], dp_mask[n]);
-        relu_bwd_tpp(grad_in[n], grad_in[n], (T*)NULL, relu_mask[n]);
+        relu_bwd_tpp(grad_in[n], grad_in[n], (Tact*)NULL, relu_mask[n]);
         grad_bias_tpp(grad_in[n], prv_grad_bias[0]);
       }
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
@@ -72,7 +80,7 @@ if (p > 0) {
       set_zero_tpp(prv_grad_bias[0]);
 #pragma omp for
       for (int n = 0; n < N; n++) {
-        relu_bwd_tpp(grad_out[n], grad_in[n], (T*)NULL, relu_mask[n]);
+        relu_bwd_tpp(grad_out[n], grad_in[n], (Tact*)NULL, relu_mask[n]);
         grad_bias_tpp(grad_in[n], prv_grad_bias[0]);
       }
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);

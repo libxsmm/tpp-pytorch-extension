@@ -28,11 +28,11 @@ auto t_out_attn = t_in.new_empty({N, H});
 
 auto t_attn = t_attn_3d.view({H * F});
 
-auto in_attn = GetVLAPtr<T>(t_in, {H, F});
-auto attn = GetVLAPtr<T>(t_attn, {F}); // nk, bk
-auto out_attn = GetVLAPtr<T>(t_out_attn, {H}); // N, H
+auto in_attn = GetVLAPtr<Tact>(t_in, {H, F});
+auto attn = GetVLAPtr<Tact>(t_attn, {F}); // nk, bk
+auto out_attn = GetVLAPtr<Tact>(t_out_attn, {H}); // N, H
 
-auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<T, T, T>(H, F)), EW_MUL);
+auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<Tact, Tact, Tact>(H, F)), EW_MUL);
 
 {
   RECORD_SCOPE(go_attn, {t_out_attn});

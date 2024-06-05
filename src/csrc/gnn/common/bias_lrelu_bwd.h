@@ -20,18 +20,26 @@ auto N = in_sizes[0];
 long K = in_sizes[1];
 auto dK = (K + 15) / 16;
 
-at::Tensor t_grad_out_f32 = t_grad_out;
 auto t_grad_in = t_grad_out.new_empty({N, K});
 
-auto t_grad_bias = t_grad_out.new_empty({K});
-auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-auto inp = GetVLAPtr<T>(t_inp, {K});
-auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
-auto grad_in = GetVLAPtr<T>(t_grad_in, {K});
+at::Tensor t_grad_bias = at::empty(0);
+if(dparam == 0)
+  t_grad_bias = at::empty({K});
+else if(dparam == 1)
+  t_grad_bias = at::empty({K}, at::kBFloat16);
+else if(dparam == 2)
+  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
+else if(dparam == 3)
+  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
 
-auto lrelu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(1, K, alpha), ACT);
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
+auto inp = GetVLAPtr<Tact>(t_inp, {K});
+auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
+auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
+auto grad_in = GetVLAPtr<Tact>(t_grad_in, {K});
+
+auto lrelu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
+auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 
 int threads = omp_get_max_threads();
