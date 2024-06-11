@@ -30,10 +30,6 @@ if(dparam == 0)
   t_grad_bias = at::empty({K});
 else if(dparam == 1)
   t_grad_bias = at::empty({K}, at::kBFloat16);
-else if(dparam == 2)
-  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
-else if(dparam == 3)
-  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
 
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, K});
 auto inp = GetVLAPtr<Tact>(t_inp, {bn, K});

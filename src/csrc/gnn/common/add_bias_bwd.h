@@ -24,10 +24,6 @@ if(dparam == 0)
   t_grad_bias = at::empty({K});
 else if(dparam == 1)
   t_grad_bias = at::empty({K}, at::kBFloat16);
-else if(dparam == 2)
-  t_grad_bias = at::empty({K}, at::kFloat8_e5m2);
-else if(dparam == 3)
-  t_grad_bias = at::empty({K}, at::kFloat8_e4m3fn);
 
 auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
 
@@ -53,7 +49,7 @@ int threads = omp_get_max_threads();
         grad_bias_tpp(grad_out[n], prv_grad_bias[0]);
       }
 #pragma omp barrier
-      omp_reduce_buf<Tprm,float>(threads, K, bias_ptrs, grad_bias[0]);
+      omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
     }
   }
 }

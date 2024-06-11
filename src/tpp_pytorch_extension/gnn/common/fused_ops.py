@@ -146,8 +146,6 @@ class FusedBiasReLUFn(torch.autograd.Function):
             ctx.save_for_backward(rmask)
             ctx.dprm = 0
             if bias.dtype == torch.bfloat16: ctx.dprm=1
-            elif bias.dtype == torch.float8_e5m2: ctx.dprm=2
-            elif bias.dtype == torch.float8_e4m3fn: ctx.dprm=3
 
         return out
 
@@ -183,8 +181,6 @@ class FusedBiasReLUDropFn(torch.autograd.Function):
         ctx.p = p
         ctx.dprm = 0
         if bias.dtype == torch.bfloat16: ctx.dprm=1
-        elif bias.dtype == torch.float8_e5m2: ctx.dprm=2
-        elif bias.dtype == torch.float8_e4m3fn: ctx.dprm=3
 
         return out
 
@@ -200,7 +196,7 @@ class FusedBiasReLUDropFn(torch.autograd.Function):
 class FusedBiasReLUDrop(nn.Module):
     __constants__ = ["p", "inplace"]
 
-    def __init__(self, inplace: bool = False):
+    def __init__(self, p, inplace: bool = False):
         super(FusedBiasReLUDrop, self).__init__()
         self.inplace = False  # inplace
         if p < 0 or p > 1:
@@ -235,8 +231,6 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
                 ctx.save_for_backward(inp, rmask)
         ctx.dprm = 0
         if bias.dtype == torch.bfloat16: ctx.dprm=1
-        elif bias.dtype == torch.float8_e5m2: ctx.dprm=2
-        elif bias.dtype == torch.float8_e4m3fn: ctx.dprm=3
         ctx.alpha = alpha
         ctx.p = p
         ctx.align = align
@@ -289,8 +283,6 @@ class FusedBiasLeakyReLUFn(torch.autograd.Function):
         ctx.alpha = alpha
         ctx.dprm = 0
         if bias.dtype == torch.bfloat16: ctx.dprm=1
-        elif bias.dtype == torch.float8_e5m2: ctx.dprm=2
-        elif bias.dtype == torch.float8_e4m3fn: ctx.dprm=3
 
         return out
 
@@ -416,8 +408,6 @@ class AddBiasFn(torch.autograd.Function):
         out = fused_ops_cpp.add_bias_fwd(inputs)
         ctx.dprm = 0
         if bias.dtype == torch.bfloat16: ctx.dprm=1
-        elif bias.dtype == torch.float8_e5m2: ctx.dprm=2
-        elif bias.dtype == torch.float8_e4m3fn: ctx.dprm=3
 
         return out
 

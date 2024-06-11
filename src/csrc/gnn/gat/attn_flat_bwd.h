@@ -39,15 +39,15 @@ auto t_attn_tmp = t_attn.view({H * F});
 
 auto in = GetVLAPtr<Tact>(t_in, {bn, H, F});
 auto grad_out = GetVLAPtr<Tact>(t_grad_out_int, {bn, H});
-auto attn = GetVLAPtr<Tact>(t_attn_tmp, {F});
+auto attn = GetVLAPtr<Tprm>(t_attn_tmp, {F});
 auto grad_in_H_F = GetVLAPtr<Tact>(t_grad_in, {bn, H, F}); // (nn, bn, H, F)
-auto grad_attn = GetVLAPtr<Tact>(t_grad_attn, {H, F});
+auto grad_attn = GetVLAPtr<Tprm>(t_grad_attn, {H, F});
 
-auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tact>(H * F), EW_ZERO);
+auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tprm>(H * F), EW_ZERO);
 auto mul_bcast_tpp = SCOPEIT(
-    (BCastMulTPP<Tact, Tact, Tact>(H, F)),
+    (BCastMulTPP<Tact, Tprm, Tact>(H, F)),
     EW_MUL); // Eltwise Brtoadcast and Multiplication
-auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tact>(H, F)), EW_ADD);
+auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
 
 //==========================================Attn
 
@@ -55,7 +55,7 @@ auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tact>(H, F)), EW_ADD);
   RECORD_SCOPE(ga_dattn, {t_grad_out, t_grad_in, t_grad_attn});
   {
     tensor_set_zero(H, F, t_grad_attn);
-    Tact* attn_ptrs[threads];
+    Tprm* attn_ptrs[threads];
 
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
@@ -63,7 +63,7 @@ auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tact>(H, F)), EW_ADD);
       {
         int tid = omp_get_thread_num();
 
-        Tact prv_grad_attn[H][F];
+        Tprm prv_grad_attn[H][F];
         attn_ptrs[tid] = prv_grad_attn[0];
         set_attn_zero_tpp(prv_grad_attn[0]);
 
@@ -80,17 +80,17 @@ auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tact>(H, F)), EW_ADD);
       if (rem > 0) {
         // Grad_attn---------------------------------------------------
         auto in = GetVLAPtr<Tact>(t_in, {H, F}); // (nn, bn, H, F)
-        auto attn = GetVLAPtr<Tact>(t_attn_tmp, {F}); // (H, F)
+        auto attn = GetVLAPtr<Tprm>(t_attn_tmp, {F}); // (H, F)
         auto grad_out = GetVLAPtr<Tact>(t_grad_out_int, {H}); // (nn, bn, H)
         auto grad_in_H_F = GetVLAPtr<Tact>(t_grad_in, {H, F}); // (nn, bn, H, F)
-        auto grad_attn = GetVLAPtr<Tact>(t_grad_attn, {H, F});
+        auto grad_attn = GetVLAPtr<Tprm>(t_grad_attn, {H, F});
 
-        auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tact>(H * F), EW_ZERO);
-        auto mul_bcast_tpp = SCOPEIT((BCastMulTPP<Tact, Tact, Tact>(H, F)), EW_MUL);
-        auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tact>(H, F)), EW_ADD);
+        auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tprm>(H * F), EW_ZERO);
+        auto mul_bcast_tpp = SCOPEIT((BCastMulTPP<Tact, Tprm, Tact>(H, F)), EW_MUL);
+        auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
 
         int tid = omp_get_thread_num();
-        Tact prv_grad_attn[H][F];
+        Tprm prv_grad_attn[H][F];
         attn_ptrs[tid] = prv_grad_attn[0];
         set_attn_zero_tpp(prv_grad_attn[0]);
         for (int r = nn * bn; r < nn * bn + rem; r++) {

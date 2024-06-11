@@ -52,16 +52,20 @@ auto remp = rem;
 
 auto K = nk * bk;
 auto in_dtype = t_in.dtype();
-auto lp = get_vnni_block_size(in_dtype);
-if ((in_dtype == at::kBFloat16) || (in_dtype == at::kFloat8_e5m2) ||
-    (in_dtype == at::kFloat8_e4m3fn)) {
-  bnp = bn + bn % lp;
-  remp = rem + rem % lp;
+auto ilp = get_vnni_block_size(in_dtype);
+if (ilp > 1) {
+  auto d = bn % ilp;
+  d = rem % ilp;
+  bnp = d > 0 ? bn + (ilp - d) : bn;
+  remp = d > 0 ? rem + (ilp - d) : rem;
 }
 
+auto wlp = get_vnni_block_size(t_wt.dtype());
 if (t_wt.dim() == 5) {
-  bcp = bc + bc % lp;
-  bkp = bk + bk % lp;
+  auto d = bc % wlp;
+  bcp = d > 0 ? bc + (wlp - d) : bc;
+  d = bk % wlp;
+  bkp = d > 0 ? bk + (wlp - d) : bk;
 }
 
 long rd = (bk + 15) / 16;

@@ -52,8 +52,8 @@ namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
 #ifdef PYTORCH_SUPPORTS_FLOAT8
-typedef at::Float8_e5m2fnuz bfloat8;
-typedef at::Float8_e4m3fnuz hfloat8;
+typedef at::Float8_e5m2 bfloat8;
+typedef at::Float8_e4m3fn hfloat8;
 #endif
 
 inline float upconvert_to_float(float val) {

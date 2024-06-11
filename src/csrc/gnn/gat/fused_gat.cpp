@@ -59,8 +59,6 @@ std::vector<at::Tensor> mlp_attn_fwd(
   auto dwt = -1;
   if(inputs[1].dtype() == at::kFloat) dwt=0;
   else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[1].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[1].dtype() == at::kFloat8_e4m3fn) dwt=3;
 
   if(dact==0) {
     typedef float Tact;
@@ -72,14 +70,6 @@ std::vector<at::Tensor> mlp_attn_fwd(
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_fwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_attn_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "mlp_attn_flat_fwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -88,14 +78,6 @@ std::vector<at::Tensor> mlp_attn_fwd(
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "mlp_attn_flat_fwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_attn_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "mlp_attn_flat_fwd.h"
     }
     else {
@@ -121,8 +103,6 @@ std::vector<at::Tensor> mlp_attn_bwd(
   auto dwt = -1;
   if(inputs[1].dtype() == at::kFloat) dwt=0;
   else if(inputs[2].dtype() == at::kBFloat16 || inputs[4].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[2].dtype() == at::kFloat8_e5m2 || inputs[4].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[2].dtype() == at::kFloat8_e4m3fn || inputs[4].dtype() == at::kFloat8_e4m3fn) dwt=3;
 
   if (dact==0) {
     typedef float Tact;
@@ -134,14 +114,6 @@ std::vector<at::Tensor> mlp_attn_bwd(
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_bwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_attn_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "mlp_attn_flat_bwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -150,14 +122,6 @@ std::vector<at::Tensor> mlp_attn_bwd(
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "mlp_attn_flat_bwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_attn_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "mlp_attn_flat_bwd.h"
     }
     else {
@@ -179,8 +143,6 @@ at::Tensor mlp_fwd(long align, int add_bias, std::vector<at::Tensor> inputs) {
   auto dwt = -1;
   if(inputs[1].dtype() == at::kFloat) dwt=0;
   else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[1].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[1].dtype() == at::kFloat8_e4m3fn) dwt=3;
   
   if (dact == 0) {
     typedef float Tact;
@@ -192,14 +154,6 @@ at::Tensor mlp_fwd(long align, int add_bias, std::vector<at::Tensor> inputs) {
       typedef bfloat16 Tprm;
 #include "mlp_flat_fwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "mlp_flat_fwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -208,14 +162,6 @@ at::Tensor mlp_fwd(long align, int add_bias, std::vector<at::Tensor> inputs) {
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "mlp_flat_fwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "mlp_flat_fwd.h"
     }
     else {
@@ -241,8 +187,6 @@ std::vector<at::Tensor> mlp_bwd(
   auto dwt = -1;
   if(inputs[2].dtype() == at::kFloat) dwt=0;
   else if(inputs[2].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[2].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[2].dtype() == at::kFloat8_e4m3fn) dwt=3;
 
   if (dact == 0) {
     typedef float Tact;
@@ -254,14 +198,6 @@ std::vector<at::Tensor> mlp_bwd(
       typedef bfloat16 Tprm;
 #include "mlp_flat_bwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "mlp_flat_bwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -270,14 +206,6 @@ std::vector<at::Tensor> mlp_bwd(
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "mlp_flat_bwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "mlp_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "mlp_flat_bwd.h"
     }
     else {
@@ -299,8 +227,6 @@ at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
   auto dwt = -1;
   if(inputs[1].dtype() == at::kFloat) dwt=0;
   else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[1].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[1].dtype() == at::kFloat8_e4m3fn) dwt=3;
 
   if (dact == 0) {
     typedef float Tact;
@@ -312,14 +238,6 @@ at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
       typedef bfloat16 Tprm;
 #include "attn_flat_fwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "attn_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "attn_flat_fwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -328,14 +246,6 @@ at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "attn_flat_fwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "attn_flat_fwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "attn_flat_fwd.h"
     }
     else {
@@ -357,8 +267,6 @@ std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
   auto dwt = -1;
   if(inputs[2].dtype() == at::kFloat) dwt=0;
   else if(inputs[2].dtype() == at::kBFloat16) dwt=1;
-  else if(inputs[2].dtype() == at::kFloat8_e5m2) dwt=2;
-  else if(inputs[2].dtype() == at::kFloat8_e4m3fn) dwt=3;
 
   if (dact == 0) {
     typedef float Tact;
@@ -370,14 +278,6 @@ std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
       typedef bfloat16 Tprm;
 #include "attn_flat_bwd.h"
     }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "attn_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
-#include "attn_flat_bwd.h"
-    }
     else {
       TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
@@ -386,14 +286,6 @@ std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
     typedef bfloat16 Tact;
     if(dwt == 1) {
       typedef bfloat16 Tprm;
-#include "attn_flat_bwd.h"
-    }
-    else if(dwt == 2) {
-      typedef bfloat8 Tprm;
-#include "attn_flat_bwd.h"
-    }
-    else if(dwt == 3) {
-      typedef hfloat8 Tprm;
 #include "attn_flat_bwd.h"
     }
     else {

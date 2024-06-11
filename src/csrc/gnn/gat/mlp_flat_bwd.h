@@ -82,20 +82,12 @@ if (add_bias) {
     t_grad_bias = at::empty({nk * bk});
   else if(dwt == 1)
     t_grad_bias = at::empty({nk * bk}, at::kBFloat16);
-  else if(dwt == 2)
-    t_grad_bias = at::empty({nk * bk}, at::kFloat8_e5m2);
-  else if(dwt == 3)
-    t_grad_bias = at::empty({nk * bk}, at::kFloat8_e4m3fn);
 }
 else {
   if(dwt == 0)
     t_grad_bias = at::empty(0);
   else if(dwt == 1)
     t_grad_bias = at::empty(0, at::kBFloat16);
-  else if(dwt == 2)
-    t_grad_bias = at::empty(0, at::kFloat8_e5m2);
-  else if(dwt == 3)
-    t_grad_bias = at::empty(0, at::kFloat8_e4m3fn);
 }
 
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, nk, bk});
