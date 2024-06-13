@@ -11,9 +11,8 @@
 ###############################################################################
 
 set -e
-ARCH=$(lscpu | grep Architecture | awk '{print $2}')
 HERE=$(cd "$(dirname "$0")" && pwd -P)
-CONDA_INSTALL_DIR=`realpath ./miniconda3`
+CONDA_INSTALL_DIR=`realpath ./miniforge3`
 ENV_NAME=pt220
 
 while (( "$#" )); do
@@ -38,45 +37,46 @@ while (( "$#" )); do
   esac
 done
 
-if ! test -f Miniconda3-latest-Linux-${ARCH}.sh ; then
-  wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${ARCH}.sh
+if ! test -f Miniforge3-Linux-$(uname -m).sh ; then
+  wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh -b -p ${CONDA_INSTALL_DIR}"
+  bash Miniforge3-Linux-$(uname -m).sh
 fi
 if ! test -d ${CONDA_INSTALL_DIR} ; then
-bash ./Miniconda3-latest-Linux-${ARCH}.sh -b -p ${CONDA_INSTALL_DIR}
+  bash ./Miniforge3-Linux-$(uname -m).sh -b -p ${CONDA_INSTALL_DIR}
 fi
 if ! test -d ${CONDA_INSTALL_DIR}/envs/${ENV_NAME} ; then
 ${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.9
 fi
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
-conda install -n base conda-libmamba-solver
+# conda install -n base conda-libmamba-solver
 # conda config --set solver libmamba
 
-if [ ${ARCH} == "x86_64" ] ; then
+if [ $(uname -m) == "x86_64" ] ; then
   conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
   conda install -y gperftools -c conda-forge
   conda install -y pytorch==2.2.0 torchvision torchaudio cpuonly -c pytorch
-elif [ ${ARCH} == "aarch64" ] ; then
+elif [ $(uname -m) == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
 conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
-conda install -y -c anaconda openblas
+conda install -y -c conda-forge openblas
 else
-  echo "Unknown architecture: ${ARCH}"
+  echo "Unknown architecture: $(uname -m)"
   exit 1
 fi
-# for bert
-conda install -y pybind11
-conda install -y h5py onnx tensorboardx -c anaconda -c conda-forge
+# for bert / llm
+conda install -y pybind11 -c conda-forge
+conda install -y h5py onnx tensorboardx -c conda-forge
 
 # for unbuffer
 #conda install -y -c eumetsat expect
 
-if [ ${ARCH} == "x86_64" ] ; then
+if [ $(uname -m) == "x86_64" ] ; then
   # for development (code formatting)
   conda install -y black=22.6.0 clang-format=5.0.1 -c sarcasm -c conda-forge
   conda install -y intel-openmp -c intel
   # Need to downgrad mkl from 2024.1 due to undefined symbol error
-  conda install -y mkl=2024.0
+  conda install -y mkl=2024.0 -c intel
 fi
 
 # ENV_FN_NAME=env_${ENV_NAME}.sh
@@ -94,7 +94,7 @@ fi
 NUM_THREADS=\$(lscpu | grep "Core(s) per socket" | awk '{print \$NF}')
 ARCH=\$(lscpu | grep "Architecture" | awk '{print \$NF}')
 export OMP_NUM_THREADS=\${NUM_THREADS}
-if [ \${ARCH} == "x86_64" ] ; then
+if [ \$(uname -m) == "x86_64" ] ; then
   export KMP_AFFINITY=compact,1,granularity=fine
   export KMP_BLOCKTIME=1
   export LD_PRELOAD=\${CONDA_PREFIX}/lib/libtcmalloc.so:\${CONDA_PREFIX}/lib/libiomp5.so
