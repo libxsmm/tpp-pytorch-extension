@@ -13,7 +13,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 CONDA_INSTALL_DIR=`realpath ./miniforge3`
-ENV_NAME=pt220
+ENV_NAME=pt231
 
 while (( "$#" )); do
   case "$1" in
@@ -55,7 +55,7 @@ source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 if [ $(uname -m) == "x86_64" ] ; then
   conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
   conda install -y gperftools -c conda-forge
-  conda install -y pytorch==2.2.0 torchvision torchaudio cpuonly -c pytorch
+  conda install -y pytorch==2.3.1 torchvision torchaudio cpuonly -c pytorch
 elif [ $(uname -m) == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
 conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
