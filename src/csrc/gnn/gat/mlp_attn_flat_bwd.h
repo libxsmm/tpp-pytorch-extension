@@ -208,10 +208,11 @@ auto brgemm_dw_lp_tpp_b1 =
           for (int b = 0; b < bn; b++) {
             mul_bcast_tpp(
                 attn_grad_out[n][b], attn[0], attn_grad_in_H_F[n][b][0]);
-            add_tpp(
-                attn_grad_in_H_F[n][b][0],
-                grad_out_H_F[n][b][0],
-                grad_out_H_F[n][b][0]); // grad_attn_in + grad_out = grad_out
+            if(res_spmm)
+              add_tpp(
+                  attn_grad_in_H_F[n][b][0],
+                  grad_out_H_F[n][b][0],
+                  grad_out_H_F[n][b][0]); // grad_attn_in + grad_out = grad_out
           }
           mul_add_bcast_tpp(
               attn_grad_out[n][0], attn_in[n][0][0], prv_grad_attn[0]);
@@ -254,8 +255,9 @@ auto brgemm_dw_lp_tpp_b1 =
                                                                   // (HF) ->
                                                                   // (HF)
 
-          add_tpp(
-              attn_grad_in_H_F[r][0], grad_out_H_F[r][0], grad_out_H_F[r][0]);
+          if(res_spmm)
+            add_tpp(
+                attn_grad_in_H_F[r][0], grad_out_H_F[r][0], grad_out_H_F[r][0]);
         }
         omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0], true);
       }
@@ -354,7 +356,6 @@ if (inp_needs_grad) {
           int n = n3c / nc;
           int c = n3c % nc;
 
-          brgemm_di_tpp.config();
           brgemm_di_tpp(
               grad_out[n][0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
         }
@@ -395,7 +396,6 @@ if (inp_needs_grad) {
         for (int c = 0; c < nc; c++) {
           brgemm_di_tpp(tmp[0][0], wt_TV[0][c], grad_in[nn * bn][c], nk, true);
         }
-        brgemm_di_tpp.release();
       } else { // Grad_in Brgemm computation if bk == bkp
         for (int c = 0; c < nc; c++) {
           brgemm_di_tpp(

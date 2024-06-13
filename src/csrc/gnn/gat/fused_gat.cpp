@@ -93,6 +93,7 @@ std::vector<at::Tensor> mlp_attn_bwd(
     long align,
     int inp_needs_grad,
     int add_bias,
+    int res_spmm,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
 
