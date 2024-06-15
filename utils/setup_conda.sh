@@ -38,8 +38,7 @@ while (( "$#" )); do
 done
 
 if ! test -f Miniforge3-Linux-$(uname -m).sh ; then
-  wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh -b -p ${CONDA_INSTALL_DIR}"
-  bash Miniforge3-Linux-$(uname -m).sh
+  wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-$(uname -m).sh"
 fi
 if ! test -d ${CONDA_INSTALL_DIR} ; then
   bash ./Miniforge3-Linux-$(uname -m).sh -b -p ${CONDA_INSTALL_DIR}
