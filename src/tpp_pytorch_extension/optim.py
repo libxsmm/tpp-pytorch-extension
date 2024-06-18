@@ -180,7 +180,9 @@ class AdamW(Optimizer):
                 #     raise RuntimeError(
                 #         "Adam does not support sparse gradients, please consider SparseAdam instead"
                 #     )
-                fp8_data = hasattr(torch, "bfloat8") and (p.data.dtype == torch.bfloat8 or p.data.dtype == torch.hfloat8)
+                fp8_data = hasattr(torch, "bfloat8") and (
+                    p.data.dtype == torch.bfloat8 or p.data.dtype == torch.hfloat8
+                )
                 if fp8_data:
                     data = data.to(torch.float)
                     grad = grad.to(torch.float)

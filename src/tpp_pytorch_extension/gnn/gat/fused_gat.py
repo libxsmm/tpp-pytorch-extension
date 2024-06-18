@@ -66,12 +66,7 @@ class MLPAttentionFunction(torch.autograd.Function):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
         if ctx.fuse_bias:
-            (
-                grad_inp,
-                grad_wt,
-                grad_attn,
-                grad_bias,
-            ) = fused_gat_cpp.mlp_attn_bwd(
+            (grad_inp, grad_wt, grad_attn, grad_bias,) = fused_gat_cpp.mlp_attn_bwd(
                 ctx.align,
                 1 if ctx.inp_needs_grad else 0,
                 1,

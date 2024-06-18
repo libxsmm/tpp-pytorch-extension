@@ -43,11 +43,7 @@ class SAGEMLPFunction(torch.autograd.Function):
     def forward(ctx, align, apply_bias, p, act, res, training, *inputs):
         if res:
             (inp, inp_res, wt, res_wt, bias) = inputs
-            (
-                out,
-                act_mask,
-                dp_mask,
-            ) = fused_gsage_cpp.mlp_fwd(
+            (out, act_mask, dp_mask,) = fused_gsage_cpp.mlp_fwd(
                 align, apply_bias, p, act, res, training, inputs
             )
         else:

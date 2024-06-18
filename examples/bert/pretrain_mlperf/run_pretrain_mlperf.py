@@ -202,11 +202,9 @@ class pretraining_dataset_v1(Dataset):
             masked_lm_ids,
             next_sentence_labels,
         ] = [
-            (
-                torch.from_numpy(input[index].astype(np.int64))
-                if indice < 5
-                else torch.from_numpy(np.asarray(input[index].astype(np.int64)))
-            )
+            torch.from_numpy(input[index].astype(np.int64))
+            if indice < 5
+            else torch.from_numpy(np.asarray(input[index].astype(np.int64)))
             for indice, input in enumerate(self.inputs)
         ]
         masked_lm_labels = torch.zeros(input_ids.shape, dtype=torch.long) - 100
@@ -278,11 +276,9 @@ class pretraining_dataset_v2(Dataset):
                 _masked_lm_ids,
                 _next_sentence_labels,
             ] = [
-                (
-                    input[index].astype(np.int64)
-                    if indice < 4
-                    else np.asarray(input[index].astype(np.int64))
-                )
+                input[index].astype(np.int64)
+                if indice < 4
+                else np.asarray(input[index].astype(np.int64))
                 for indice, input in enumerate(self.inputs)
             ]
         else:
@@ -366,9 +362,9 @@ class synthetic_dataset(Dataset):
             )
             masked_lm_labels = np.zeros(input_ids.shape, dtype=np.int64)
             masked_count = torch.randint(max_pred_length, (1,))
-            masked_lm_labels[torch.randint(max_pred_length, (masked_count,))] = (
-                torch.randint(2048, 30000, (masked_count,))
-            )
+            masked_lm_labels[
+                torch.randint(max_pred_length, (masked_count,))
+            ] = torch.randint(2048, 30000, (masked_count,))
             self.samples.append(
                 [
                     torch.from_numpy(input_ids),
@@ -1253,11 +1249,9 @@ def main():
     )
     mlperf_logger.log_event(
         key="num_warmup_steps",
-        value=(
-            int(args.warmup_proportion * args.max_steps)
-            if args.warmup_steps == 0
-            else args.warmup_steps
-        ),
+        value=int(args.warmup_proportion * args.max_steps)
+        if args.warmup_steps == 0
+        else args.warmup_steps,
         sync=False,
     )
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
