@@ -22,7 +22,17 @@ if [ "x$pt_version" == "x" ] ; then
   exit 1
 fi
 
-branch=$(echo $pt_version | tr "." " " | awk '{print "ccl_torch" $1 "." $2}')
+# branch=$(echo $pt_version | tr "." " " | awk '{print "ccl_torch" $1 "." $2}')
+case $pt_version in
+  2.3.*)
+    branch="v2.3.0+cpu" ;;
+  2.2.*)
+    branch="v2.2.0+cpu" ;;
+  2.1.*)
+    branch="v2.1.0+cpu" ;;
+  2.0.*)
+    branch="v2.0.0+cpu" ;;
+esac
 
 if ! test -d ./torch-ccl ; then
   git clone https://github.com/intel/torch-ccl.git

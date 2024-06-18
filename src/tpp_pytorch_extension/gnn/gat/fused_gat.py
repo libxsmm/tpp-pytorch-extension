@@ -603,6 +603,8 @@ class GATConvOpt(BlockedModule):
 
             if self.bias_act_drop is not None:
                 rst = self.bias_act_drop(rst, self.bias)
+            elif self.bias_act is not None:
+                rst = self.bias_act(rst, self.bias)
             elif self.add_bias is not None:
                 rst = self.add_bias(rst, self.bias)
             elif self.act_drop is not None:
