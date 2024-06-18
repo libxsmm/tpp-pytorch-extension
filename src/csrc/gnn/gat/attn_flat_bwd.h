@@ -86,8 +86,10 @@ auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
         auto grad_attn = GetVLAPtr<Tprm>(t_grad_attn, {H, F});
 
         auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tprm>(H * F), EW_ZERO);
-        auto mul_bcast_tpp = SCOPEIT((BCastMulTPP<Tact, Tprm, Tact>(H, F)), EW_MUL);
-        auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
+        auto mul_bcast_tpp =
+            SCOPEIT((BCastMulTPP<Tact, Tprm, Tact>(H, F)), EW_MUL);
+        auto mul_add_bcast_tpp =
+            SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
 
         int tid = omp_get_thread_num();
         Tprm prv_grad_attn[H][F];

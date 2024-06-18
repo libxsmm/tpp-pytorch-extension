@@ -145,7 +145,8 @@ class FusedBiasReLUFn(torch.autograd.Function):
         if training:
             ctx.save_for_backward(rmask)
             ctx.dprm = 0
-            if bias.dtype == torch.bfloat16: ctx.dprm=1
+            if bias.dtype == torch.bfloat16:
+                ctx.dprm = 1
 
         return out
 
@@ -180,7 +181,8 @@ class FusedBiasReLUDropFn(torch.autograd.Function):
             ctx.save_for_backward(rmask)
         ctx.p = p
         ctx.dprm = 0
-        if bias.dtype == torch.bfloat16: ctx.dprm=1
+        if bias.dtype == torch.bfloat16:
+            ctx.dprm = 1
 
         return out
 
@@ -230,7 +232,8 @@ class FusedBiasLeakyReLUDropFn(torch.autograd.Function):
             if training:
                 ctx.save_for_backward(inp, rmask)
         ctx.dprm = 0
-        if bias.dtype == torch.bfloat16: ctx.dprm=1
+        if bias.dtype == torch.bfloat16:
+            ctx.dprm = 1
         ctx.alpha = alpha
         ctx.p = p
         ctx.align = align
@@ -282,7 +285,8 @@ class FusedBiasLeakyReLUFn(torch.autograd.Function):
             ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
         ctx.dprm = 0
-        if bias.dtype == torch.bfloat16: ctx.dprm=1
+        if bias.dtype == torch.bfloat16:
+            ctx.dprm = 1
 
         return out
 
@@ -407,7 +411,8 @@ class AddBiasFn(torch.autograd.Function):
         inputs = [inp, bias]
         out = fused_ops_cpp.add_bias_fwd(inputs)
         ctx.dprm = 0
-        if bias.dtype == torch.bfloat16: ctx.dprm=1
+        if bias.dtype == torch.bfloat16:
+            ctx.dprm = 1
 
         return out
 

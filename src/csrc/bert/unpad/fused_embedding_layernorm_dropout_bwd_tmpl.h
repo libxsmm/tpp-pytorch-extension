@@ -150,9 +150,10 @@ auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(N * H), EW_ZERO);
     }
   }
 }
-return std::vector<at::Tensor>({t_grad_in_emb,
-                                t_grad_gamma,
-                                t_grad_beta,
-                                t_grad_word_emb,
-                                t_grad_pos_emb,
-                                t_grad_tt_emb});
+return std::vector<at::Tensor>(
+    {t_grad_in_emb,
+     t_grad_gamma,
+     t_grad_beta,
+     t_grad_word_emb,
+     t_grad_pos_emb,
+     t_grad_tt_emb});

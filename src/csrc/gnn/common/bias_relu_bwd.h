@@ -22,9 +22,9 @@ auto dK = (K + 15) / 16;
 auto t_grad_in = t_grad_out.new_empty({N, K});
 
 auto t_grad_bias = at::empty(0);
-if(dparam == 0)
+if (dparam == 0)
   t_grad_bias = at::empty({K});
-else if(dparam == 1)
+else if (dparam == 1)
   t_grad_bias = at::empty({K}, at::kBFloat16);
 
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});

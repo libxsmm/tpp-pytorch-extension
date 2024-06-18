@@ -20,9 +20,9 @@ long K = in_sizes[1];
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
 
 auto t_grad_bias = at::empty(0);
-if(dparam == 0) 
+if (dparam == 0)
   t_grad_bias = at::empty({K});
-else if(dparam == 1)
+else if (dparam == 1)
   t_grad_bias = at::empty({K}, at::kBFloat16);
 
 auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});

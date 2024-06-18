@@ -132,6 +132,7 @@ def convert_1tb_file(in_name, out_name):
 def write_tensor_to_binary_file(inp, out_name):
     gnn_utils_cpp.write_tensor_to_binary_file(inp, out_name)
 
+
 def glorot_initializer(tensor: torch.Tensor):
     a = math.sqrt(6.0 / (tensor.size(-2) + tensor.size(-1)))
     tensor.data.uniform_(-a, a)

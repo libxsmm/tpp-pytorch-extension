@@ -26,9 +26,9 @@ auto dK = (K + 15) / 16;
 
 auto t_grad_in = t_grad_out.new_empty({N, K});
 auto t_grad_bias = at::empty(0);
-if(dparam == 0)
+if (dparam == 0)
   t_grad_bias = at::empty({K});
-else if(dparam == 1)
+else if (dparam == 1)
   t_grad_bias = at::empty({K}, at::kBFloat16);
 
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, K});
@@ -70,7 +70,8 @@ if (p > 0) {
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
     }
     if (rem > 0) {
-      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
+      auto leaky_relu_bwd_tpp =
+          SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
       auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
       auto dropout_bwd_tpp = SCOPEIT(DropOutBwdTPP<Tact>(1, K, p), DROPOUT);
 
@@ -118,7 +119,8 @@ if (p > 0) {
       omp_reduce_buf(threads, K, bias_ptrs, grad_bias[0]);
     }
     if (rem > 0) {
-      auto leaky_relu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
+      auto leaky_relu_bwd_tpp =
+          SCOPEIT(LeakyReLUBwdTPP<Tact>(1, K, alpha), ACT);
       auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 
       auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});

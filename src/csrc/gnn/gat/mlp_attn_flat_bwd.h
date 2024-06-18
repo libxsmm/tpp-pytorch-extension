@@ -79,7 +79,8 @@ auto t_attn_grad_out_int =
 auto t_attn_tmp = t_attn.view({H * F});
 
 auto attn_in = GetVLAPtr<Tact>(t_attn_in, {bn, H, F});
-auto attn_grad_out = GetVLAPtr<Tact>(t_attn_grad_out_int, {bn, H}); // (nn, bn, nk)
+auto attn_grad_out =
+    GetVLAPtr<Tact>(t_attn_grad_out_int, {bn, H}); // (nn, bn, nk)
 auto attn = GetVLAPtr<Tprm>(t_attn_tmp, {F}); // (nk, bk)
 auto attn_grad_in_H_F =
     GetVLAPtr<Tact>(t_attn_grad_in, {bn, H, F}); // (nn, bn, H, F)
@@ -113,16 +114,15 @@ if (t_wt.dim() == 5) {
 }
 
 at::Tensor t_grad_bias;
-if(add_bias) {
-  if(dwt == 0)
+if (add_bias) {
+  if (dwt == 0)
     t_grad_bias = at::empty({nk * bk});
-  else if(dwt == 1)
+  else if (dwt == 1)
     t_grad_bias = at::empty({nk * bk}, at::kBFloat16);
-}
-else {
-  if(dwt == 0)
+} else {
+  if (dwt == 0)
     t_grad_bias = at::empty(0);
-  else if(dwt == 1)
+  else if (dwt == 1)
     t_grad_bias = at::empty(0, at::kBFloat16);
 }
 
@@ -141,17 +141,26 @@ auto in = GetVLAPtr<Tact>(t_in, {bn, nc, bc}); // flat layout for fp32
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(nk * bk), EW_ZERO);
 auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<Tact>(bn, 1, bkp), EW_ZERO);
 auto n2v_tpp = SCOPEIT(
-    XformExtTPP<Tact>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
+    XformExtTPP<
+        Tact>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
 auto n2v_wt_tpp = SCOPEIT(
     XformExtTPP<Tprm>(bc, bk, bcp, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
 auto cpy_tpp = SCOPEIT(CpyTPP<Tact>(bn, bk, bk, bkp), EW_COPY);
 
-auto brgemm_di_tpp = SCOPEIT(
-    (BrgemmTPP<
-        Tact,
-        Tact, Tprm>(bn, bc, bkp, bkp, nc* bc* bkp, nk* bkp, bc, nc* bc, 0.0, 0, nk)));
+auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
+    bn,
+    bc,
+    bkp,
+    bkp,
+    nc* bc* bkp,
+    nk* bkp,
+    bc,
+    nc* bc,
+    0.0,
+    0,
+    nk)));
 
 auto brgemm_dw_f32_tpp = SCOPEIT((BrgemmTPP<Tact, float>(
     bc,
@@ -208,7 +217,7 @@ auto brgemm_dw_lp_tpp_b1 =
           for (int b = 0; b < bn; b++) {
             mul_bcast_tpp(
                 attn_grad_out[n][b], attn[0], attn_grad_in_H_F[n][b][0]);
-            if(res_spmm)
+            if (res_spmm)
               add_tpp(
                   attn_grad_in_H_F[n][b][0],
                   grad_out_H_F[n][b][0],
@@ -233,7 +242,8 @@ auto brgemm_dw_lp_tpp_b1 =
         auto mul_bcast_tpp = SCOPEIT(
             (BCastMulTPP<Tact, Tprm, Tact>(H, F)),
             EW_MUL); // Eltwise Brtoadcast and Multiplication
-        auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
+        auto mul_add_bcast_tpp =
+            SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
         auto add_tpp = SCOPEIT((AddTPP<Tact, Tact>(H, F)), EW_ADD);
 
         int tid = omp_get_thread_num();
@@ -255,7 +265,7 @@ auto brgemm_dw_lp_tpp_b1 =
                                                                   // (HF) ->
                                                                   // (HF)
 
-          if(res_spmm)
+          if (res_spmm)
             add_tpp(
                 attn_grad_in_H_F[r][0], grad_out_H_F[r][0], grad_out_H_F[r][0]);
         }

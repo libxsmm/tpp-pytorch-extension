@@ -53,39 +53,41 @@ std::vector<at::Tensor> mlp_attn_fwd(
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[1].dtype() == at::kFloat) dwt=0;
-  else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
+  if (inputs[1].dtype() == at::kFloat)
+    dwt = 0;
+  else if (inputs[1].dtype() == at::kBFloat16)
+    dwt = 1;
 
-  if(dact==0) {
+  if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "mlp_attn_flat_fwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else if(dact==1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else {
-    TPP_ASSERT(0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+  } else {
+    TPP_ASSERT(
+        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
   }
 }
 
@@ -98,39 +100,42 @@ std::vector<at::Tensor> mlp_attn_bwd(
   GlobalPass _gp(BWD);
 
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[1].dtype() == at::kFloat) dwt=0;
-  else if(inputs[2].dtype() == at::kBFloat16 || inputs[4].dtype() == at::kBFloat16) dwt=1;
+  if (inputs[1].dtype() == at::kFloat)
+    dwt = 0;
+  else if (
+      inputs[2].dtype() == at::kBFloat16 || inputs[4].dtype() == at::kBFloat16)
+    dwt = 1;
 
-  if (dact==0) {
+  if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "mlp_attn_flat_bwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  } 
-  else if (dact == 1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_attn_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  } 
-  else {
-    TPP_ASSERT(0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+  } else {
+    TPP_ASSERT(
+        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
   }
 }
 
@@ -138,38 +143,39 @@ at::Tensor mlp_fwd(long align, int add_bias, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
 
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[1].dtype() == at::kFloat) dwt=0;
-  else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
-  
+  if (inputs[1].dtype() == at::kFloat)
+    dwt = 0;
+  else if (inputs[1].dtype() == at::kBFloat16)
+    dwt = 1;
+
   if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "mlp_flat_fwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else if (dact == 1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -182,39 +188,41 @@ std::vector<at::Tensor> mlp_bwd(
   GlobalPass _gp(BWD);
 
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[2].dtype() == at::kFloat) dwt=0;
-  else if(inputs[2].dtype() == at::kBFloat16) dwt=1;
+  if (inputs[2].dtype() == at::kFloat)
+    dwt = 0;
+  else if (inputs[2].dtype() == at::kBFloat16)
+    dwt = 1;
 
   if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "mlp_flat_bwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else if (dact == 1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "mlp_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  } 
-  else {
-    TPP_ASSERT(0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+  } else {
+    TPP_ASSERT(
+        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
   }
 }
 
@@ -222,38 +230,39 @@ at::Tensor attn_fwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
 
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[1].dtype() == at::kFloat) dwt=0;
-  else if(inputs[1].dtype() == at::kBFloat16) dwt=1;
+  if (inputs[1].dtype() == at::kFloat)
+    dwt = 0;
+  else if (inputs[1].dtype() == at::kBFloat16)
+    dwt = 1;
 
   if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "attn_flat_fwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "attn_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  } 
-  else if (dact == 1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "attn_flat_fwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -262,39 +271,41 @@ std::vector<at::Tensor> attn_bwd(long align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
 
   auto dact = -1;
-  if(inputs[0].dtype() == at::kFloat) dact=0;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  if (inputs[0].dtype() == at::kFloat)
+    dact = 0;
+  else if (inputs[0].dtype() == at::kBFloat16)
+    dact = 1;
 
   auto dwt = -1;
-  if(inputs[2].dtype() == at::kFloat) dwt=0;
-  else if(inputs[2].dtype() == at::kBFloat16) dwt=1;
+  if (inputs[2].dtype() == at::kFloat)
+    dwt = 0;
+  else if (inputs[2].dtype() == at::kBFloat16)
+    dwt = 1;
 
   if (dact == 0) {
     typedef float Tact;
-    if(dwt == 0) {
+    if (dwt == 0) {
       typedef float Tprm;
 #include "attn_flat_bwd.h"
-    }
-    else if(dwt == 1) {
+    } else if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "attn_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else if (dact == 1) {
+  } else if (dact == 1) {
     typedef bfloat16 Tact;
-    if(dwt == 1) {
+    if (dwt == 1) {
       typedef bfloat16 Tprm;
 #include "attn_flat_bwd.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
     }
-    else {
-      TPP_ASSERT(0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
-    }
-  }
-  else {
-    TPP_ASSERT(0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+  } else {
+    TPP_ASSERT(
+        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
   }
 }
 

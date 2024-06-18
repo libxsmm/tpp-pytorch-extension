@@ -329,13 +329,14 @@ if (training) {
 // auto t_APO = t_APD.permute({0, 2, 1, 4, 3, 5}).contiguous().view({B, N, S,
 // S});
 auto t_APO = t_APD;
-return std::vector<at::Tensor>({t_CL,
-                                t_APO,
-                                t_HS_T,
-                                null_EHS ? t_EHS_orig : t_EHS_T,
-                                t_QL_T,
-                                t_KL_V,
-                                t_VL_TV,
-                                t_AP,
-                                t_APD_T,
-                                t_APD_mask});
+return std::vector<at::Tensor>(
+    {t_CL,
+     t_APO,
+     t_HS_T,
+     null_EHS ? t_EHS_orig : t_EHS_T,
+     t_QL_T,
+     t_KL_V,
+     t_VL_TV,
+     t_AP,
+     t_APD_T,
+     t_APD_mask});

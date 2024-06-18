@@ -586,10 +586,10 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
   using Base::Hc;
   using Base::Hk;
   using Base::K;
+  using Base::loop_scheme;
   using Base::Nc;
   using Base::Ncb;
   using Base::Nk;
-  using Base::loop_scheme;
   using Base::postOpCBs;
   using Base::rem;
   using Base::weight_reuse;

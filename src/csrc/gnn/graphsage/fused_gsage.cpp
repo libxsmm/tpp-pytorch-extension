@@ -48,8 +48,7 @@ std::vector<at::Tensor> mlp_fwd(
   } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_flat_fwd.h"
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -68,8 +67,7 @@ std::vector<at::Tensor> mlp_bwd(
   } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "mlp_flat_bwd.h"
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -82,8 +80,7 @@ std::vector<at::Tensor> dropout_fwd(float p, at::Tensor inp, bool training) {
   } else if (inp.dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "dropout_fwd.h"
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -96,8 +93,7 @@ at::Tensor dropout_bwd(float p, std::vector<at::Tensor> inputs) {
   } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
 #include "dropout_bwd.h"
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }

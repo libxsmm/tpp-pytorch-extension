@@ -78,15 +78,14 @@ else
 
 at::Tensor t_grad_bias;
 if (add_bias) {
-  if(dwt == 0)
+  if (dwt == 0)
     t_grad_bias = at::empty({nk * bk});
-  else if(dwt == 1)
+  else if (dwt == 1)
     t_grad_bias = at::empty({nk * bk}, at::kBFloat16);
-}
-else {
-  if(dwt == 0)
+} else {
+  if (dwt == 0)
     t_grad_bias = at::empty(0);
-  else if(dwt == 1)
+  else if (dwt == 1)
     t_grad_bias = at::empty(0, at::kBFloat16);
 }
 
@@ -106,17 +105,26 @@ auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(nk * bk), EW_ZERO);
 auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<Tact>(bn, 1, bkp), EW_ZERO);
 auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(bn, bk, K), BIAS);
 auto n2v_tpp = SCOPEIT(
-    XformExtTPP<Tact>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
+    XformExtTPP<
+        Tact>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
 auto n2v_wt_tpp = SCOPEIT(
     XformExtTPP<Tprm>(bc, bk, bcp, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
 auto cpy_tpp = SCOPEIT(CpyTPP<Tact>(bn, bk, bk, bkp), EW_COPY);
 
-auto brgemm_di_tpp = SCOPEIT(
-    (BrgemmTPP<
-        Tact,
-        Tact, Tprm>(bn, bc, bkp, bkp, nc* bc* bkp, nk* bkp, bc, nc* bc, 0.0, 0, nk)));
+auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
+    bn,
+    bc,
+    bkp,
+    bkp,
+    nc* bc* bkp,
+    nk* bkp,
+    bc,
+    nc* bc,
+    0.0,
+    0,
+    nk)));
 
 auto brgemm_dw_f32_tpp = SCOPEIT((BrgemmTPP<Tact, float>(
     bc,

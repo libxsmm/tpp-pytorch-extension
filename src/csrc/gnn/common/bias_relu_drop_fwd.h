@@ -31,7 +31,8 @@ if (training && p > 0) {
   auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
   auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
   auto relu_fwd_tpp = SCOPEIT(ReLUFwdTPP<float>(1, K, true), ACT);
-  auto dropout_fwd_tpp = SCOPEIT((DropOutFwdTPP<float, Tact>(1, K, p)), DROPOUT);
+  auto dropout_fwd_tpp =
+      SCOPEIT((DropOutFwdTPP<float, Tact>(1, K, p)), DROPOUT);
   {
     RECORD_SCOPE(go_bias_relu_drop, {t_in});
     {

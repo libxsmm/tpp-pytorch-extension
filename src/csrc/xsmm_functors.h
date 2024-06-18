@@ -1717,9 +1717,7 @@ class EmbeddingBwdTPP {
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
-            (libxsmm_meltw_unary_flags)(
-                sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
-                                  : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
+            (libxsmm_meltw_unary_flags)(sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_COLS_IDX_OP_ADD) {}
   void operator()(Tin* in0, Tind* in1, Tout* out, int N) {
     unsigned long long _N = N;
@@ -5199,9 +5197,7 @@ class EmbBagFwdTPP {
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
-            (libxsmm_meltw_unary_flags)(
-                sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
-                                  : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
+            (libxsmm_meltw_unary_flags)(sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_COLS_IDX_OP_ADD) {}
   void operator()(Tout* output, Tin* weight, Tind* input, int N) {
     unsigned long long _N = N;

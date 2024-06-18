@@ -127,8 +127,7 @@ void scatter_features(
     } else {
 #include "scatter.h"
     }
-  }
-  else {
+  } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
 }
@@ -552,7 +551,8 @@ REGISTER_SUBMODULE(_gnn_utils, m) {
       "convert_1tb_file",
       &convert_1tb_file,
       "Convert large float file to bf16");
-  m.def("write_tensor_to_binary_file",
+  m.def(
+      "write_tensor_to_binary_file",
       &write_tensor_to_binary_file,
       "Write a PyTorch tensor as raw binary file");
 }

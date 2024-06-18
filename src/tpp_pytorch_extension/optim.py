@@ -183,7 +183,10 @@ class AdamW(Optimizer):
                 if hasattr(torch, "float8_e5m2") and p.data.dtype == torch.float8_e5m2:
                     data = data.to(torch.float)
                     grad = grad.to(torch.float)
-                if hasattr(torch, "float8_e4m3fn") and p.data.dtype == torch.float8_e4m3fn:
+                if (
+                    hasattr(torch, "float8_e4m3fn")
+                    and p.data.dtype == torch.float8_e4m3fn
+                ):
                     data = data.to(torch.float)
                     grad = grad.to(torch.float)
 
@@ -199,14 +202,23 @@ class AdamW(Optimizer):
                     # Lower bits for bf16 params
                     if p.data.dtype == torch.bfloat16:
                         state["low_bits"] = torch.zeros_like(p.data)
-                    elif hasattr(torch, "float8_e5m2") and p.data.dtype == torch.float8_e5m2:
+                    elif (
+                        hasattr(torch, "float8_e5m2")
+                        and p.data.dtype == torch.float8_e5m2
+                    ):
                         state["master_copy"] = data
-                    elif hasattr(torch, "float8_e4m3fn") and p.data.dtype == torch.float8_e4m3fn:
+                    elif (
+                        hasattr(torch, "float8_e4m3fn")
+                        and p.data.dtype == torch.float8_e4m3fn
+                    ):
                         state["master_copy"] = data
 
                 if hasattr(torch, "float8_e5m2") and p.data.dtype == torch.float8_e5m2:
                     data = state["master_copy"]
-                if hasattr(torch, "float8_e4m3fn") and p.data.dtype == torch.float8_e4m3fn:
+                if (
+                    hasattr(torch, "float8_e4m3fn")
+                    and p.data.dtype == torch.float8_e4m3fn
+                ):
                     data = state["master_copy"]
 
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
@@ -272,9 +284,15 @@ class AdamW(Optimizer):
                         group["eps"],
                         self.use_adam,
                     )
-                    if hasattr(torch, "float8_e5m2") and p.data.dtype == torch.float8_e5m2:
+                    if (
+                        hasattr(torch, "float8_e5m2")
+                        and p.data.dtype == torch.float8_e5m2
+                    ):
                         p.data.copy_(state["master_copy"].to(torch.float8_e5m2))
-                    elif hasattr(torch, "float8_e4m3fn") and p.data.dtype == torch.float8_e4m3fn:
+                    elif (
+                        hasattr(torch, "float8_e4m3fn")
+                        and p.data.dtype == torch.float8_e4m3fn
+                    ):
                         p.data.copy_(state["master_copy"].to(torch.float8_e4m3fn))
 
         return loss
