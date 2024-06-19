@@ -12,9 +12,15 @@ import math
 import torch
 from torch.optim import Optimizer
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.autograd import Function
+from dgl.nn.functional import edge_softmax
+from dgl.base import DGLError
+from dgl.nn.pytorch.utils import Identity
+import dgl.function as fn
+from dgl.utils import expand_as_pair
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
     BlockedModule,
@@ -23,33 +29,13 @@ from tpp_pytorch_extension.utils.blocked_layout import (
 from tpp_pytorch_extension.utils import blocked_layout, xsmm
 from tpp_pytorch_extension._C import _fused_gsage as fused_gsage_cpp
 from tpp_pytorch_extension._C import _xsmm as xsmm_cpp
+from ..common.fused_ops import FixLinear
 import time
 from contextlib import contextmanager
-from dgl.nn.pytorch.conv.sageconv import *
 
 torch.autograd.set_detect_anomaly(False)
 
-USE_BF16_PARAMS = True
-
-
-class DummyLinear(BlockedModule):
-    def __init__(self, in_features, out_features, bias=True):
-        super(DummyLinear, self).__init__()
-        self.weight = BlockedParameter(torch.Tensor(out_features, in_features))
-        if bias:
-            self.bias = BlockedParameter(torch.Tensor(out_features))
-        else:
-            self.register_parameter("bias", None)
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            nn.init.constant_(self.bias, 0)
-
-    def forward(self, input):
-        raise NotImplemented
-        return input
+global_layer_dtype = torch.float32
 
 
 class SAGEMLPFunction(torch.autograd.Function):
@@ -57,12 +43,12 @@ class SAGEMLPFunction(torch.autograd.Function):
     def forward(ctx, align, apply_bias, p, act, res, training, *inputs):
         if res:
             (inp, inp_res, wt, res_wt, bias) = inputs
-            (out, act_mask, dp_mask,) = fused_gsage_cpp.fused_gsage_mlp_fwd(
+            (out, act_mask, dp_mask,) = fused_gsage_cpp.mlp_fwd(
                 align, apply_bias, p, act, res, training, inputs
             )
         else:
             (inp, wt, bias) = inputs
-            out, act_mask, dp_mask = fused_gsage_cpp.fused_gsage_mlp_fwd(
+            out, act_mask, dp_mask = fused_gsage_cpp.mlp_fwd(
                 align, apply_bias, p, act, res, training, inputs
             )
 
@@ -97,7 +83,7 @@ class SAGEMLPFunction(torch.autograd.Function):
                 grad_wt,
                 grad_res_wt,
                 grad_bias,
-            ) = fused_gsage_cpp.fused_gsage_mlp_bwd(
+            ) = fused_gsage_cpp.mlp_bwd(
                 ctx.align, ctx.apply_bias, ctx.p, ctx.act, ctx.res, inputs
             )
 
@@ -115,27 +101,10 @@ class SAGEMLPFunction(torch.autograd.Function):
                 grad_bias,
             )
         else:
-            grad_inp, grad_wt, grad_bias = fused_gsage_cpp.fused_gsage_mlp_bwd(
+            grad_inp, grad_wt, grad_bias = fused_gsage_cpp.mlp_bwd(
                 ctx.align, ctx.apply_bias, ctx.p, ctx.act, ctx.res, inputs
             )
             return (None, None, None, None, None, None, grad_inp, grad_wt, grad_bias)
-
-
-class DropoutFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, p, training, inp):
-        outputs = fused_gsage_cpp.dropout_fwd(p, inp, training)
-        (out, dp_mask) = outputs
-        ctx.save_for_backward(dp_mask)
-        ctx.p = p
-        return out
-
-    @staticmethod
-    def backward(ctx, *grad_outs):
-        inputs = list(grad_outs)
-        inputs += ctx.saved_tensors
-        grad_inp = fused_gsage_cpp.dropout_bwd(ctx.p, inputs)
-        return (None, None, None, grad_inp)
 
 
 class SAGEConvOpt(BlockedModule):
@@ -148,6 +117,7 @@ class SAGEConvOpt(BlockedModule):
         bias=True,
         norm=None,
         activation=None,
+        layer_dtype=global_layer_dtype,
     ):
         super(SAGEConvOpt, self).__init__()
         self._in_src_feats, self._in_dst_feats = expand_as_pair(in_feats)
@@ -174,60 +144,36 @@ class SAGEConvOpt(BlockedModule):
                 break
 
         if aggregator_type.startswith("pool"):
-            self.fc_pool = DummyLinear(self._in_src_feats, self._in_src_feats)
+            self.fc_pool = torch.nn.Linear(self._in_src_feats, self._in_src_feats)
             bc = self._in_src_feats
             for cb in [50, 32, 16]:
                 if self._in_src_feats % cb == 0:
                     bc = cb
                     break
             bk = bc
+            FixLinear(self.fc_pool, self.bk, self.bc, layer_dtype)
 
-            self.fc_pool.weight.set_blocking_param(
-                (
-                    [bk, bc],
-                    [0, 2, 3, 1],
-                )
-            )
         if aggregator_type == "lstm":
             self.lstm = nn.LSTM(
                 self._in_src_feats, self._in_src_feats, batch_first=True
             )
         if aggregator_type != "gcn" and ("concat" not in aggregator_type):
             self.res = True
-            self.fc_self = DummyLinear(self._in_dst_feats, out_feats, bias=bias)
-            self.fc_self.weight.set_blocking_param(
-                (
-                    [self.bk, self.bc],
-                    [0, 2, 3, 1],
-                )
-            )
+            self.fc_self = torch.nn.Linear(self._in_dst_feats, out_feats, bias=bias)
+            FixLinear(self.fc_self, self.bk, self.bc, layer_dtype)
 
         if "concat" not in aggregator_type:
-            self.fc_neigh = DummyLinear(self._in_dst_feats, out_feats, bias=False)
+            self.fc_neigh = torch.nn.Linear(self._in_dst_feats, out_feats, bias=False)
         else:
-            self.fc_neigh = DummyLinear(
+            self.fc_neigh = torch.nn.Linear(
                 self._in_dst_feats + self._in_dst_feats, out_feats, bias=False
             )
-
-        self.fc_neigh.weight.set_blocking_param(
-            (
-                [self.bk, self.bc],
-                [0, 2, 3, 1],
-            )
-        )
+        FixLinear(self.fc_neigh, self.bk, self.bc, layer_dtype)
 
         if bias:
             self.apply_bias = True
-
-            if self.fc_self is not None:
-                if self.fc_self.bias is None:
-                    self.bias = BlockedParameter(torch.zeros(out_feats))
-            else:
-                self.bias = BlockedParameter(torch.zeros(out_feats))
         else:
             self.register_buffer("bias", None)
-
-        self.use_bf16 = False
 
         self.reset_parameters()
 
@@ -235,6 +181,7 @@ class SAGEConvOpt(BlockedModule):
         self.fc_neigh.weight.block()
         if self._aggre_type != "gcn" and ("concat" not in self._aggre_type):
             self.fc_self.weight.block()
+            self.fc_self.bias.block()
         if self._aggre_type.startswith("pool"):
             self.fc_pool.weight.block()
 
@@ -424,43 +371,3 @@ class SAGEConvOpt(BlockedModule):
             if self.norm is not None:
                 rst = self.norm(rst)
             return rst
-
-
-class SAGEConvOptBF16(SAGEConvOpt):
-    def __init__(
-        self,
-        in_feats,
-        out_feats,
-        aggregator_type,
-        feat_drop=0.0,
-        bias=True,
-        norm=None,
-        activation=None,
-    ):
-        super(SAGEConvOptBF16, self).__init__(
-            in_feats, out_feats, aggregator_type, feat_drop, bias, norm, activation
-        )
-        if USE_BF16_PARAMS:
-            self.fc_neigh.weight.set_blocking_param(
-                (
-                    [self.bk, [self.bc // 2, 2]],
-                    [0, 2, 3, 1, 4],
-                    torch.bfloat16,
-                )
-            )
-            if aggregator_type != "gcn":
-                self.fc_self.weight.set_blocking_param(
-                    (
-                        [self.bk, [self.bc // 2, 2]],
-                        [0, 2, 3, 1, 4],
-                        torch.bfloat16,
-                    )
-                )
-
-        self.use_bf16 = True
-
-
-def block(model):
-    for m in model.modules():
-        if hasattr(m, "maybe_block_params"):
-            m.maybe_block_params()

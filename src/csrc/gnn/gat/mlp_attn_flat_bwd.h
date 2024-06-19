@@ -8,21 +8,31 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("fused_mlp_flat_bwd", std::vector<c10::IValue>());
+RECORD_FUNCTION("fused_gat_mlp_flat_bwd_v4", std::vector<c10::IValue>());
 
-at::Tensor t_in, t_wt;
+at::Tensor t_in, t_wt, t_attn_in, t_attn;
 
 int i = 0;
 
 const int threads = omp_get_max_threads();
 
+auto t_attn_grad_out = inputs[i++].contiguous(); // 3D shape [N, H, 1]
 auto t_grad_out = inputs[i++].contiguous(); //[N, HF]
+
+t_attn_in = inputs[i++]; // t_attn_in = t_mlp_out = [N, HF]
+t_attn = inputs[i++]; // [1, H, F]
 
 t_in = inputs[i++]; // [N, HF]
 t_wt = inputs[i++]; // [nk, nc, bc, bk]
 
 auto in_sizes = t_in.sizes(); // [N C]
+auto attn_sizes = t_attn.sizes(); // 3D shape [1, H, F] = [1, 4, 128] let
+
 auto N = in_sizes[0];
+auto H = attn_sizes[1];
+auto F = attn_sizes[2];
+
+auto t_attn_grad_in = t_attn_in.new_empty({N, H* F});
 
 auto bn = align;
 auto nn = N / bn;
@@ -34,7 +44,7 @@ auto C = in_sizes[1];
 auto nk = wt_sizes[0];
 auto nc = wt_sizes[1];
 auto bc = wt_sizes[2];
-if (t_wt.dtype() == at::kBFloat16)
+if (t_wt.dim() == 5)
   bc = bc * wt_sizes[4];
 auto bk = wt_sizes[3];
 
@@ -44,16 +54,47 @@ auto bcp = bc;
 auto remp = rem;
 
 auto K = nk * bk;
+auto ilp = get_vnni_block_size(t_in.dtype());
+auto wlp = get_vnni_block_size(t_wt.dtype());
 
-if (t_in.dtype() == at::kBFloat16) {
-  bnp = bn + bn % 2;
-  remp = rem + rem % 2;
+if (ilp > 1) {
+  auto d = bn % ilp;
+  bnp = d > 0 ? bn + (ilp - d) : bn;
+  d = rem % ilp;
+  remp = d > 0 ? rem + (ilp - d) : rem;
 }
 
-if (t_wt.dtype() == at::kBFloat16) {
-  bcp = bc + bc % 2;
-  bkp = bk + bk % 2;
+if (t_wt.dim() == 5) {
+  auto d = bc % wlp;
+  bcp = d > 0 ? bc + (wlp - d) : bc;
+  d = bk % wlp;
+  bkp = d > 0 ? bk + (wlp - d) : bk;
 }
+
+// Attention-----------------
+
+auto t_grad_attn = t_attn.new_empty({H * F});
+auto t_attn_grad_out_int =
+    t_attn_grad_out.view({N, H}); // squeeze(-1); // (N, H, 1) -> (N, H)
+auto t_attn_tmp = t_attn.view({H * F});
+
+auto attn_in = GetVLAPtr<Tact>(t_attn_in, {bn, H, F});
+auto attn_grad_out =
+    GetVLAPtr<Tact>(t_attn_grad_out_int, {bn, H}); // (nn, bn, nk)
+auto attn = GetVLAPtr<Tprm>(t_attn_tmp, {F}); // (nk, bk)
+auto attn_grad_in_H_F =
+    GetVLAPtr<Tact>(t_attn_grad_in, {bn, H, F}); // (nn, bn, H, F)
+auto grad_attn = GetVLAPtr<Tprm>(t_grad_attn, {H, F});
+
+auto grad_out_H_F =
+    GetVLAPtr<Tact>(t_grad_out, {bn, H, F}); // mlp gradout (nn, bn, nk, bk)
+
+auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tprm>(H * F), EW_ZERO);
+auto mul_bcast_tpp = SCOPEIT(
+    (BCastMulTPP<Tact, Tprm, Tact>(H, F)),
+    EW_MUL); // Eltwise Broadcast and Multiplication
+auto mul_add_bcast_tpp = SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
+auto add_tpp = SCOPEIT((AddTPP<Tact, Tact>(H, F)), EW_ADD);
 
 //----------------------------
 const auto input_trans_flag =
@@ -66,47 +107,62 @@ auto t_grad_in = inp_needs_grad ? t_in.new_empty({N, C}) : t_in.new_empty(0);
 
 auto t_grad_wt = at::empty_like(t_wt);
 at::Tensor t_grad_wt_tmp;
-if (t_wt.dtype() == at::kBFloat16)
+if (t_wt.dim() == 5) {
   t_grad_wt_tmp = at::empty({nk, nc, bc, bk});
-else
+} else {
   t_grad_wt_tmp = t_grad_wt;
+}
 
-at::Tensor t_grad_bias = t_grad_out.new_empty(0);
-if (add_bias)
-  t_grad_bias = t_grad_out.new_empty({nk * bk});
+at::Tensor t_grad_bias;
+if (add_bias) {
+  if (dwt == 0)
+    t_grad_bias = at::empty({nk * bk});
+  else if (dwt == 1)
+    t_grad_bias = at::empty({nk * bk}, at::kBFloat16);
+} else {
+  if (dwt == 0)
+    t_grad_bias = at::empty(0);
+  else if (dwt == 1)
+    t_grad_bias = at::empty(0, at::kBFloat16);
+}
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {bn, nk, bk});
-auto grad_in = GetVLAPtr<T>(t_grad_in, {bn, nc, bc});
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, nk, bk});
+
+auto grad_in = GetVLAPtr<Tact>(t_grad_in, {bn, nc, bc});
 
 // del-weights and weights in blocked layout
-auto grad_wt = GetVLAPtr<T>(t_grad_wt, {nc, bc* bk});
+auto grad_wt = GetVLAPtr<Tprm>(t_grad_wt, {nc, bc* bk});
 auto grad_wt_tmp = GetVLAPtr<float>(t_grad_wt_tmp, {nc, bc* bk});
 
-auto wt_TV = GetVLAPtr<T>(t_wt_TV, {nc, bkp* bc});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {bk});
+auto wt_TV = GetVLAPtr<Tprm>(t_wt_TV, {nc, bkp* bc});
 
-auto in = GetVLAPtr<T>(t_in, {bn, nc, bc}); // flat layout for fp32
+auto in = GetVLAPtr<Tact>(t_in, {bn, nc, bc}); // flat layout for fp32
 
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(nk * bk), EW_ZERO);
-auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(bn, 1, bkp), EW_ZERO);
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(bn, bk, K), BIAS);
+auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<Tact>(bn, 1, bkp), EW_ZERO);
 auto n2v_tpp = SCOPEIT(
-    XformExtTPP<T>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
+    XformExtTPP<
+        Tact>(bn, bk, bnp, bk, nk* bk, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
 auto n2v_wt_tpp = SCOPEIT(
-    XformExtTPP<T>(bc, bk, bcp, bk, XformTPP::XFORM_N2V_TPP, true),
+    XformExtTPP<Tprm>(bc, bk, bcp, bk, XformTPP::XFORM_N2V_TPP, true),
     VNNI);
-auto cpy_tpp = SCOPEIT(CpyTPP<T>(bn, bk, bk, bkp), EW_COPY);
-auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(bn, bk, K, K)), EW_COPY);
-auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(bn, bk, K, K)), EW_COPY);
-auto add_gwt_tpp = SCOPEIT((AddTPP<float, float>(bc, bk)), EW_ADD);
+auto cpy_tpp = SCOPEIT(CpyTPP<Tact>(bn, bk, bk, bkp), EW_COPY);
 
-auto brgemm_di_tpp = SCOPEIT(
-    (BrgemmTPP<
-        T,
-        T>(bn, bc, bkp, bkp, nc* bc* bkp, nk* bkp, bc, nc* bc, 0.0, 0, nk)));
+auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
+    bn,
+    bc,
+    bkp,
+    bkp,
+    nc* bc* bkp,
+    nk* bkp,
+    bc,
+    nc* bc,
+    0.0,
+    0,
+    nk)));
 
-auto brgemm_dw_f32_tpp = SCOPEIT((BrgemmTPP<T, float>(
+auto brgemm_dw_f32_tpp = SCOPEIT((BrgemmTPP<Tact, float>(
     bc,
     bk,
     bnp,
@@ -118,7 +174,7 @@ auto brgemm_dw_f32_tpp = SCOPEIT((BrgemmTPP<T, float>(
     0.0,
     input_trans_flag,
     16)));
-auto brgemm_dw_f32_tpp_b1 = SCOPEIT((BrgemmTPP<T, float>(
+auto brgemm_dw_f32_tpp_b1 = SCOPEIT((BrgemmTPP<Tact, float>(
     bc,
     bk,
     bnp,
@@ -131,69 +187,145 @@ auto brgemm_dw_f32_tpp_b1 = SCOPEIT((BrgemmTPP<T, float>(
     input_trans_flag,
     16)));
 
-// BF16 del-wt brgemms
-auto brgemm_dw_bf16_tpp =
+// Low-prec del-wt brgemms
+auto brgemm_dw_lp_tpp =
     SCOPEIT((BrgemmTPP<
-             T,
+             Tact,
              float>(bc, bk, bnp, bc* bnp, bk* bnp, bnp, bk, bk, 0.0, 0, 16)));
-auto brgemm_dw_bf16_tpp_b1 =
+auto brgemm_dw_lp_tpp_b1 =
     SCOPEIT((BrgemmTPP<
-             T,
+             Tact,
              float>(bc, bk, bnp, bc* bnp, bk* bnp, bnp, bk, bk, 1.0, 0, 16)));
 
 {
-  RECORD_SCOPE(gm_dbias, {t_grad_out, t_grad_bias});
+  // Grad attention
+  RECORD_SCOPE(ga_fused_dattn, {t_grad_out, t_grad_attn});
   {
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-    if (add_bias) {
-      tensor_set_zero(nk, bk, t_grad_bias);
-      float* bias_ptrs[threads];
+    tensor_set_zero(H, F, t_grad_attn);
+    Tprm* attn_ptrs[threads];
+
+    {
+      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
       {
         int tid = omp_get_thread_num();
-        float prv_grad_bias[nk][bk];
-        bias_ptrs[tid] = prv_grad_bias[0];
-        set_zero_tpp(prv_grad_bias[0]);
-
+        Tprm prv_grad_attn[H][F];
+        attn_ptrs[tid] = prv_grad_attn[0];
+        set_attn_zero_tpp(prv_grad_attn[0]);
 #pragma omp for
         for (int n = 0; n < nn; n++) {
-          for (int k = 0; k < nk; k++) {
-            grad_bias_tpp(grad_out[n][0][k], prv_grad_bias[k]);
+          for (int b = 0; b < bn; b++) {
+            mul_bcast_tpp(
+                attn_grad_out[n][b], attn[0], attn_grad_in_H_F[n][b][0]);
+            if (res_spmm)
+              add_tpp(
+                  attn_grad_in_H_F[n][b][0],
+                  grad_out_H_F[n][b][0],
+                  grad_out_H_F[n][b][0]); // grad_attn_in + grad_out = grad_out
           }
+          mul_add_bcast_tpp(
+              attn_grad_out[n][0], attn_in[n][0][0], prv_grad_attn[0]);
         }
-        omp_reduce_buf(threads, nk * bk, bias_ptrs, grad_bias[0]);
+        omp_reduce_buf(threads, H * F, attn_ptrs, grad_attn[0][0]);
       }
-
       if (rem > 0) {
-        // Grad_bias---------------------------------------------------
-        auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
+        auto attn_in = GetVLAPtr<Tact>(t_attn_in, {H, F}); // (nn, bn, H, F)
+        auto attn = GetVLAPtr<Tprm>(t_attn_tmp, {F}); // (H, F)
+        auto attn_grad_out =
+            GetVLAPtr<Tact>(t_attn_grad_out_int, {H}); // (nn, bn, H)
+        auto attn_grad_in_H_F =
+            GetVLAPtr<Tact>(t_attn_grad_in, {H, F}); // (nn, bn, H, F)
+        auto grad_attn = GetVLAPtr<Tprm>(t_grad_attn, {H, F});
+        auto grad_out_H_F = GetVLAPtr<Tact>(t_grad_out, {H, F});
 
-        auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, bk, K), BIAS);
+        auto set_attn_zero_tpp = SCOPEIT(SetZeroTPP<Tprm>(H * F), EW_ZERO);
+        auto mul_bcast_tpp = SCOPEIT(
+            (BCastMulTPP<Tact, Tprm, Tact>(H, F)),
+            EW_MUL); // Eltwise Brtoadcast and Multiplication
+        auto mul_add_bcast_tpp =
+            SCOPEIT((BCastMulAddTPP<Tact, Tprm>(H, F)), EW_ADD);
+        auto add_tpp = SCOPEIT((AddTPP<Tact, Tact>(H, F)), EW_ADD);
 
-        float prv_grad_bias[nk][bk];
-        bias_ptrs[0] = prv_grad_bias[0];
-        set_zero_tpp(prv_grad_bias[0]);
+        int tid = omp_get_thread_num();
+        Tprm prv_grad_attn[H][F];
+        attn_ptrs[tid] = prv_grad_attn[0];
+        set_attn_zero_tpp(prv_grad_attn[0]);
+        for (int r = nn * bn; r < nn * bn + rem; r++) {
+          mul_bcast_tpp(
+              attn_grad_out[r], attn[0], attn_grad_in_H_F[r][0]); // N, H) ->
+                                                                  // (N, HF) ->
+                                                                  // (HF) * (N,
+                                                                  // HF) -> (N,
+                                                                  // HF)
+          mul_add_bcast_tpp(
+              attn_grad_out[r], attn_in[r][0], prv_grad_attn[0]); // (N, HF) *
+                                                                  // (N, HF) ->
+                                                                  // (N, HF) ->
+                                                                  // (N, HF) +
+                                                                  // (HF) ->
+                                                                  // (HF)
 
-        for (int k = 0; k < nk; k++) {
-          for (int r = 0; r < rem; r++) {
-            grad_bias_tpp(grad_out[nn * bn + r][k], prv_grad_bias[k]);
-          }
+          if (res_spmm)
+            add_tpp(
+                attn_grad_in_H_F[r][0], grad_out_H_F[r][0], grad_out_H_F[r][0]);
         }
-        omp_reduce_buf(1, nk * bk, bias_ptrs, grad_bias[0], true);
+        omp_reduce_buf(1, H * F, attn_ptrs, grad_attn[0][0], true);
       }
     }
   }
 }
 
+if (add_bias) {
+  auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(bn, bk, K), BIAS);
+  // Grad Bias
+  RECORD_SCOPE(ga_fused_dbias, {t_grad_out, t_grad_bias});
+  {
+    auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {bk});
+    tensor_set_zero(nk, bk, t_grad_bias);
+    float* bias_ptrs[threads];
+
+    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+#pragma omp parallel
+    {
+      int tid = omp_get_thread_num();
+      float prv_grad_bias[nk][bk];
+      bias_ptrs[tid] = prv_grad_bias[0];
+      set_zero_tpp(prv_grad_bias[0]);
+#pragma omp for
+      for (int n = 0; n < nn; n++) {
+        for (int k = 0; k < nk; k++) {
+          grad_bias_tpp(grad_out[n][0][k], prv_grad_bias[k]);
+        }
+      }
+      omp_reduce_buf(threads, nk * bk, bias_ptrs, grad_bias[0]);
+    }
+    if (rem > 0) {
+      auto grad_out = GetVLAPtr<Tact>(t_grad_out, {nk, bk});
+      auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, bk, K), BIAS);
+
+      float prv_grad_bias[nk][bk];
+      bias_ptrs[0] = prv_grad_bias[0];
+      set_zero_tpp(prv_grad_bias[0]);
+
+      for (int k = 0; k < nk; k++) {
+        for (int r = 0; r < rem; r++) {
+          grad_bias_tpp(grad_out[nn * bn + r][k], prv_grad_bias[k]);
+        }
+      }
+      omp_reduce_buf(1, nk * bk, bias_ptrs, grad_bias[0], true);
+    }
+  }
+}
+
 if (inp_needs_grad) {
-  RECORD_SCOPE(gmdi_gemm, {t_grad_out, t_grad_in});
+  RECORD_SCOPE(ga_fused_din, {t_grad_out, t_grad_in});
   {
     if (bk != bkp) {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
       {
         brgemm_di_tpp.config();
-        T tmp[bn][nk][bkp];
+        Tact tmp[bn][nk][bkp];
         for (int k = 0; k < nk; k++)
           set_zero_col_tpp(&tmp[0][k][bk]);
 
@@ -234,7 +366,6 @@ if (inp_needs_grad) {
           int n = n3c / nc;
           int c = n3c % nc;
 
-          brgemm_di_tpp.config();
           brgemm_di_tpp(
               grad_out[n][0][0], wt_TV[0][c], grad_in[n][0][c], nk, true);
         }
@@ -244,14 +375,13 @@ if (inp_needs_grad) {
 
     if (rem > 0) {
       // Grad_in-----------------------------------------------------
-      auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
-      auto grad_in = GetVLAPtr<T>(t_grad_in, {nc, bc});
-      auto wt_TV = GetVLAPtr<T>(t_wt_TV, {nc, bc * bkp});
+      auto grad_out = GetVLAPtr<Tact>(t_grad_out, {nk, bk});
+      auto grad_in = GetVLAPtr<Tact>(t_grad_in, {nc, bc});
+      auto wt_TV = GetVLAPtr<Tprm>(t_wt_TV, {nc, bc * bkp});
 
-      auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<T>(rem, 1, bkp), EW_ZERO);
-      auto cpy_tpp = SCOPEIT(CpyTPP<T>(rem, bk, bk, bkp), EW_COPY);
-      auto cvt_tpp = SCOPEIT((ConvertTPP<float, T>(rem, bc, C, C)), EW_COPY);
-      auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<T, T>(
+      auto set_zero_col_tpp = SCOPEIT(SetZeroTPP<Tact>(rem, 1, bkp), EW_ZERO);
+      auto cpy_tpp = SCOPEIT(CpyTPP<Tact>(rem, bk, bk, bkp), EW_COPY);
+      auto brgemm_di_tpp = SCOPEIT((BrgemmTPP<Tact, Tact, Tprm>(
           rem,
           bc,
           bkp,
@@ -267,7 +397,7 @@ if (inp_needs_grad) {
       brgemm_di_tpp.config();
 
       if (bk != bkp) {
-        T tmp[rem][nk][bkp];
+        Tact tmp[rem][nk][bkp];
 
         for (int k = 0; k < nk; k++) {
           set_zero_col_tpp(&tmp[0][k][bk]);
@@ -276,7 +406,6 @@ if (inp_needs_grad) {
         for (int c = 0; c < nc; c++) {
           brgemm_di_tpp(tmp[0][0], wt_TV[0][c], grad_in[nn * bn][c], nk, true);
         }
-        brgemm_di_tpp.release();
       } else { // Grad_in Brgemm computation if bk == bkp
         for (int c = 0; c < nc; c++) {
           brgemm_di_tpp(
@@ -290,10 +419,10 @@ if (inp_needs_grad) {
 
 auto trans_tpp = SCOPEIT(
     XformExtTPP<
-        T>(bn, bc, bc, bnp, nc* bc, bnp, XformTPP::XFORM_XPOSE_TPP, true),
+        Tact>(bn, bc, bc, bnp, nc* bc, bnp, XformTPP::XFORM_XPOSE_TPP, true),
     XPOSE);
 {
-  RECORD_SCOPE(gmdw_gemm, {t_in, t_grad_out});
+  RECORD_SCOPE(gadw_gemm, {t_in, t_grad_out});
   {
     if (nn > 0) {
       int upd_n_weight_copies;
@@ -319,7 +448,7 @@ auto trans_tpp = SCOPEIT(
       int blocks_per_layer =
           (nn + upd_n_weight_copies - 1) / upd_n_weight_copies;
       // std::cout << " upd_n_weight_copies: " << upd_n_weight_copies << " nn "
-      // << nn << " blocks_per_layer " << blocks_per_layer << std::endl;
+      //<< nn << " blocks_per_layer " << blocks_per_layer << std::endl;
       int reduce_rows = (nn % blocks_per_layer == 0)
           ? (nn / blocks_per_layer)
           : (nn / blocks_per_layer) + 1;
@@ -340,17 +469,16 @@ auto trans_tpp = SCOPEIT(
       at::Tensor t_global_tmp_go = at::empty(0);
       at::Tensor t_global_tmp_inT = at::empty(0);
 
-      if (t_grad_out.dtype() == at::kBFloat16 &&
-          t_wt.dtype() == at::kBFloat16) {
+      if (t_wt.dim() == 5) {
         t_global_tmp_go =
-            at::empty({threads, (nn / BF + 1), bnp * bk}, at::kBFloat16);
+            at::empty({threads, (nn / BF + 1), bnp * bk}, t_grad_out.dtype());
         t_global_tmp_inT =
-            at::empty({threads, nc, (nn / BF + 1), bnp * bc}, at::kBFloat16);
+            at::empty({threads, nc, (nn / BF + 1), bnp * bc}, t_in.dtype());
       }
       auto global_tmp_go =
-          GetVLAPtr<T>(t_global_tmp_go, {(nn / BF + 1), bnp * bk});
+          GetVLAPtr<Tact>(t_global_tmp_go, {(nn / BF + 1), bnp * bk});
       auto global_tmp_inT =
-          GetVLAPtr<T>(t_global_tmp_inT, {nc, (nn / BF + 1), bnp * bc});
+          GetVLAPtr<Tact>(t_global_tmp_inT, {nc, (nn / BF + 1), bnp * bc});
 
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
@@ -382,14 +510,14 @@ auto trans_tpp = SCOPEIT(
             ? (my_mb_blocks / BF)
             : ((my_mb_blocks / BF) + 1);
 
-        if (t_grad_out.dtype() == at::kBFloat16)
-          brgemm_dw_bf16_tpp_b1.config();
+        if (ilp > 1)
+          brgemm_dw_lp_tpp_b1.config();
 
         for (int bfn = my_mb_start; bfn < my_mb_end; bfn += mb_block_step) {
           blocks = (bfn + mb_block_step <= my_mb_end) ? mb_block_step
                                                       : my_mb_end - bfn;
           for (int ofm1 = 0; ofm1 < nk; ++ofm1) {
-            if (t_in.dtype() == at::kBFloat16) {
+            if (ilp > 1) {
               n2v_tpp(
                   blocks,
                   K * bnp,
@@ -402,13 +530,13 @@ auto trans_tpp = SCOPEIT(
                 /* initiaize current work task to zero */
                 setzero_delwt_tpp(grad_wt_priv[team_id][ofm1][ifm1]);
               }
-              if (t_in.dtype() == at::kFloat) {
+              if (ilp == 1) {
                 brgemm_dw_f32_tpp_b1(
                     in[bfn][0][ifm1],
                     grad_out[bfn][0][ofm1],
                     grad_wt_priv[team_id][ofm1][ifm1],
                     blocks);
-              } else if (t_in.dtype() == at::kBFloat16) {
+              } else if (ilp > 1) {
                 if (ofm1 == 0)
                   trans_tpp(
                       blocks,
@@ -417,7 +545,7 @@ auto trans_tpp = SCOPEIT(
                       in[bfn][0][ifm1],
                       global_tmp_inT[tid][ifm1 - my_ifm_start][0]);
 
-                brgemm_dw_bf16_tpp_b1(
+                brgemm_dw_lp_tpp_b1(
                     global_tmp_inT[tid][ifm1 - my_ifm_start][0],
                     global_tmp_go[tid][0],
                     grad_wt_priv[team_id][ofm1][ifm1],
@@ -428,8 +556,8 @@ auto trans_tpp = SCOPEIT(
           }
         }
 
-        if (t_grad_out.dtype() == at::kBFloat16)
-          brgemm_dw_bf16_tpp_b1.release();
+        if (ilp > 1)
+          brgemm_dw_lp_tpp_b1.release();
 
         const int reduce_thr_begin = (tid * reduce_chunksize < reduce_work)
             ? (tid * reduce_chunksize)
@@ -451,10 +579,10 @@ auto trans_tpp = SCOPEIT(
       }
     } // nn > 0
     if (rem > 0) {
-      auto grad_out = GetVLAPtr<T>(t_grad_out, {nk, bk});
-      auto in = GetVLAPtr<T>(t_in, {nc, bc});
+      auto grad_out = GetVLAPtr<Tact>(t_grad_out, {nk, bk});
+      auto in = GetVLAPtr<Tact>(t_in, {nc, bc});
 
-      auto brgemm_dw_f32_tpp_b1 = SCOPEITGEMM2((BrgemmTPP<T, float>(
+      auto brgemm_dw_f32_tpp_b1 = SCOPEIT((BrgemmTPP<Tact, float>(
           bc,
           bk,
           remp,
@@ -466,14 +594,14 @@ auto trans_tpp = SCOPEIT(
           1.0,
           input_trans_flag,
           1)));
-      auto brgemm_dw_bf16_tpp_b1 = SCOPEITGEMM((BrgemmTPP<T, float>(
+      auto brgemm_dw_lp_tpp_b1 = SCOPEIT((BrgemmTPP<Tact, float>(
           bc, bk, remp, bc * remp, bk * remp, remp, bk, bk, 1.0, 0, 1)));
       auto n2v_tpp = SCOPEIT(
-          XformExtTPP<T>(
+          XformExtTPP<Tact>(
               rem, bk, remp, bk, nk * bk, bk, XformTPP::XFORM_N2V_TPP, true),
           VNNI);
       auto trans_tpp = SCOPEIT(
-          XformExtTPP<T>(
+          XformExtTPP<Tact>(
               rem,
               bc,
               bc,
@@ -484,7 +612,7 @@ auto trans_tpp = SCOPEIT(
               true),
           XPOSE);
 
-      if (t_wt.dtype() == at::kFloat) {
+      if (t_wt.dim() == 4) {
 #pragma omp parallel for collapse(2)
         for (int k = 0; k < nk; k++) {
           for (int c = 0; c < nc; c++) {
@@ -492,8 +620,8 @@ auto trans_tpp = SCOPEIT(
                 in[nn * bn][c], grad_out[nn * bn][k], grad_wt_tmp[k][c], 1);
           }
         }
-      } else if (t_wt.dtype() == at::kBFloat16) {
-        T tmp_go[remp * bk], tmp_inT[remp * bc];
+      } else if (t_wt.dim() == 5) {
+        Tact tmp_go[remp * bk], tmp_inT[remp * bc];
 #pragma omp parallel
         {
           int tid = omp_get_thread_num();
@@ -505,7 +633,7 @@ auto trans_tpp = SCOPEIT(
           int chunk_end =
               ((tid + 1) * chunk < work) ? ((tid + 1) * chunk) : work;
 
-          brgemm_dw_bf16_tpp_b1.config();
+          brgemm_dw_lp_tpp_b1.config();
 
           for (int kk = chunk_start; kk < chunk_end; kk++) {
             int k = kk / nc;
@@ -513,13 +641,13 @@ auto trans_tpp = SCOPEIT(
 
             n2v_tpp(grad_out[nn * bn][k], tmp_go);
             trans_tpp(in[nn * bn][c], tmp_inT);
-            brgemm_dw_bf16_tpp_b1(tmp_inT, tmp_go, grad_wt_tmp[k][c], 1, true);
+            brgemm_dw_lp_tpp_b1(tmp_inT, tmp_go, grad_wt_tmp[k][c], 1, true);
           }
-          brgemm_dw_bf16_tpp_b1.release();
+          brgemm_dw_lp_tpp_b1.release();
         }
       }
     }
-    if (t_wt.dtype() == at::kBFloat16) {
+    if (t_wt.dim() == 5) {
 #pragma omp parallel for collapse(2)
       for (int k = 0; k < nk; k++) {
         for (int c = 0; c < nc; c++) {
@@ -528,7 +656,8 @@ auto trans_tpp = SCOPEIT(
       }
     }
     if (nn == 0 and rem == 0) {
-      auto set_zero_tpp = SetZeroTPP<T>(bk, bc);
+      auto set_zero_tpp = SetZeroTPP<Tprm>(bk, bc);
+#pragma omp parallel for collapse(2)
       for (int k = 0; k < nk; k++) {
         for (int c = 0; c < nc; c++) {
           set_zero_tpp(grad_wt[k][c]);
@@ -539,6 +668,6 @@ auto trans_tpp = SCOPEIT(
 }
 
 if (add_bias)
-  return {t_grad_in, t_grad_wt, t_grad_bias};
+  return {t_grad_in, t_grad_wt, t_grad_attn.view({1, H, F}), t_grad_bias};
 else
-  return {t_grad_in, t_grad_wt};
+  return {t_grad_in, t_grad_wt, t_grad_attn.view({1, H, F})};

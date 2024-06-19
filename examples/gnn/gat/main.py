@@ -126,31 +126,39 @@ class GAT(nn.Module):
                     if l < self.n_layers - 1:
                         y = th.zeros(
                             g.num_nodes(),
-                            self.n_hidden * num_heads
-                            if l != len(self.layers) - 1
-                            else self.n_classes,
+                            (
+                                self.n_hidden * num_heads
+                                if l != len(self.layers) - 1
+                                else self.n_classes
+                            ),
                         )  # .to(th.bfloat16)
                     else:
                         y = th.zeros(
                             g.num_nodes(),
-                            self.n_hidden
-                            if l != len(self.layers) - 1
-                            else self.n_classes,
+                            (
+                                self.n_hidden
+                                if l != len(self.layers) - 1
+                                else self.n_classes
+                            ),
                         )
                 else:
                     if l < self.n_layers - 1:
                         y = th.zeros(
                             g.num_nodes(),
-                            self.n_hidden * num_heads
-                            if l != len(self.layers) - 1
-                            else self.n_classes,
+                            (
+                                self.n_hidden * num_heads
+                                if l != len(self.layers) - 1
+                                else self.n_classes
+                            ),
                         )
                     else:
                         y = th.zeros(
                             g.num_nodes(),
-                            self.n_hidden
-                            if l != len(self.layers) - 1
-                            else self.n_classes,
+                            (
+                                self.n_hidden
+                                if l != len(self.layers) - 1
+                                else self.n_classes
+                            ),
                         )
 
                 sampler = dgl.dataloading.MultiLayerFullNeighborSampler(1)

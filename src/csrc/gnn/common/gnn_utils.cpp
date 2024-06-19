@@ -500,6 +500,16 @@ at::Tensor convert_1tb_file(std::string in_fn) {
   return out_t;
 }
 
+void write_tensor_to_binary_file(at::Tensor inp, std::string out_fn) {
+  auto in_sizes = inp.sizes();
+  long elements = (in_sizes[0] * in_sizes[1]);
+
+  auto in_ptr = inp.data_ptr<float>();
+  FILE* f = fopen(out_fn.c_str(), "wb");
+  fwrite((void*)in_ptr, sizeof(float), elements, f);
+  fclose(f);
+}
+
 REGISTER_SUBMODULE(_gnn_utils, m) {
   m.def("gather_features", &gather_features, "C++ Impl of feature gather");
   m.def("scatter_features", &scatter_features, "C++ Impl of feature scatter");
@@ -541,4 +551,8 @@ REGISTER_SUBMODULE(_gnn_utils, m) {
       "convert_1tb_file",
       &convert_1tb_file,
       "Convert large float file to bf16");
+  m.def(
+      "write_tensor_to_binary_file",
+      &write_tensor_to_binary_file,
+      "Write a PyTorch tensor as raw binary file");
 }

@@ -24,18 +24,19 @@ auto dK = (K + 15) / 16;
 auto t_lrelu_mask = at::empty({N, dK}, at::kShort);
 auto t_out = t_in.new_empty({N, K}); // [N,  K]
 
-auto in = GetVLAPtr<T>(t_in, {bn, K});
-auto bias = GetVLAPtr<T>(t_bias, {K});
-auto out = GetVLAPtr<T>(t_out, {bn, K});
+auto in = GetVLAPtr<Tact>(t_in, {bn, K});
+auto bias = GetVLAPtr<Tprm>(t_bias, {K});
+auto out = GetVLAPtr<Tact>(t_out, {bn, K});
 auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {bn, dK});
 
 if (training && p > 0) {
   auto t_dp_mask = at::empty({N, dK}, at::kShort);
   auto dp_mask = GetVLAPtr<short>(t_dp_mask, {bn, dK});
-  auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(bn, K)), EW_COPY);
-  auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(bn, K), BIAS);
+  auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(bn, K)), EW_COPY);
+  auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(bn, K), BIAS);
   auto leaky_relu_fwd_tpp = SCOPEIT(LeakyReLUFwdTPP<float>(bn, K, alpha), ACT);
-  auto dropout_fwd_tpp = SCOPEIT((DropOutFwdTPP<float, T>(bn, K, p)), DROPOUT);
+  auto dropout_fwd_tpp =
+      SCOPEIT((DropOutFwdTPP<float, Tact>(bn, K, p)), DROPOUT);
   {
     RECORD_SCOPE(go_bias_lrelu_drop, {t_in});
     {
@@ -53,15 +54,15 @@ if (training && p > 0) {
         }
       }
       if (rem > 0) {
-        auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
-        auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(1, K), BIAS);
+        auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
+        auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
         auto leaky_relu_fwd_tpp =
             SCOPEIT(LeakyReLUFwdTPP<float>(1, K, alpha), ACT);
         auto dropout_fwd_tpp =
-            SCOPEIT((DropOutFwdTPP<float, T>(1, K, p)), DROPOUT);
-        auto in = GetVLAPtr<T>(t_in, {K});
-        auto bias = GetVLAPtr<T>(t_bias, {K});
-        auto out = GetVLAPtr<T>(t_out, {K});
+            SCOPEIT((DropOutFwdTPP<float, Tact>(1, K, p)), DROPOUT);
+        auto in = GetVLAPtr<Tact>(t_in, {K});
+        auto bias = GetVLAPtr<Tprm>(t_bias, {K});
+        auto out = GetVLAPtr<Tact>(t_out, {K});
         auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
         auto dp_mask = GetVLAPtr<short>(t_dp_mask, {dK});
 
@@ -78,10 +79,10 @@ if (training && p > 0) {
   }
   return {t_out, t_lrelu_mask, t_dp_mask};
 } else {
-  auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(bn, K)), EW_COPY);
-  auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(bn, K), BIAS);
+  auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(bn, K)), EW_COPY);
+  auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(bn, K), BIAS);
   auto leaky_relu_fwd_tpp =
-      SCOPEIT((LeakyReLUFwdTPP<float, T>(bn, K, alpha)), ACT);
+      SCOPEIT((LeakyReLUFwdTPP<float, Tact>(bn, K, alpha)), ACT);
   {
     RECORD_SCOPE(go_bias_lrelu_drop, {t_in});
     {
@@ -97,14 +98,14 @@ if (training && p > 0) {
         }
       }
       if (rem > 0) {
-        auto cvt_f32_tpp = SCOPEIT((ConvertTPP<T, float>(1, K)), EW_COPY);
-        auto add_bias_tpp = SCOPEIT(AddBiasTPP<T>(1, K), BIAS);
+        auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
+        auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
         auto leaky_relu_fwd_tpp =
-            SCOPEIT((LeakyReLUFwdTPP<float, T>(1, K, alpha)), ACT);
+            SCOPEIT((LeakyReLUFwdTPP<float, Tact>(1, K, alpha)), ACT);
 
-        auto in = GetVLAPtr<T>(t_in, {K});
-        auto bias = GetVLAPtr<T>(t_bias, {K});
-        auto out = GetVLAPtr<T>(t_out, {K});
+        auto in = GetVLAPtr<Tact>(t_in, {K});
+        auto bias = GetVLAPtr<Tprm>(t_bias, {K});
+        auto out = GetVLAPtr<Tact>(t_out, {K});
         auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
         float tmp[K];
 

@@ -17,11 +17,17 @@ auto in_sizes = t_grad_out.sizes();
 auto N = in_sizes[0];
 long K = in_sizes[1];
 
-auto grad_out = GetVLAPtr<T>(t_grad_out, {K});
-auto t_grad_bias = t_grad_out.new_empty({K});
-auto grad_bias = GetVLAPtr<T>(t_grad_bias, {K});
+auto grad_out = GetVLAPtr<Tact>(t_grad_out, {K});
 
-auto grad_bias_tpp = SCOPEIT(GradBiasTPP<T>(1, K), BIAS);
+auto t_grad_bias = at::empty(0);
+if (dparam == 0)
+  t_grad_bias = at::empty({K});
+else if (dparam == 1)
+  t_grad_bias = at::empty({K}, at::kBFloat16);
+
+auto grad_bias = GetVLAPtr<Tprm>(t_grad_bias, {K});
+
+auto grad_bias_tpp = SCOPEIT(GradBiasTPP<Tact>(1, K), BIAS);
 auto set_zero_tpp = SCOPEIT(SetZeroTPP<float>(K), EW_ZERO);
 
 int threads = omp_get_max_threads();

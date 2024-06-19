@@ -1360,7 +1360,7 @@ class ReduceAddRowTPP {
 
 // ############################# Broadcast & Multiplication TPP
 // #####################################
-template <typename Tin, typename Tout = Tin>
+template <typename Tin, typename Tin2, typename Tout = Tin>
 class BCastMulTPP {
  public:
   BCastMulTPP() {}
@@ -1377,20 +1377,20 @@ class BCastMulTPP {
             ldi,
             ldo,
             XsmmDtype<Tin>(),
-            XsmmDtype<Tin>(),
+            XsmmDtype<Tin2>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_0, // Broadcast in Row
                                                       // Dimension
             LIBXSMM_MELTW_TYPE_BINARY_MUL) // Multiplication
   {}
-  void operator()(Tin* in0, Tin* in1, Tout* out) {
+  void operator()(Tin* in0, Tin2* in1, Tout* out) {
     kernel((void*)in0, (void*)in1, (void*)out);
   }
-  void ref(Tin* in0, Tin* in1, Tout* out) {
+  void ref(Tin* in0, Tin2* in1, Tout* out) {
     for (int r = 0; r < rows; r++) {
       for (int c = 0; c < cols; c++) {
-        out[c * ldo + r] = (Tin)in0[r] * in1[c * ldi + r];
+        out[c * ldo + r] = (float)in0[r] * (float)in1[c * ldi + r];
       }
     }
   }
@@ -1405,7 +1405,7 @@ class BCastMulTPP {
 
 // ############################# Broadcast & Multiplication Addition TPP
 // #####################################
-template <typename Tin, typename Tout = Tin>
+template <typename Tin, typename Tout>
 class BCastMulAddTPP {
  public:
   BCastMulAddTPP() {}

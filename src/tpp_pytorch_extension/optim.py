@@ -180,7 +180,10 @@ class AdamW(Optimizer):
                 #     raise RuntimeError(
                 #         "Adam does not support sparse gradients, please consider SparseAdam instead"
                 #     )
-                if hasattr(torch, "bfloat8") and p.data.dtype == torch.bfloat8:
+                fp8_data = hasattr(torch, "bfloat8") and (
+                    p.data.dtype == torch.bfloat8 or p.data.dtype == torch.hfloat8
+                )
+                if fp8_data:
                     data = data.to(torch.float)
                     grad = grad.to(torch.float)
 
@@ -196,10 +199,10 @@ class AdamW(Optimizer):
                     # Lower bits for bf16 params
                     if p.data.dtype == torch.bfloat16:
                         state["low_bits"] = torch.zeros_like(p.data)
-                    elif hasattr(torch, "bfloat8") and p.data.dtype == torch.bfloat8:
+                    elif fp8_data:
                         state["master_copy"] = data
 
-                if hasattr(torch, "bfloat8") and p.data.dtype == torch.bfloat8:
+                if fp8_data:
                     data = state["master_copy"]
 
                 exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
@@ -265,8 +268,8 @@ class AdamW(Optimizer):
                         group["eps"],
                         self.use_adam,
                     )
-                    if hasattr(torch, "bfloat8") and p.data.dtype == torch.bfloat8:
-                        p.data.copy_(state["master_copy"].to(torch.bfloat8))
+                    if fp8_data:
+                        p.data.copy_(state["master_copy"].to(p.data.dtype))
 
         return loss
 
