@@ -2345,7 +2345,7 @@ struct __attribute__((visibility("hidden"))) LLMBlock
   }
 };
 
-struct GPTJBlock : LLMBlock {
+struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wi, t_Wo;
@@ -2552,7 +2552,7 @@ struct GPTJBlock : LLMBlock {
   }
 };
 
-struct OPTDecoderLayer : LLMBlock {
+struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp; // wt and bias for attn
   at::Tensor t_Bq, t_Bk, t_Bv, t_Bp;
@@ -2738,7 +2738,7 @@ struct OPTDecoderLayer : LLMBlock {
   }
 };
 
-struct LlamaDecoderLayer : LLMBlock {
+struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
   at::Tensor t_Wg, t_Wu, t_Wd;
