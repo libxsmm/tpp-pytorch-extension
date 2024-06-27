@@ -99,6 +99,10 @@ template <>
 inline libxsmm_datatype XsmmDtype<uint8_t>() {
   return LIBXSMM_DATATYPE_I8;
 }
+template <>
+inline libxsmm_datatype XsmmDtype<int8_t>() {
+  return LIBXSMM_DATATYPE_I8;
+}
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 template <>
 inline libxsmm_datatype XsmmDtype<bfloat8>() {
@@ -851,6 +855,48 @@ class ConvertTPP {
   }
   bool initialized() {
     return init_done;
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi = 0;
+  int ldo = 0;
+  UnaryTPP kernel;
+  bool init_done = false;
+};
+
+template <typename Tin, typename Tout, typename Tscale>
+class DequantTPP {
+ public:
+  DequantTPP() {}
+  DequantTPP(int N) : DequantTPP(1, N) {}
+  DequantTPP(int rows, int cols) : DequantTPP(rows, cols, cols, cols) {}
+  DequantTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows), cols(cols), ldi(ldi), ldo(ldo) /* ,
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tin>() == XsmmDtype<Tout>() ? XsmmDtype<Tout>()
+                                                  : LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_IDENTITY),
+        init_done(true)*/ {}
+  void operator()(Tin* in, Tout* out, Tscale i_scl, Tscale* w_scl) {
+    ref(in, out, i_scl, w_scl);
+  }
+  void ref(Tin* in, Tout* out, Tscale i_scl, Tscale* w_scl) {
+    float fi_scl = (float)i_scl;
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        float fscl = fi_scl * (float)w_scl[j];
+        out[i * ldo + j] += (Tout)in[i * ldi + j] * fscl;
+      }
+    }
   }
 
  private:
@@ -2155,7 +2201,8 @@ template <
     typename Tin,
     typename Tout,
     typename Tw = Tin,
-    typename Tcomp = float>
+    typename Tcomp =
+        typename std::conditional<std::is_same_v<Tout, int>, int, float>::type>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}

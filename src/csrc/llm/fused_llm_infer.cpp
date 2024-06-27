@@ -56,6 +56,9 @@ static const char* GEMM_LOOP_SCHEME_STREAMING =
     getenv("GEMM_LOOP_SCHEME_STREAMING") ? getenv("GEMM_LOOP_SCHEME_STREAMING")
                                          : "aCb";
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
+static const int USE_QINT8 = env2int("USE_QINT8", 0);
+static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
+static const int QINT8_EMU = env2int("QINT8_EMU", 0);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
@@ -720,7 +723,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
         };
         return func;
       } else {
-        TPP_ASSERT(false, "Unsupported qscheme\n");
+        TPP_ASSERT(false, "Unsupported qscheme 1\n");
       }
     }
   }
@@ -731,6 +734,8 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor t_bias,
       at::Tensor t_out) {
     t_in = t_in.contiguous();
+    t_in = quantize_int8sym(t_in, Hc, 2, false).dequantize().to(t_in.dtype());
+
     auto BS = t_in.numel() / this->C;
     auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
     {
@@ -809,6 +814,227 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor& t_wt,
       at::Tensor& t_bias) {
     return Base::template _get<TppBlockedLinearW<T, Tw, Tout>>(
+        t_in, t_wt, t_bias);
+  }
+};
+
+template <typename T, typename TW, typename TOUT = T>
+class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
+ public:
+  using Tin = T;
+  using Tout = TOUT;
+  using Tw = TW;
+  using Base = TppBlockedLinearWBase<Tin, Tout>;
+  using Base::BSb;
+  using Base::C;
+  using Base::Hc;
+  using Base::Hk;
+  using Base::K;
+  using Base::Nc;
+  using Base::Ncb;
+  using Base::Nk;
+  using Base::loop_scheme;
+  using Base::postOpCBs;
+  using Base::rem;
+  using Base::weight_reuse;
+
+ protected:
+  using BrTin = int8_t;
+  using BrTw = int8_t;
+  using BrTout = int32_t;
+  SCOPEIT_DECL(BrgemmTPP<BrTin, BrTout, BrTw>) brgemm_tpp, brgemm_tpp_rem;
+  SCOPEIT_DECL(DequantTPP<BrTout, Tout, float>) dequant_acc, dequant_acc_rem;
+
+ public:
+  TppBlockedQInt8LinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias)
+      : TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias) {
+    int b_vnni = 1;
+    if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockAffine) {
+      if (t_wt.dtype() == at::kQInt8) {
+        // b_vnni = 2;
+        printf("Using weight type at::kQInt8\n");
+      } else {
+        TPP_ASSERT(false, "Unsupported qtype\n");
+      }
+    }
+
+    brgemm_tpp = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
+        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
+    brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
+        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
+    dequant_acc =
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K)), EW_COPY);
+    dequant_acc_rem =
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K)), EW_COPY);
+
+    loop_scheme =
+        weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
+  }
+  std::function<void(int, int, int)> stepFunc(
+      at::Tensor& t_in,
+      at::Tensor& t_wt_V,
+      at::Tensor& t_bias,
+      at::Tensor& t_out,
+      long BS) {
+    auto in = GetVLAPtr<BrTin>(t_in, {Nc, Hc});
+    auto bias = GetVLAPtr<T>(t_bias, {Hk});
+    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
+    bool with_bias = (t_bias.numel() > 0);
+    TPP_ASSERT(
+        t_in.is_quantized() && t_in.qscheme() == at::kPerBlockAffine,
+        "Input not quantized\n");
+    TPP_ASSERT(
+        t_wt_V.is_quantized() && t_wt_V.qscheme() == at::kPerBlockAffine,
+        "Weight not quantized\n");
+    auto quantizer = at::get_qtensorimpl(t_wt_V)->quantizer();
+    auto w_quantizer =
+        static_cast<at::PerBlockAffineQuantizer*>(quantizer.get());
+    quantizer = at::get_qtensorimpl(t_in)->quantizer();
+    auto i_quantizer =
+        static_cast<at::PerBlockAffineQuantizer*>(quantizer.get());
+    auto pack_size = w_quantizer->pack_size();
+    auto block_size = w_quantizer->block_size();
+    TPP_ASSERT(block_size == Hc, "Block size mismatch\n");
+    auto wt_V = GetVLAPtr<BrTw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
+    auto t_w_scl = w_quantizer->scales();
+    auto t_i_scl = i_quantizer->scales();
+    auto w_scl = GetVLAPtr<float>(t_w_scl, {Nc, Hk /* *(Hc / block_size)*/});
+    auto i_scl = GetVLAPtr<float>(t_i_scl, {Nc /*, Hc / block_size*/});
+    auto func = [&, in, wt_V, w_scl, i_scl, bias, out, BS, with_bias ](
+        int nc, int s1, int nk) __attribute__((always_inline)) {
+      auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
+      bool is_rem = (s1 + BSb > BS);
+      if (!is_rem) {
+        BrTout tmp_out[BSb * Hk];
+        if (nc == 0) {
+          if (with_bias) {
+            this->copy_bias_tpp(bias[nk], out[s1][nk]);
+          } else {
+            this->zero_tpp(out[s1][nk]);
+          }
+        }
+        for (int c = 0; c < count; c++) {
+          brgemm_tpp(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, true);
+
+          dequant_acc(
+              tmp_out, out[s1][nk], i_scl[s1][nc + c], w_scl[nk][nc + c]);
+        }
+        if (!(nc + Ncb < Nc)) { // last nc iter
+          if (postOpCBs[0])
+            postOpCBs[0](out, s1, nk);
+        }
+      } else {
+        BrTout tmp_out[rem * Hk];
+        if (nc == 0) {
+          if (with_bias) {
+            this->copy_bias_tpp_rem(bias[nk], out[s1][nk]);
+          } else {
+            this->zero_tpp_rem(out[s1][nk]);
+          }
+        }
+        for (int c = 0; c < count; c++) {
+          brgemm_tpp_rem(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, false);
+
+          dequant_acc_rem(
+              tmp_out, out[s1][nk], i_scl[s1][nc + c], w_scl[nk][nc + c]);
+        }
+        if (!(nc + Ncb < Nc)) { // last nc iter
+          if (postOpCBs[1])
+            postOpCBs[1](out, s1, nk);
+        }
+      }
+    };
+    return func;
+  }
+
+  void operator()(
+      at::Tensor t_in,
+      at::Tensor t_wt_V,
+      at::Tensor t_bias,
+      at::Tensor t_out) {
+    t_in = t_in.contiguous();
+    auto BS = t_in.numel() / this->C;
+    auto t_qin = quantize_int8sym(t_in, Hc, 2, false);
+    auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
+    {
+      RECORD_OMP_TIME();
+      auto gemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
+          loop_scheme);
+      gemm_loop(
+          [&](int* ind) {
+            int nc = ind[0], s1 = ind[1], nk = ind[2];
+            func(nc, s1, nk);
+          },
+          [&]() {
+            TimerStart();
+            brgemm_tpp.config();
+          },
+          [&]() {
+            brgemm_tpp.release();
+            TimerEnd();
+          });
+    }
+  }
+
+  static void fused_gemm(
+      std::vector<TppBlockedQInt8LinearW<T, Tw, Tout>>& gemms,
+      at::Tensor& t_in,
+      std::vector<at::Tensor>& t_wt_V,
+      std::vector<at::Tensor>& t_bias,
+      std::vector<at::Tensor>& t_out) {
+    int n_gemms = gemms.size();
+    long totalN = 0;
+    auto BS = t_in.numel() / gemms[0].C;
+    long Nc = gemms[0].Nc;
+    long Hc = gemms[0].Hc;
+    long Ncb = gemms[0].Ncb;
+    long BSb = gemms[0].BSb;
+    auto loop_scheme = gemms[0].loop_scheme;
+
+    auto t_qin = quantize_int8sym(t_in, Hc, 2, false);
+    std::vector<std::function<void(int, int, int)>> funcs;
+    for (int i = 0; i < n_gemms; i++) {
+      auto& g = gemms[i];
+      funcs.push_back(g.stepFunc(t_qin, t_wt_V[i], t_bias[i], t_out[i], BS));
+      totalN += g.Nk;
+      TPP_ASSERT(
+          g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
+          "Fused QKV weight block mismatch\n");
+    }
+    {
+      RECORD_OMP_TIME();
+      auto gemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0, Nc, Ncb, false},
+           LoopSpecs{0L, BS, BSb},
+           LoopSpecs{totalN}},
+          loop_scheme);
+      gemm_loop(
+          [&](int* ind) {
+            int nc = ind[0], s1 = ind[1], nk = ind[2];
+            int i = 0;
+            while (nk >= gemms[i].Nk) {
+              nk -= gemms[i].Nk;
+              i++;
+            }
+            funcs[i](nc, s1, nk);
+          },
+          [&]() {
+            TimerStart();
+            gemms[0].brgemm_tpp.config();
+          },
+          [&]() {
+            gemms[0].brgemm_tpp.release();
+            TimerEnd();
+          });
+    }
+  }
+
+  static TppBlockedQInt8LinearW<T, Tw, Tout> get(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias) {
+    return Base::template _get<TppBlockedQInt8LinearW<T, Tw, Tout>>(
         t_in, t_wt, t_bias);
   }
 };
@@ -976,6 +1202,9 @@ inline at::Tensor call_gemm_with_post_op(
     c10::optional<at::Tensor> t_out_ = {}) {
   // Check and redispatch with specialized type
   if (t_wt.is_quantized()) {
+    // std::cout << "QWT: " << t_wt.sizes();
+    // std::cout << "  " << (t_wt.qscheme() == at::kPerBlockMxFP ? "MXFP" :
+    // "AFFIne") << "  " << t_wt.dtype() << std::endl;
     if (t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
         return dispatch_gemm<TppBlockedLinearW<Tin, uint8_t, Tout>, CB>(
@@ -987,11 +1216,20 @@ inline at::Tensor call_gemm_with_post_op(
       } else {
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
+    } else if (t_wt.qscheme() == at::kPerBlockAffine) {
+      if (t_wt.dtype() == at::kQInt8) {
+        return dispatch_gemm<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>, CB>(
+            cb, t_in, t_wt, t_bias);
+      } else {
+        TPP_ASSERT(false, "Unsupported qdtype\n");
+      }
     } else {
-      TPP_ASSERT(false, "Unsupported qscheme\n");
+      TPP_ASSERT(false, "Unsupported qscheme 2\n");
     }
   } else if (t_wt.is_sparse_csr()) {
   } else {
+    // std::cout << "WT: " << t_wt.sizes();
+    // std::cout << "  " << t_wt.dtype() << std::endl;
     auto dtype = t_wt.scalar_type();
     switch (dtype) {
       case at::kFloat:
@@ -1074,6 +1312,49 @@ inline at::Tensor fc_plain(
   return pln_gemm(t_in, t_wt, t_bias, t_out);
 }
 
+inline at::Tensor fix_vnni(at::Tensor t) {
+  auto dtype = t.scalar_type();
+  auto dims = t.dim();
+  TPP_ASSERT(dims >= 4, "Invalid shape, dims = %ld\n", dims);
+  auto sizes = t.sizes();
+  auto K1 = sizes[0];
+  auto C1 = sizes[1];
+  auto C2 = sizes[2];
+  auto K2 = sizes[3];
+  auto C3 = dims == 5 ? sizes[4] : 1L;
+  if (dtype == at::kBFloat16) {
+    if (C3 == 2) {
+      return t;
+    } else if (C3 == 4) {
+      return t.view({K1, C1, C2, K2, 2, 2})
+          .permute({0, 1, 2, 4, 3, 5})
+          .contiguous()
+          .view({K1, C1, C2 * 2, K2, 2});
+    } else if (C3 == 1) {
+      TPP_ASSERT(
+          C2 % 2 == 0, "Shape incompatible for VNNI2 layout, C2 = %ld\n", C2);
+      return t.view({K1, C1, C2 / 2, 2, K2})
+          .permute({0, 1, 2, 4, 3})
+          .contiguous();
+    } else {
+      TPP_ASSERT(false, "Shape incompatible for VNNI2 layout\n");
+    }
+  } else if (dtype == at::kFloat) {
+    if (C3 == 1 and dims == 4) {
+      return t;
+    } else if (C3 == 1) {
+      return t.view({K1, C1, C2, K2});
+    } else {
+      return t.permute({0, 1, 2, 4, 3})
+          .contiguous()
+          .view({K1, C1, C2 * C3, K2});
+    }
+  } else {
+    TPP_ASSERT(false, "Unknown dtype for FIX_VNNI layout\n");
+  }
+  return t;
+}
+
 inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
   RECORD_SCOPE(fftkn, {t});
   auto dim = t.dim();
@@ -1106,9 +1387,77 @@ inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
               .permute({0, 2, 3, 1, 5, 4})
               .contiguous()
               .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
+    } else {
+      t = t.view({K1, C1, C2 / 2, 2L, K2})
+              .permute({0, 1, 2, 4, 3})
+              .contiguous()
+              .view({K1, C1, C2 / 2, K2, 2});
     }
   }
   auto ret = quantize_mxfp4(t, 32, 2, true);
+  return ret;
+}
+
+inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
+  RECORD_SCOPE(fftkn, {t});
+  auto dim = t.dim();
+  long block_size = 0;
+  if (dim == 5) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C3 = sizes[4];
+#if 0
+    if (K2 < 32 && 32 % K2 == 0) {
+      int RBS = 32 / K2;
+      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
+      t = t.view({K1 / RBS, RBS, C1, C2, K2, C3})
+              .permute({0, 2, 3, 1, 4, 5})
+              .contiguous()
+              .view({K1 / RBS, C1, C2, RBS * K2, C3});
+    }
+#endif
+    if (C3 != 4) {
+      int RBS = 4 / C3;
+      TPP_ASSERT(C2 % RBS == 0, "Shape not compatible for VNNI4\n");
+      t = t.view({K1, C1, C2 / RBS, RBS, K2, C3})
+              .permute({0, 1, 2, 4, 3, 5})
+              .contiguous()
+              .view({K1, C1, C2 / RBS, K2, RBS * C3});
+    }
+    block_size = C2 * C3;
+  } else if (dim == 4) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
+#if 0
+    if (K2 < 32 && 32 % K2 == 0) {
+      int RBS = 32 / K2;
+      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
+      t = t.view({K1 / RBS, RBS, C1, C2 / 2, 2L, K2})
+              .permute({0, 2, 3, 1, 5, 4})
+              .contiguous()
+              .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
+    }
+#endif
+    t = t.view({K1, C1, C2 / 4, 4, K2})
+            .permute({0, 1, 2, 4, 3})
+            .contiguous()
+            .view({K1, C1, C2 / 4, K2, 4});
+    block_size = C2;
+  }
+  auto ret = quantize_int8sym(t, block_size, 2, true);
+  std::cout << "remap_and_quantize_qint8: " << ret.sizes()
+            << " dt: " << ret.dtype() << std::endl;
+  if (QINT8_EMU == 1) {
+    ret = fix_vnni(ret.dequantize().to(t.dtype()));
+  }
+
   return ret;
 }
 
@@ -1116,8 +1465,13 @@ template <typename T>
 inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   RECORD_SCOPE(fftkn, {t});
   auto dim = t.dim();
-  if (dim < 5)
-    return t;
+
+  if (dim < 5) {
+    if (USE_QINT8_FT == 1)
+      return remap_and_quantize_qint8(t);
+    else
+      return t;
+  }
   auto sizes = t.sizes();
   auto K1 = sizes[0];
   auto C1 = sizes[1];
@@ -1150,7 +1504,10 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
     }
   }
 #endif
-  return t_new;
+  if (USE_QINT8_FT == 1)
+    return remap_and_quantize_qint8(t_new);
+  else
+    return t_new;
 }
 
 template <typename GemmT>
@@ -1190,8 +1547,15 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
       } else {
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
+    } else if (t_wt.qscheme() == at::kPerBlockAffine) {
+      if (t_wt.dtype() == at::kQInt8) {
+        return fused_qkv_gemm_spl<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>>(
+            t_in, t_wts, t_bias);
+      } else {
+        TPP_ASSERT(false, "Unsupported qdtype\n");
+      }
     } else {
-      TPP_ASSERT(false, "Unsupported qscheme\n");
+      TPP_ASSERT(false, "Unsupported qscheme 3\n");
     }
   } else if (t_wt.is_sparse_csr()) {
     TPP_ASSERT(false, "Sparse Tensor Types not supported yet\n");
@@ -1245,8 +1609,8 @@ struct AttnKernels {
       int pad,
       int kl_in_vnni,
       int vl_in_vnni) {
-    // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb, Skb,
-    // H, pad, kl_in_vnni, vl_in_vnni);
+    // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb,
+    // Skb, H, pad, kl_in_vnni, vl_in_vnni);
     if (Sqb == 0)
       Sqb = 1; // hack for unused kernels to not generate 0 size kernels
     if (Skb == 0)
@@ -2120,7 +2484,7 @@ struct __attribute__((visibility("hidden"))) LLMBlock
 
   bool check_weight_reuse(at::Tensor& t_in) {
     long BS = t_in.numel() / t_in.size(-1);
-    if (BS >= FT_OPT_SIZE) {
+    if (BS >= FT_OPT_SIZE || USE_QINT8_FT == 1) {
       return true;
     }
     return false;
@@ -2345,6 +2709,24 @@ struct __attribute__((visibility("hidden"))) LLMBlock
   }
 };
 
+void print_diff(const std::string& tag, at::Tensor a, at::Tensor b) {
+  a = a.flatten().to(at::kFloat);
+  b = b.flatten().to(at::kFloat);
+  long N = a.numel();
+  auto ap = a.data_ptr<float>();
+  auto bp = b.data_ptr<float>();
+  float max_diff = 0;
+  std::cout << tag << "  sz: " << N << std::endl;
+  for (long i = 0; i < N; i++) {
+    auto diff = fabsf(ap[i] - bp[i]);
+    if (diff > max_diff) {
+      printf("%5ld: r: %12.8g  q: %12.8g  d: %12.8g\n", i, ap[i], bp[i], diff);
+      max_diff = diff;
+    }
+  }
+  std::cout << tag << "  end " << std::endl;
+}
+
 struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
@@ -2400,13 +2782,26 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
       t_Wp = remap_and_quantize_mxfp4(t_Wp);
       t_Wi = remap_and_quantize_mxfp4(t_Wi);
       t_Wo = remap_and_quantize_mxfp4(t_Wo);
+    } else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wi = remap_and_quantize_qint8(t_Wi);
+      t_Wo = remap_and_quantize_qint8(t_Wo);
     }
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     auto dt = t_Wq.dtype();
     if (my_rank == 0) {
       std::cout << "my_size=" << my_size << " N=" << N << " H=" << H
-                << " wt dt=" << dt << std::endl;
+                << " wt dt=" << dt << " 1st wt dt=" << t_Wq_1.dtype()
+                << std::endl;
     }
   }
 
@@ -2414,6 +2809,12 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
   void remap_for_first_token() {
     auto dtype = c10::CppTypeToScalarType<Tw>::value;
     t_Wq_1 = wt_tensor_for_first_token<Tw>(t_Wq.to(dtype));
+    // t_Wk_1 = t_Wk;
+    // t_Wv_1 = t_Wv;
+    // t_Wp_1 = t_Wp;
+    // t_Wi_1 = t_Wi;
+    // t_Wo_1 = t_Wo;
+
     t_Wk_1 = wt_tensor_for_first_token<Tw>(t_Wk.to(dtype));
     t_Wv_1 = wt_tensor_for_first_token<Tw>(t_Wv.to(dtype));
     t_Wp_1 = wt_tensor_for_first_token<Tw>(t_Wp.to(dtype));
@@ -2472,6 +2873,17 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
 
     if (FUSED_QKV_GEMM == 0) {
       auto t_QL = qkv_gemm(t_HS, t_Wq, t_null);
+      if (weight_reuse && TPP_CACHE_REMAPPED_WEIGHTS) {
+        auto t_QL1 = qkv_gemm(t_HS, this->t_Wq, t_null);
+        torch::save({t_HS, this->t_Wq, t_QL1, t_QL}, "tensors.pt");
+        print_diff("t_QL", t_QL1, t_QL);
+        exit(0);
+        // std::cout << "Ref: " << t_QL1.flatten().slice(0, 0, 8, 1) <<
+        // std::endl;  std::cout << "Qnt: " << t_QL.flatten().slice(0, 0, 8, 1) <<
+        // std::endl;  std::cout << "Diff: " << (t_QL - t_QL1).abs().max() <<
+        // std::endl;
+      }
+
       apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
       auto t_KL = qkv_gemm(t_HS, t_Wk, t_null);
@@ -2610,6 +3022,20 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
       t_Wp = remap_and_quantize_mxfp4(t_Wp);
       t_Wi = remap_and_quantize_mxfp4(t_Wi);
       t_Wo = remap_and_quantize_mxfp4(t_Wo);
+    }
+
+    else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wi = remap_and_quantize_qint8(t_Wi);
+      t_Wo = remap_and_quantize_qint8(t_Wo);
     }
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
@@ -2793,6 +3219,21 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       t_Wd = remap_and_quantize_mxfp4(t_Wd);
     }
 
+    else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wg = remap_and_quantize_qint8(t_Wg);
+      t_Wu = remap_and_quantize_qint8(t_Wu);
+      t_Wd = remap_and_quantize_qint8(t_Wd);
+    }
+
     Nq = t_Wq.size(0) * t_Wq.size(3) / H;
     Nkv = t_Wk.size(0) * t_Wk.size(3) / H;
     auto dt = t_Wq.dtype();
@@ -2969,6 +3410,8 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
   m.def("remap_indices", &remap_indices);
+  m.def("remap_and_quantize_qint8", &remap_and_quantize_qint8);
+  m.def("remap_and_quantize_mxfp4", &remap_and_quantize_mxfp4);
   m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   py::class_<LLMBlock>(m, "LLMBlock").def("forward", &LLMBlock::forward);
   py::class_<GPTJBlock>(m, "GPTJBlock")

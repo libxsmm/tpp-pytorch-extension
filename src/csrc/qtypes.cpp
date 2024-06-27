@@ -28,16 +28,33 @@ struct MxFP4Quant {
   using Tout = uint8_t;
   using Ts = uint8_t;
 
+  static constexpr float lkp_tbl[] = {0.0,
+                                      0.5,
+                                      1.0,
+                                      1.5,
+                                      2.0,
+                                      3.0,
+                                      4.0,
+                                      6.0,
+                                      -0.0,
+                                      -0.5,
+                                      -1.0,
+                                      -1.5,
+                                      -2.0,
+                                      -3.0,
+                                      -4.0,
+                                      -6.0};
   static constexpr bool flush_fp32_subnorms = true;
   static constexpr float elem_max_norm = 6.0;
   static constexpr int scale_bits = 8;
   static constexpr int elem_ebits = 2;
   static constexpr int elem_mbits = 3;
   static constexpr RoundingMode rounding_mode = RoundingMode::rd_even;
-  bool flush_tile;
-  float scale_fp;
+  bool flush_tile = false;
+  float scale_fp = 0.0f;
   Ts scale;
 
+  MxFP4Quant() : scale(0) {}
   MxFP4Quant(float max) {
     int shared_exp = (int)get_biased_exponent(max);
     flush_tile = (shared_exp == 0 && flush_fp32_subnorms);
@@ -49,6 +66,11 @@ struct MxFP4Quant {
 
   Ts get_scale() {
     return scale;
+  }
+
+  void set_scale(Ts sc) {
+    scale = sc;
+    scale_fp = get_fp_scale(scale);
   }
 
   inline unsigned int quantize(Tin val) {
@@ -100,6 +122,47 @@ struct MxFP4Quant {
     // (float)val, scale_fp, scaled_in, scaled_out, qval);
     return qval;
   }
+
+  inline Tin dequantize(unsigned int qval) {
+    float val = lkp_tbl[qval] * scale_fp;
+    return (Tin)val;
+  }
+};
+
+template <typename TIN>
+struct Int8SymQuant {
+  using Tin = TIN;
+  using Tout = int8_t;
+  using Ts = float;
+
+  Ts scale;
+  Ts iscale;
+
+  Int8SymQuant() : scale(0), iscale(0) {}
+  Int8SymQuant(float max) {
+    scale = max / 127.0;
+    iscale = (scale != 0) ? (1.0f / scale) : 0;
+  }
+
+  Ts get_scale() {
+    return scale;
+  }
+
+  void set_scale(Ts sc) {
+    scale = sc;
+    iscale = (scale != 0) ? (1.0f / scale) : 0;
+  }
+
+  inline int quantize(Tin val) {
+    int qval = 0;
+    qval = nearbyintf((float)val * iscale);
+    qval = std::clamp(qval, -127, 127);
+    return qval;
+  }
+  inline Tin dequantize(int qval) {
+    Tin val = qval * scale;
+    return val;
+  }
 };
 
 namespace at {
@@ -122,6 +185,17 @@ QuantizerPtr make_per_block_mxfp_quantizer(
     ScalarType scalar_type) {
   return c10::make_intrusive<PerBlockMxFPQuantizer>(
       scalar_type, in, block_size, axis, is_vnni);
+}
+
+QuantizerPtr make_per_block_affine_quantizer(
+    const Tensor& in,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni,
+    bool has_zp,
+    ScalarType scalar_type) {
+  return c10::make_intrusive<PerBlockAffineQuantizer>(
+      scalar_type, in, block_size, axis, is_vnni, has_zp);
 }
 
 static int64_t get_sub_byte_tensor_size(
@@ -214,26 +288,13 @@ Tensor PerBlockMxFPQuantizer::quantize(const Tensor& rtensor) {
   return qtensor;
 }
 
-static void per_block_mxfp_dequantize_impl(
-    Tensor& rtensor,
-    const Tensor& qtensor,
-    const Tensor& scale,
-    const int64_t block_size,
-    const int64_t axis) {
-  const auto qtensor_contig =
-      qtensor.expect_contiguous(qtensor.suggest_memory_format());
-  dequantize_tensor_per_block_mxfp(
-      *qtensor_contig, rtensor, scale, block_size, axis);
-}
-
 Tensor PerBlockMxFPQuantizer::dequantize(const Tensor& qtensor) {
   Tensor rtensor = at::empty(
       qtensor.sizes(),
       qtensor.options()
           .dtype(at::kFloat)
           .memory_format(qtensor.suggest_memory_format()));
-  per_block_mxfp_dequantize_impl(rtensor, qtensor, scales_, block_size_, axis_);
-  return rtensor;
+  return dequantize_out(rtensor, qtensor);
 }
 
 Tensor& PerBlockMxFPQuantizer::dequantize_out(
@@ -247,7 +308,84 @@ Tensor& PerBlockMxFPQuantizer::dequantize_out(
       rtensor.scalar_type(),
       ", and is_contiguous ",
       rtensor.is_contiguous(qtensor.suggest_memory_format()));
-  per_block_mxfp_dequantize_impl(rtensor, qtensor, scales_, block_size_, axis_);
+  const auto qtensor_contig = qtensor.contiguous();
+  if (scalar_type_ == kQUInt4x2) {
+    if (rtensor.dtype() == kFloat) {
+      this->dequantize_symetric<MxFP4Quant<float>>(
+          qtensor_contig, scales_, rtensor);
+    } else if (rtensor.dtype() == kBFloat16) {
+      this->dequantize_symetric<MxFP4Quant<bfloat16>>(
+          qtensor_contig, scales_, rtensor);
+    } else {
+      TPP_ASSERT(false, "Unsupported output type for MXFP\n");
+    }
+  } else {
+    TPP_ASSERT(false, "Unsupported MXFP datatype\n");
+  }
+  return rtensor;
+}
+
+Tensor PerBlockAffineQuantizer::quantize(const Tensor& rtensor) {
+  // Here we need a std::intrusive_ptr<Quantizer>.. but actually "this" is the
+  // quantizer that can be reused, so I'm using intrusive_from_this here
+  Tensor qtensor = new_qtensor(
+      rtensor.sizes(),
+      rtensor.options()
+          .dtype(scalar_type_)
+          .memory_format(rtensor.suggest_memory_format()),
+      intrusive_from_this());
+  auto rtensor_contig = rtensor.contiguous();
+  if (scalar_type_ == kQInt8 && has_zp_ == false) {
+    if (rtensor.dtype() == kFloat) {
+      this->quantize_symetric<Int8SymQuant<float>>(
+          rtensor_contig, scales_, qtensor);
+    } else if (rtensor.dtype() == kBFloat16) {
+      this->quantize_symetric<Int8SymQuant<bfloat16>>(
+          rtensor_contig, scales_, qtensor);
+    } else {
+      TPP_ASSERT(false, "Unsupported input type for Affine Quant\n");
+    }
+  } else {
+    TPP_ASSERT(false, "Unsupported Affine datatype\n");
+  }
+  return qtensor;
+}
+
+Tensor PerBlockAffineQuantizer::dequantize(const Tensor& qtensor) {
+  Tensor rtensor = at::empty(
+      qtensor.sizes(),
+      qtensor.options()
+          .dtype(at::kFloat)
+          .memory_format(qtensor.suggest_memory_format()));
+  dequantize_out(rtensor, qtensor);
+  return rtensor;
+}
+
+Tensor& PerBlockAffineQuantizer::dequantize_out(
+    Tensor& rtensor,
+    const Tensor& qtensor) {
+  rtensor.resize_(qtensor.sizes());
+  TORCH_CHECK(
+      rtensor.is_contiguous(qtensor.suggest_memory_format()) &&
+          rtensor.scalar_type() == kFloat,
+      "Dequantize out should be a contiguous Float Tensor; instead got type ",
+      rtensor.scalar_type(),
+      ", and is_contiguous ",
+      rtensor.is_contiguous(qtensor.suggest_memory_format()));
+  const auto qtensor_contig = qtensor.contiguous();
+  if (scalar_type_ == kQInt8) {
+    if (rtensor.dtype() == kFloat) {
+      this->dequantize_symetric<Int8SymQuant<float>>(
+          qtensor_contig, scales_, rtensor);
+    } else if (rtensor.dtype() == kBFloat16) {
+      this->dequantize_symetric<Int8SymQuant<bfloat16>>(
+          qtensor_contig, scales_, rtensor);
+    } else {
+      TPP_ASSERT(false, "Unsupported output type for Per Block QInt8\n");
+    }
+  } else {
+    TPP_ASSERT(false, "Unsupported QInt datatype\n");
+  }
   return rtensor;
 }
 
@@ -283,6 +421,17 @@ at::Tensor quantize_mxfp4(
   return quantize_mxfp_(self, block_size, axis, is_vnni, dtype);
 }
 
+at::Tensor quantize_int8sym(
+    const at::Tensor& self,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni) {
+  at::ScalarType dtype = at::kQInt8;
+  auto quantizer = at::make_per_block_affine_quantizer(
+      self, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
+  return quantizer->quantize(self);
+}
+
 at::Tensor q_per_block_scales(const at::Tensor& self) {
   auto quantizer = at::get_qtensorimpl(self)->quantizer();
   TORCH_CHECK(
@@ -291,9 +440,7 @@ at::Tensor q_per_block_scales(const at::Tensor& self) {
   if (quantizer->qscheme() == at::kPerBlockMxFP) {
     return static_cast<at::PerBlockMxFPQuantizer*>(quantizer.get())->scales();
   } else {
-    // return
-    // static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())->scales();
-    return static_cast<at::PerBlockMxFPQuantizer*>(quantizer.get())->scales();
+    return static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())->scales();
   }
 }
 
@@ -321,6 +468,7 @@ size_t q_get_ptr(const at::Tensor& self) {
 REGISTER_SUBMODULE(_qtype, m) {
   m.def("quantize_mxfp", &quantize_mxfp);
   m.def("quantize_mxfp4", &quantize_mxfp4);
+  m.def("quantize_int8sym", &quantize_int8sym);
   m.def("q_per_block_scales", &q_per_block_scales);
   m.def("q_per_block_block_size", &q_per_block_block_size);
   m.def("q_per_block_axis", &q_per_block_axis);
