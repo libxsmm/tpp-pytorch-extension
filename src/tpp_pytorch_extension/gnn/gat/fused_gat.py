@@ -258,12 +258,12 @@ class GATConvOpt(BlockedModule):
         self.adp = attn_drop
         self.inp_needs_grad = input_needs_grad
 
-        for cbf in [64, 32]:
+        for cbf in [32]:
             if self.bc % cbf == 0:
                 self.bc = cbf
                 break
 
-        for kbf in [64, 32]:
+        for kbf in [32]:
             if self.bk % kbf == 0:
                 self.bk = kbf
                 break

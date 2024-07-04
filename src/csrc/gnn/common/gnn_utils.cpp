@@ -25,6 +25,7 @@
 #include "init.h"
 #include "timing.h"
 #include "xsmm_functors.h"
+#include <libxsmm_utils.h>
 
 using namespace tpp;
 REGISTER_SCOPE(gather, "gather");
@@ -103,6 +104,15 @@ at::Tensor gather_features(const long alignN, std::vector<at::Tensor> inputs) {
       typedef int Tind;
 #include "gather.h"
     }
+  } else if (inputs[0].dtype() == at::kChar) {
+    typedef int8_t T;
+    if (inputs[1].dtype() == at::kLong) {
+      typedef long Tind;
+#include "gather.h"
+    } else if (inputs[1].dtype() == at::kInt) {
+      typedef int Tind;
+#include "gather.h"
+    }
   } else {
     TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
   }
@@ -122,6 +132,13 @@ void scatter_features(
     }
   } else if (inputs[0].dtype() == at::kBFloat16) {
     typedef bfloat16 T;
+    if (reduction) {
+#include "scatter_reduce.h"
+    } else {
+#include "scatter.h"
+    }
+  } else if (inputs[0].dtype() == at::kChar) {
+    typedef int8_t T;
     if (reduction) {
 #include "scatter_reduce.h"
     } else {
@@ -450,7 +467,7 @@ void affinitize_cores(const int nthreads, const int num_workers) {
   }
 }
 
-at::Tensor convert_1tb_file(std::string in_fn) {
+at::Tensor downconvert_dataset(std::string in_fn) {
   int block = 32;
   FILE* in_f = fopen(in_fn.c_str(), "rb");
   fseek(in_f, 0L, SEEK_END);
@@ -498,6 +515,169 @@ at::Tensor convert_1tb_file(std::string in_fn) {
   }
 
   return out_t;
+}
+
+std::vector<at::Tensor> quantize_dataset(std::string in_name, int feat_dim, int block_size)
+{
+  auto blocks=0;
+  if(feat_dim % block_size != 0) {
+    printf("Feature dimension must divide into grain-size!\n");
+    exit(-1);
+  }
+  else
+    blocks = feat_dim / block_size;
+  FILE* in_f = fopen(in_name.c_str(), "rb");
+  fseek(in_f, 0L, SEEK_END);
+  long in_size = ftell(in_f);
+  rewind(in_f);
+  fclose(in_f);
+
+  long elements = in_size / sizeof(float);
+  long rows = elements / feat_dim;
+  printf("file %s has %ld bytes and %ld rows\n", in_name.c_str(), in_size, rows);
+
+  int rounds = 8;
+  int rows_8th = rows/8;
+  int last_rows = rows_8th + rows%8;
+
+  at::Tensor out_t = at::empty({rows, feat_dim}, at::kChar);
+  at::Tensor out_scf_t = at::empty({rows, blocks});
+  auto out_ptr = GetVLAPtr<int8_t>(out_t, {blocks, block_size});
+  auto out_scf_ptr = GetVLAPtr<float>(out_scf_t, {blocks});
+
+  libxsmm_meltw_unary_shape unary_shape;
+  unary_shape.m = block_size;
+  unary_shape.n = 1;
+  unary_shape.ldi = block_size;
+  unary_shape.ldo = block_size;
+  unary_shape.in0_type = LIBXSMM_DATATYPE_F32;
+  unary_shape.out_type = LIBXSMM_DATATYPE_I8;
+  unary_shape.comp_type = LIBXSMM_DATATYPE_F32;
+
+  libxsmm_meltwfunction_unary unary_kernel_quant;
+  unary_kernel_quant = libxsmm_dispatch_meltw_unary( 
+                         LIBXSMM_MELTW_TYPE_UNARY_QUANT, 
+                         unary_shape, 
+                         LIBXSMM_MELTW_FLAG_UNARY_NONE 
+                       );
+  if ( unary_kernel_quant == NULL ) {
+    fprintf( stderr, "Cannot JIT for QUANT TPP. Bailing...!\n");
+    exit(-1);
+  }
+  for(int rnd=0; rnd < rounds; rnd++) {
+    at::Tensor in_t;
+    if(rnd == rounds-1)
+      in_t = at::empty({last_rows, feat_dim});
+    else
+      in_t = at::empty({rows_8th, feat_dim});
+
+    auto in_ptr = GetVLAPtr<float>(in_t, {blocks, block_size});
+
+#pragma omp parallel
+    {
+      libxsmm_meltw_unary_param unary_param;
+      int nthreads = omp_get_num_threads();
+      int tid = omp_get_thread_num();
+      long w = rnd == rounds-1 ? last_rows : rows_8th;
+      long work =  w % nthreads == 0 ? w / nthreads : w / nthreads + 1;
+      long tb = tid * work < w ? tid * work : w;
+      long te = (tid + 1) * work < w ? (tid + 1) * work : w;
+
+      FILE* f = fopen(in_name.c_str(), "rb");
+      long offset = (rnd*rows_8th + tb) * feat_dim * sizeof(float);
+      fseek(f, offset, SEEK_SET);
+
+      long out_off = rnd*rows_8th;
+      for (long i = tb; i < te; i++) {
+        fread((void*)in_ptr[i][0], sizeof(float), feat_dim, f);
+        for(auto j = 0; j < blocks; j++) {
+          float max_value = FLT_MIN;
+          int maxexp = 0;
+          float scf_quant = 0.0;
+          for(int k=0; k<block_size; k++) {
+            float m = in_ptr[i][j][k];
+            max_value = max_value < m ? m : max_value;
+          }
+
+          LIBXSMM_ELIDE_RESULT(float, LIBXSMM_FREXPF(max_value, &maxexp));
+          maxexp -= 6;
+          scf_quant = libxsmm_sexp2_i8i(-maxexp);
+          float scf_dequant = libxsmm_sexp2_i8i(maxexp);
+          out_scf_ptr[out_off+i][j] = scf_dequant;
+
+          /* use jited quantization */
+          unary_param.in.primary  = (void*)in_ptr[i][j];
+          unary_param.in.secondary  = (void*)&scf_quant;
+          unary_param.out.primary = (void*)out_ptr[out_off+i][j];
+          unary_kernel_quant( &unary_param );
+        }
+      }
+      fclose(f);
+    }
+  }
+  return {out_t, out_scf_t};
+}
+
+std::vector<at::Tensor> quantize_dataset_feat(at::Tensor inp, int block_size)
+{
+  int rows = inp.sizes()[0];
+  int feat_dim = inp.sizes()[1];
+  auto blocks = 0;
+  if(feat_dim % block_size != 0) {
+    printf("Feature dimension must divide into grain-size!\n");
+    exit(-1);
+  }
+  else
+    blocks = feat_dim / block_size;
+  at::Tensor out_t = at::empty({rows, feat_dim}, at::kChar);
+  at::Tensor out_scf_t = at::empty({rows, blocks});
+
+  auto in_ptr = GetVLAPtr<float>(inp, {blocks, block_size});
+  auto out_ptr = GetVLAPtr<int8_t>(out_t, {blocks, block_size});
+  auto out_scf_ptr = GetVLAPtr<float>(out_scf_t, {blocks});
+
+  libxsmm_meltw_unary_shape unary_shape;
+  unary_shape.m = block_size;
+  unary_shape.n = 1;
+  unary_shape.ldi = block_size;
+  unary_shape.ldo = block_size;
+  unary_shape.in0_type = LIBXSMM_DATATYPE_F32;
+  unary_shape.out_type = LIBXSMM_DATATYPE_I8;
+  unary_shape.comp_type = LIBXSMM_DATATYPE_F32;
+
+  libxsmm_meltwfunction_unary unary_kernel_quant = libxsmm_dispatch_meltw_unary( 
+      LIBXSMM_MELTW_TYPE_UNARY_QUANT, unary_shape, LIBXSMM_MELTW_FLAG_UNARY_NONE );
+  if ( unary_kernel_quant == NULL ) {
+    fprintf( stderr, "Cannot JIT for QUANT TPP. Bailing...!\n");
+    exit(-1);
+  }
+
+#pragma omp parallel for
+  for(int r = 0; r < rows; r++) {
+    libxsmm_meltw_unary_param unary_param;
+    for(auto j = 0; j<blocks; j++) {
+      float max_value = FLT_MIN;
+      int maxexp = 0;
+      float scf_quant = 0.0;
+      for(int k=0; k<block_size; k++) {
+        float m = in_ptr[r][j][k];
+        max_value = max_value < m ? m : max_value;
+      }
+
+      LIBXSMM_ELIDE_RESULT(float, LIBXSMM_FREXPF(max_value, &maxexp));
+      maxexp -= 6;
+      scf_quant = libxsmm_sexp2_i8i(-maxexp);
+      float scf_dequant = libxsmm_sexp2_i8i(maxexp);
+      out_scf_ptr[r][j] = scf_dequant;
+
+      /* use jited quantization */
+      unary_param.in.primary  = (void*)in_ptr[r][j];
+      unary_param.in.secondary  = (void*)&scf_quant;
+      unary_param.out.primary = (void*)out_ptr[r][j];
+      unary_kernel_quant( &unary_param );
+    }
+  }
+  return {out_t, out_scf_t};
 }
 
 void write_tensor_to_binary_file(at::Tensor inp, std::string out_fn) {
@@ -548,9 +728,17 @@ REGISTER_SUBMODULE(_gnn_utils, m) {
       "C++ impl of gspmm on halo feature graph (drpa)");
   m.def("affinitize_cores", &affinitize_cores, "Compute thread affinization");
   m.def(
-      "convert_1tb_file",
-      &convert_1tb_file,
-      "Convert large float file to bf16");
+      "downconvert_dataset",
+      &downconvert_dataset,
+      "DownConvert large float file to bf16");
+  m.def(
+      "quantize_dataset",
+      &quantize_dataset,
+      "Quantize dataset to int8");
+  m.def(
+      "quantize_dataset_feat",
+      &quantize_dataset_feat,
+      "Quantize dataset to int8");
   m.def(
       "write_tensor_to_binary_file",
       &write_tensor_to_binary_file,

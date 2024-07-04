@@ -119,8 +119,25 @@ def mapped_spmm_copy_lhs_add(dest, indptr, dind, sind, comms, source, edge, soff
 
     gnn_utils_cpp.mapped_spmm_copy_lhs_add(inputs, rank, soff)
 
+def quantize_dataset(in_name, out_name, out_scf_name, feat_dim=1024, block_size=32):
+    out, out_scf = gnn_utils_cpp.quantize_dataset(in_name, feat_dim, block_size)
 
-def convert_1tb_file(in_name, out_name):
+    if out.dim() == 1:
+        rows = out.shape[0] // feat_dim
+        out = out.reshape(rows, feat_dim)
+    torch.save(out, out_name)
+    torch.save(out_scf, out_scf_name)
+
+def quantize_dataset_feat(node_feats, out_name, out_scf_name, block_size=32):
+    out, out_scf = gnn_utils_cpp.quantize_dataset_feat(node_feats, block_size)
+
+    if out.dim() == 1:
+        rows = out.shape[0] // feat_dim
+        out = out.reshape(rows, feat_dim)
+    torch.save(out, out_name)
+    torch.save(out_scf, out_scf_name)
+
+def downconvert_dataset(in_name, out_name):
     out = gnn_utils_cpp.convert_1tb_file(in_name)
 
     if out.dim() == 1:
