@@ -734,7 +734,6 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor t_bias,
       at::Tensor t_out) {
     t_in = t_in.contiguous();
-    t_in = quantize_int8sym(t_in, Hc, 2, false).dequantize().to(t_in.dtype());
 
     auto BS = t_in.numel() / this->C;
     auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
@@ -863,9 +862,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
     dequant_acc =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K)), EW_COPY);
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, Nc)), EW_COPY);
     dequant_acc_rem =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K)), EW_COPY);
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, Nc)), EW_COPY);
 
     loop_scheme =
         weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
@@ -917,7 +916,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
           brgemm_tpp(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, true);
 
           dequant_acc(
-              tmp_out, out[s1][nk], i_scl[s1][nc + c], w_scl[nk][nc + c]);
+              tmp_out, out[s1][nk], &i_scl[s1][nc + c], w_scl[nk][nc + c]);
         }
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCBs[0])
@@ -936,7 +935,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
           brgemm_tpp_rem(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, false);
 
           dequant_acc_rem(
-              tmp_out, out[s1][nk], i_scl[s1][nc + c], w_scl[nk][nc + c]);
+              tmp_out, out[s1][nk], &i_scl[s1][nc + c], w_scl[nk][nc + c]);
         }
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCBs[1])
