@@ -2872,17 +2872,6 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
 
     if (FUSED_QKV_GEMM == 0) {
       auto t_QL = qkv_gemm(t_HS, t_Wq, t_null);
-      if (weight_reuse && TPP_CACHE_REMAPPED_WEIGHTS) {
-        auto t_QL1 = qkv_gemm(t_HS, this->t_Wq, t_null);
-        torch::save({t_HS, this->t_Wq, t_QL1, t_QL}, "tensors.pt");
-        print_diff("t_QL", t_QL1, t_QL);
-        exit(0);
-        // std::cout << "Ref: " << t_QL1.flatten().slice(0, 0, 8, 1) <<
-        // std::endl;  std::cout << "Qnt: " << t_QL.flatten().slice(0, 0, 8, 1) <<
-        // std::endl;  std::cout << "Diff: " << (t_QL - t_QL1).abs().max() <<
-        // std::endl;
-      }
-
       apply_rotary_pos_emb_gptj<T>(t_QL, t_EP, t_pid, N, H);
 
       auto t_KL = qkv_gemm(t_HS, t_Wk, t_null);
