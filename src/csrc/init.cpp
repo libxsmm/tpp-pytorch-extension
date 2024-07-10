@@ -17,6 +17,7 @@
 #endif
 
 double ifreq = 1.0 / getFreq();
+static int TPP_DEBUG_TIMER_TIDS_UPTO = env2int("TPP_DEBUG_TIMER_TIDS_UPTO", 0);
 static int TPP_DEBUG_TIMER_RANK = env2int("TPP_DEBUG_TIMER_RANK", 0);
 static int TPP_DEBUG_TIMER_DETAILED = env2int("TPP_DEBUG_TIMER_DETAILED", 0);
 
@@ -101,7 +102,7 @@ void print_debug_timers(int tid, bool detailed) {
       "IMBL",
       "TF/s");
   for (int i = 0; i < max_threads; i++) {
-    if (tid == -1 || tid == i) {
+    if (tid == -1 || tid == i || TPP_DEBUG_TIMER_TIDS_UPTO > i) {
       auto print_scope = [&](const Scope& scope) {
         if (scope.master_timer == 0.0)
           return;
