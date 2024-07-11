@@ -137,12 +137,12 @@ def quantize_dataset_feat(node_feats, out_name, out_scf_name, block_size=32):
     torch.save(out, out_name)
     torch.save(out_scf, out_scf_name)
 
-def downconvert_dataset(in_name, out_name):
-    out = gnn_utils_cpp.convert_1tb_file(in_name)
+def downconvert_dataset(in_name, out_name, data_type, feat_dim):
+    out = gnn_utils_cpp.downconvert_dataset(in_name, data_type, feat_dim)
 
     if out.dim() == 1:
-        rows = out.shape[0] // 1024
-        out = out.reshape(rows, 1024)
+        rows = out.shape[0] // feat_dim
+        out = out.reshape(rows, feat_dim)
     torch.save(out, out_name)
 
 

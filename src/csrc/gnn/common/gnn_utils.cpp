@@ -104,6 +104,24 @@ at::Tensor gather_features(const long alignN, std::vector<at::Tensor> inputs) {
       typedef int Tind;
 #include "gather.h"
     }
+  } else if (inputs[0].dtype() == at::kFloat8_e4m3fn) {
+    typedef hfloat8 T;
+    if (inputs[1].dtype() == at::kLong) {
+      typedef long Tind;
+#include "gather.h"
+    } else if (inputs[1].dtype() == at::kInt) {
+      typedef int Tind;
+#include "gather.h"
+    }
+  } else if (inputs[0].dtype() == at::kFloat8_e5m2) {
+    typedef bfloat8 T;
+    if (inputs[1].dtype() == at::kLong) {
+      typedef long Tind;
+#include "gather.h"
+    } else if (inputs[1].dtype() == at::kInt) {
+      typedef int Tind;
+#include "gather.h"
+    }
   } else if (inputs[0].dtype() == at::kChar) {
     typedef int8_t T;
     if (inputs[1].dtype() == at::kLong) {
@@ -467,54 +485,38 @@ void affinitize_cores(const int nthreads, const int num_workers) {
   }
 }
 
-at::Tensor downconvert_dataset(std::string in_fn) {
-  int block = 32;
+at::Tensor downconvert_dataset(std::string in_fn, std::string data_type, int feat_dim) {
+
   FILE* in_f = fopen(in_fn.c_str(), "rb");
   fseek(in_f, 0L, SEEK_END);
   long in_size = ftell(in_f);
   rewind(in_f);
+
   long elements = in_size / sizeof(float);
-  long rows = elements / 1024;
+  long rows = elements / feat_dim;
   printf("file %s has %ld bytes and %ld rows\n", in_fn.c_str(), in_size, rows);
-  at::Tensor in_t = at::empty({rows, 1024});
-  at::Tensor out_t = at::empty({rows, 1024}, at::kBFloat16);
-  long nb = rows / block;
-  long rem = rows % block;
+  fflush(stdout);
 
-  auto in_ptr = GetVLAPtr<float>(in_t, {block, 1024});
-  auto out_ptr = GetVLAPtr<bfloat16>(out_t, {block, 1024});
-
-  // fread((void*)in_p, sizeof(float), elements, in_f);
   fclose(in_f);
 
-  auto cvt_in_out = ConvertTPP<float, bfloat16>(block, 1024);
-#pragma omp parallel
-  {
-    int nthreads = omp_get_num_threads();
-    int tid = omp_get_thread_num();
-    long work = nb % nthreads == 0 ? nb / nthreads : nb / nthreads + 1;
-    long tb = tid * work < nb ? tid * work : nb;
-    long te = (tid + 1) * work < nb ? (tid + 1) * work : nb;
-    FILE* f = fopen(in_fn.c_str(), "rb");
-    fseek(f, tb * sizeof(float), SEEK_SET);
-    for (long i = tb; i < te; i++) {
-      fread((void*)in_ptr[i][0], sizeof(float), block * 1024, f);
-      cvt_in_out(in_ptr[i][0], out_ptr[i][0]);
-    }
-    fclose(f);
+  if(data_type == "bf16") {
+    typedef bfloat16 T;
+    at::Tensor out_t = at::empty({rows, feat_dim}, at::kBFloat16);
+#include "down_cvt.h"
   }
-  if (rem > 0) {
-    auto in_ptr = GetVLAPtr<float>(in_t, {1024});
-    auto out_ptr = GetVLAPtr<bfloat16>(out_t, {1024});
-    auto cvt_in_out = ConvertTPP<float, bfloat16>(rem, 1024);
-    FILE* in_f = fopen(in_fn.c_str(), "rb");
-    fseek(in_f, nb * block * sizeof(float), SEEK_SET);
-    fread((void*)in_ptr[nb * block], sizeof(float), rem * 1024, in_f);
-    cvt_in_out(in_ptr[nb * block], out_ptr[nb * block]);
-    fclose(in_f);
+  else if(data_type == "hf8") {
+    typedef hfloat8 T;
+    at::Tensor out_t = at::empty({rows, feat_dim}, at::kFloat8_e4m3fn);
+#include "down_cvt.h"
   }
-
-  return out_t;
+  else if(data_type == "bf8") {
+    typedef bfloat8 T;
+    at::Tensor out_t = at::empty({rows, feat_dim}, at::kFloat8_e5m2);
+#include "down_cvt.h"
+  }
+  else {
+    TPP_ASSERT(0, "%s:%d Unsupported type\n", __FILE__, __LINE__);
+  }
 }
 
 std::vector<at::Tensor> quantize_dataset(std::string in_name, int feat_dim, int block_size)
