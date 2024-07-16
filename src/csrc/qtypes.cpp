@@ -19,9 +19,12 @@
 #include "init.h"
 #include "mxfp_quant.h"
 #include "qtypes.h"
+#include "timing.h"
 #include "utils.h"
 #include "vla.h"
+#include "xsmm_functors.h"
 
+using namespace tpp;
 template <typename TIN>
 struct MxFP4Quant {
   using Tin = TIN;
@@ -123,6 +126,16 @@ struct MxFP4Quant {
     return qval;
   }
 
+  static auto GetQuantizeTPP(int N) {
+    return nullptr;
+  }
+
+  template <typename T_QTPP>
+  inline void quantize(Tin* inp, Tout* outp, const T_QTPP& qtpp) {
+    throw std::runtime_error("Not Implemented");
+    // qtpp(inp, outp, iscale);
+  }
+
   inline Tin dequantize(unsigned int qval) {
     float val = lkp_tbl[qval] * scale_fp;
     return (Tin)val;
@@ -159,6 +172,16 @@ struct Int8SymQuant {
     qval = std::clamp(qval, -127, 127);
     return qval;
   }
+
+  static auto GetQuantizeTPP(int N) {
+    return SCOPEIT((QuantTPP<Tin, Tout, Ts>(N)), EW_RSQRT);
+  }
+
+  template <typename T_QTPP>
+  inline void quantize(Tin* inp, Tout* outp, T_QTPP& qtpp) {
+    qtpp(inp, outp, iscale);
+  }
+
   inline Tin dequantize(int qval) {
     Tin val = qval * scale;
     return val;

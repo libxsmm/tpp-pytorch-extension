@@ -41,11 +41,11 @@ static long get_batch_dim_in_kv_cache() {
 
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
-// static int large_cache_opt = false;
 static int TPP_CACHE_REMAPPED_WEIGHTS =
     env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
+static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
@@ -59,6 +59,7 @@ static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
 static const int USE_QINT8 = env2int("USE_QINT8", 0);
 static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
 static const int QINT8_EMU = env2int("QINT8_EMU", 0);
+static const int QINT8_BLOCK_SIZE = env2int("QINT8_BLOCK_SIZE", 256);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
@@ -519,8 +520,8 @@ class TppBlockedLinearWBase {
     Hk = wt_sizes[3];
 
     Ncb = Nc;
-    BSb = 64L;
-    rem = BS % 64;
+    BSb = BSB_BLOCK_SIZE;
+    rem = BS % BSb;
     auto nBS = BS / BSb;
     bool weight_reuse = nBS > 4;
     if (weight_reuse)
@@ -862,9 +863,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
     dequant_acc =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, Nc)), EW_COPY);
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, Nc)), EW_RCP);
     dequant_acc_rem =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, Nc)), EW_COPY);
+        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, Nc)), EW_RCP);
 
     loop_scheme =
         weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
@@ -1408,16 +1409,11 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
     auto C2 = sizes[2];
     auto K2 = sizes[3];
     auto C3 = sizes[4];
-#if 0
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
-      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
-      t = t.view({K1 / RBS, RBS, C1, C2, K2, C3})
-              .permute({0, 2, 3, 1, 4, 5})
-              .contiguous()
-              .view({K1 / RBS, C1, C2, RBS * K2, C3});
+    auto C = C1 * C2 * C3;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE / C3;
+      C1 = C / QINT8_BLOCK_SIZE;
     }
-#endif
     if (C3 != 4) {
       int RBS = 4 / C3;
       TPP_ASSERT(C2 % RBS == 0, "Shape not compatible for VNNI4\n");
@@ -1433,17 +1429,12 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
     auto C1 = sizes[1];
     auto C2 = sizes[2];
     auto K2 = sizes[3];
-    TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
-#if 0
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
-      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
-      t = t.view({K1 / RBS, RBS, C1, C2 / 2, 2L, K2})
-              .permute({0, 2, 3, 1, 5, 4})
-              .contiguous()
-              .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
+    auto C = C1 * C2;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE;
+      C1 = C / QINT8_BLOCK_SIZE;
     }
-#endif
+    TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
     t = t.view({K1, C1, C2 / 4, 4, K2})
             .permute({0, 1, 2, 4, 3})
             .contiguous()
@@ -1456,7 +1447,6 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
   if (QINT8_EMU == 1) {
     ret = fix_vnni(ret.dequantize().to(t.dtype()));
   }
-
   return ret;
 }
 
@@ -2483,7 +2473,7 @@ struct __attribute__((visibility("hidden"))) LLMBlock
 
   bool check_weight_reuse(at::Tensor& t_in) {
     long BS = t_in.numel() / t_in.size(-1);
-    if (BS >= FT_OPT_SIZE || USE_QINT8_FT == 1) {
+    if (BS >= FT_OPT_SIZE) {
       return true;
     }
     return false;

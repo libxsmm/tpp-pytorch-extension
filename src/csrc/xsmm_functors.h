@@ -874,6 +874,101 @@ class ConvertTPP {
   bool init_done = false;
 };
 
+template <typename Tin, typename Tout, typename Tscale = float>
+class QuantTPP {
+ public:
+  QuantTPP() {}
+  QuantTPP(int N) : QuantTPP(1, N) {}
+  QuantTPP(int rows, int cols) : QuantTPP(rows, cols, cols, cols) {}
+  QuantTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_QUANT) {}
+  void operator()(Tin* in, Tout* out, Tscale scale) {
+    if constexpr (true || std::is_same_v<Tin, float>) {
+      float fscale = (float)scale;
+      kernel((void*)in, &fscale, nullptr, (void*)out, nullptr);
+    } else {
+      ref(in, out, scale);
+    }
+  }
+  void ref(Tin* in, Tout* out, Tscale scale) {
+    constexpr int max = std::is_signed<Tout>::value
+        ? (1 << (8 * sizeof(Tout) - 1)) - 1
+        : (1 << (8 * sizeof(Tout))) - 1;
+    constexpr int min = std::is_signed<Tout>::value ? -max : 0;
+    float fscale = (float)scale;
+#ifdef __AVX512F__
+    auto vfscale = _mm512_set1_ps(fscale);
+    auto vmax = _mm512_set1_epi32(max);
+    auto vmin = _mm512_set1_epi32(min);
+    for (int j = 0; j < rows; j++) {
+      int i = 0;
+      for (i = 0; i < ALIGNDOWN(cols, 16); i += 16) {
+        auto vin = _mm512_loadu_ps_auto(&in[j * ldi + i]);
+        auto vq = _mm512_mul_ps(vin, vfscale);
+        auto v_i32 = _mm512_cvt_roundps_epi32(
+            vq, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        v_i32 = _mm512_max_epi32(_mm512_min_epi32(v_i32, vmax), vmin);
+        if constexpr (sizeof(Tout) == 1) {
+          auto res = _mm512_cvtepi32_epi8(v_i32);
+          _mm_storeu_epi8(&out[j * ldo + i], res);
+        } else if constexpr (sizeof(Tout) == 2) {
+          auto res = _mm512_cvtepi32_epi16(v_i32);
+          _mm256_storeu_epi16(&out[j * ldo + i], res);
+        } else {
+          _mm512_storeu_epi32(&out[j * ldo + i], v_i32);
+        }
+      }
+      if (i < cols) {
+        int rem = cols - i;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[j * ldi + i]);
+        auto vq = _mm512_mul_ps(vin, vfscale);
+        auto v_i32 = _mm512_cvt_roundps_epi32(
+            vq, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        v_i32 = _mm512_max_epi32(_mm512_min_epi32(v_i32, vmax), vmin);
+        if constexpr (sizeof(Tout) == 1) {
+          auto res = _mm512_cvtepi32_epi8(v_i32);
+          _mm_mask_storeu_epi8(&out[j * ldo + i], mask, res);
+        } else if constexpr (sizeof(Tout) == 2) {
+          auto res = _mm512_cvtepi32_epi16(v_i32);
+          _mm256_mask_storeu_epi16(&out[j * ldo + i], mask, res);
+        } else {
+          _mm512_mask_storeu_epi32(&out[j * ldo + i], mask, v_i32);
+        }
+      }
+    }
+#else
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        int qval = nearbyintf((float)in[i * ldi + j] * fscale);
+        qval = std::clamp(qval, max, min);
+        out[i * ldo + j] = (Tout)qval;
+      }
+    }
+#endif
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi = 0;
+  int ldo = 0;
+  UnaryTPP kernel;
+};
+
 template <typename Tin, typename Tout, typename Tscale>
 class DequantTPP : public BaseTPP {
  public:
@@ -896,7 +991,6 @@ class DequantTPP : public BaseTPP {
     eqn_param.inputs = arg_array;
     eqn_param.output.primary = (void*)out;
     kernel(&eqn_param);
-    // ref(in, out, i_scl, w_scl);
   }
   void ref(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
 #ifdef __AVX512F__
