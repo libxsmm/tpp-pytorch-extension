@@ -8,6 +8,8 @@
 /* Author: Dhiraj Kalamkar (Intel Corp.)
  ******************************************************************************/
 
+#pragma once
+
 #include <ATen/record_function.h>
 #include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/extension.h>
