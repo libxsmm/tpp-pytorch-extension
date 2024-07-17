@@ -11,7 +11,6 @@
 #pragma once
 
 #include <ATen/record_function.h>
-// #include <torch/csrc/autograd/VariableTypeUtils.h>
 #include <torch/extension.h>
 
 #include "ext_tpp.h"
@@ -545,9 +544,15 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor t_wt_V,
       at::Tensor t_bias,
       at::Tensor t_out) {
-    t_in = t_in.contiguous();
     auto BS = t_in.numel() / this->C;
-    auto t_qin = quantize_int8sym(t_in, Hc, 2, false);
+    auto t_qin = t_in;
+    if (t_in.is_quantized()) {
+      TORCH_CHECK(t_qin.is_contiguous());
+      TORCH_CHECK(t_qin.dtype() == at::kQInt8);
+    } else {
+      t_in = t_in.contiguous();
+      t_qin = quantize_int8sym(t_in, Hc, -1, false);
+    }
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
     {
       RECORD_OMP_TIME();
@@ -585,7 +590,14 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     long BSb = gemms[0].BSb;
     auto loop_scheme = gemms[0].loop_scheme;
 
-    auto t_qin = quantize_int8sym(t_in, Hc, 2, false);
+    auto t_qin = t_in;
+    if (t_in.is_quantized()) {
+      TORCH_CHECK(t_qin.is_contiguous());
+      TORCH_CHECK(t_qin.dtype() == at::kQInt8);
+    } else {
+      t_in = t_in.contiguous();
+      t_qin = quantize_int8sym(t_in, Hc, -1, false);
+    }
     std::vector<std::function<void(int, int, int)>> funcs;
     for (int i = 0; i < n_gemms; i++) {
       auto& g = gemms[i];

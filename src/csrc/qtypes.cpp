@@ -441,6 +441,8 @@ at::Tensor quantize_mxfp4(
     int64_t axis,
     bool is_vnni) {
   at::ScalarType dtype = at::kQUInt4x2;
+  if (axis < 0)
+    axis += self.dim();
   return quantize_mxfp_(self, block_size, axis, is_vnni, dtype);
 }
 
@@ -450,9 +452,37 @@ at::Tensor quantize_int8sym(
     int64_t axis,
     bool is_vnni) {
   at::ScalarType dtype = at::kQInt8;
+  if (axis < 0)
+    axis += self.dim();
   auto quantizer = at::make_per_block_affine_quantizer(
       self, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
   return quantizer->quantize(self);
+}
+
+at::Tensor create_qtensor_int8sym(
+    const at::Tensor& val,
+    const at::Tensor& scales,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni) {
+  at::ScalarType dtype = at::kQInt8;
+  TORCH_CHECK(val.dtype() == at::kChar && scales.dtype() == at::kFloat);
+  auto quantizer = at::make_per_block_affine_quantizer(
+      val, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
+  auto qscales =
+      static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())->scales();
+  TORCH_CHECK(qscales.sizes() == scales.sizes());
+  qscales.copy_(scales);
+  at::Tensor qtensor = at::new_qtensor(
+      val.sizes(),
+      val.options().dtype(dtype).memory_format(val.suggest_memory_format()),
+      quantizer);
+
+  int8_t* src = (int8_t*)val.data_ptr();
+  int8_t* dst = (int8_t*)qtensor.data_ptr();
+  memcpy(dst, src, val.numel());
+
+  return qtensor;
 }
 
 at::Tensor q_per_block_scales(const at::Tensor& self) {
@@ -492,6 +522,7 @@ REGISTER_SUBMODULE(_qtype, m) {
   m.def("quantize_mxfp", &quantize_mxfp);
   m.def("quantize_mxfp4", &quantize_mxfp4);
   m.def("quantize_int8sym", &quantize_int8sym);
+  m.def("create_qtensor_int8sym", &create_qtensor_int8sym);
   m.def("q_per_block_scales", &q_per_block_scales);
   m.def("q_per_block_block_size", &q_per_block_block_size);
   m.def("q_per_block_axis", &q_per_block_axis);
