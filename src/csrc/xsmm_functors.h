@@ -103,6 +103,10 @@ template <>
 inline libxsmm_datatype XsmmDtype<uint8_t>() {
   return LIBXSMM_DATATYPE_I8;
 }
+template <>
+inline libxsmm_datatype XsmmDtype<int8_t>() {
+  return LIBXSMM_DATATYPE_I8;
+}
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 template <>
 inline libxsmm_datatype XsmmDtype<bfloat8>() {
@@ -223,6 +227,13 @@ inline __m128i _mm_convert_ps_hf8(__m512 a) {
       _mm512_cvtps_ph(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), 8));
 }
 
+inline __m512 _mm512_loadu_ps_auto(int const* mem_addr) {
+  return _mm512_cvtepi32_ps(_mm512_loadu_epi32(mem_addr));
+}
+inline __m512 _mm512_maskz_loadu_ps_auto(__mmask16 k, int const* mem_addr) {
+  return _mm512_cvtepi32_ps(_mm512_maskz_loadu_epi32(k, mem_addr));
+}
+
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 inline __m512 _mm512_loadu_ps_auto(bfloat8 const* mem_addr) {
   return _mm512_convert_bf8_ps(_mm_loadu_si128((__m128i const*)mem_addr));
@@ -248,6 +259,7 @@ inline __m512 _mm512_maskz_loadu_ps_auto(__mmask16 k, hfloat8 const* mem_addr) {
   return _mm512_convert_hf8_ps(
       _mm_maskz_loadu_epi8(k, (__m128i const*)mem_addr));
 }
+
 inline void _mm512_storeu_ps_auto(hfloat8* mem_addr, __m512 a) {
   _mm_storeu_si128((__m128i*)mem_addr, _mm_convert_ps_hf8(a));
 }
@@ -864,6 +876,119 @@ class ConvertTPP {
   int ldo = 0;
   UnaryTPP kernel;
   bool init_done = false;
+};
+
+template <typename Tin, typename Tout, typename Tscale>
+class DequantTPP : public BaseTPP {
+ public:
+  DequantTPP() {}
+  DequantTPP(int N) : DequantTPP(1, N) {}
+  DequantTPP(int rows, int cols) : DequantTPP(rows, cols, cols, cols) {}
+  DequantTPP(int rows, int cols, int ldi, int ldo)
+      : DequantTPP(rows, cols, ldi, ldo, 1) {}
+  DequantTPP(int rows, int cols, int ldi, int ldo, int ldis)
+      : rows(rows), cols(cols), ldi(ldi), ldo(ldo), ldis(ldis) {
+    kernel = (libxsmm_meqn_function)get_kernel();
+  }
+  void operator()(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+    libxsmm_meqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[4];
+    arg_array[0].primary = (void*)w_scl;
+    arg_array[1].primary = (void*)i_scl;
+    arg_array[2].primary = (void*)in;
+    arg_array[3].primary = (void*)out;
+    eqn_param.inputs = arg_array;
+    eqn_param.output.primary = (void*)out;
+    kernel(&eqn_param);
+    // ref(in, out, i_scl, w_scl);
+  }
+  void ref(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+#ifdef __AVX512F__
+    for (int i = 0; i < rows; i++) {
+      int j;
+      float fi_scl = (float)i_scl[i * ldis];
+      auto vfi_scl = _mm512_set1_ps(fi_scl);
+      for (j = 0; j < ALIGNDOWN(cols, 16); j += 16) {
+        auto vfw_scl = _mm512_loadu_ps_auto(&w_scl[j]);
+        auto vfscl = _mm512_mul_ps(vfi_scl, vfw_scl);
+        auto vin = _mm512_loadu_ps_auto(&in[i * ldi + j]);
+        auto vout = _mm512_loadu_ps_auto(&out[i * ldo + j]);
+        vout = _mm512_fmadd_ps(vfscl, vin, vout);
+        _mm512_storeu_ps_auto(&out[i * ldo + j], vout);
+      }
+      if (j < cols) {
+        int rem = cols - j;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vfw_scl = _mm512_maskz_loadu_ps_auto(mask, &w_scl[j]);
+        auto vfscl = _mm512_mul_ps(vfi_scl, vfw_scl);
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[i * ldi + j]);
+        auto vout = _mm512_maskz_loadu_ps_auto(mask, &out[i * ldo + j]);
+        vout = _mm512_fmadd_ps(vfscl, vin, vout);
+        _mm512_mask_storeu_ps_auto(&out[i * ldo + j], mask, vout);
+      }
+    }
+#else
+    for (int i = 0; i < rows; i++) {
+      float fi_scl = (float)i_scl[i * ldis];
+      for (int j = 0; j < cols; j++) {
+        float fscl = fi_scl * (float)w_scl[j];
+        out[i * ldo + j] += (Tout)in[i * ldi + j] * fscl;
+      }
+    }
+#endif
+  }
+
+ protected:
+  std::string hash_str() override {
+    char hash[200];
+    snprintf(
+        hash,
+        200,
+        "dequant_eqn_t%d_%d_%d_r%d_c%d_ldi%d_ldo%d_ldsi%d",
+        XsmmDtype<Tin>(),
+        XsmmDtype<Tout>(),
+        XsmmDtype<Tscale>(),
+        rows,
+        cols,
+        ldi,
+        ldo,
+        ldis);
+    return std::string(hash);
+  }
+  void* build_kernel() override {
+    auto dt_in = XsmmDtype<Tin>();
+    auto dt_out = XsmmDtype<Tout>();
+    auto dt_scale = XsmmDtype<Tscale>();
+    libxsmm_blasint ld = ldo;
+    libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
+    meqn_push_ternary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_TERNARY_MULADD,
+        LIBXSMM_MELTW_FLAG_TERNARY_REUSE_IN_2_AS_OUT,
+        LIBXSMM_DATATYPE_F32);
+    meqn_push_binary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_BINARY_MUL,
+        LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0 |
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
+        LIBXSMM_DATATYPE_F32);
+    // TODO: FIX below eqn
+    meqn_push_arg(my_eqn0, cols, 1, cols, 0, 0, dt_scale);
+    meqn_push_arg(my_eqn0, 1, rows, ldis, 1, 0, dt_scale);
+    meqn_push_arg(my_eqn0, cols, rows, ldi, 2, 0, dt_in);
+    meqn_push_arg(my_eqn0, cols, rows, ldo, 3, 0, dt_out);
+    debug_print_eqn_tree(my_eqn0);
+    return (void*)meqn_dispatch(cols, rows, &ld, dt_out, my_eqn0);
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi = 0;
+  int ldo = 0;
+  int ldis = 1;
+  // int ldws = 1; must be 1
+  libxsmm_meqn_function kernel = NULL;
 };
 
 template <typename T>
@@ -2159,7 +2284,8 @@ template <
     typename Tin,
     typename Tout,
     typename Tw = Tin,
-    typename Tcomp = float>
+    typename Tcomp =
+        typename std::conditional<std::is_same_v<Tout, int>, int, float>::type>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}
