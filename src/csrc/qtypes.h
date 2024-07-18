@@ -139,6 +139,7 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
     using Ts = typename QCls::Ts;
 
     auto bs = this->block_size_internal_;
+    auto qtpp = QCls::GetQuantizeTPP(bs);
     auto vnni = vnni_pack_size_;
     auto packed_vnni = vnni_pack_size_ / pack_size_;
     auto in = GetVLAPtr<Tin>(t_in, {bs, post_, vnni});
@@ -176,10 +177,14 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
             }
           }
         } else {
-          for (int k = 0; k < bs; k++) {
-            for (int v = 0; v < vnni; v++) {
-              auto qval = qt.quantize(in[i][k][j][v]);
-              out[i][k][j][v] = qval;
+          if (vnni == 1 && post_ == 1) {
+            qt.quantize(in[i][0][0], out[i][0][0], qtpp);
+          } else {
+            for (int k = 0; k < bs; k++) {
+              for (int v = 0; v < vnni; v++) {
+                auto qval = qt.quantize(in[i][k][j][v]);
+                out[i][k][j][v] = qval;
+              }
             }
           }
         }
