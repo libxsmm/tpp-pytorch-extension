@@ -351,6 +351,10 @@ struct TORCH_API PerBlockAffineQuantizer : public at::PerBlockQuantizer {
     return scales_;
   }
 
+  void set_scales(Tensor& scales) {
+    scales_ = scales;
+  }
+
   Tensor zero_points() const {
     return zero_points_;
   }
@@ -399,3 +403,6 @@ at::Tensor quantize_int8sym(
     int64_t block_size,
     int64_t axis,
     bool is_vnni);
+
+inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t);
+inline at::Tensor remap_and_quantize_qint8(at::Tensor t);

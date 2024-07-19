@@ -24,6 +24,11 @@
 #include "vla.h"
 #include "xsmm_functors.h"
 
+static const int QINT8_EMU = env2int("QINT8_EMU", 0);
+static const int QINT8_BLOCK_SIZE = env2int("QINT8_BLOCK_SIZE", 256);
+
+REGISTER_LOCAL_SCOPE(quant, "quant");
+
 using namespace tpp;
 template <typename TIN>
 struct MxFP4Quant {
@@ -240,6 +245,25 @@ static int64_t get_sub_byte_tensor_size(
       at::ceil_div(bytes_per_row, element_per_byte);
 }
 
+inline Tensor new_qtensor(Tensor qval, QuantizerPtr quantizer) {
+  auto options = qval.options().dtype(quantizer->scalar_type());
+  auto memory_format =
+      options.memory_format_opt().value_or(MemoryFormat::Contiguous);
+  auto device = options.device();
+
+  at::DispatchKey tensorDispatchKey = options.computeDispatchKey();
+
+  auto tensor = detail::make_tensor<QTensorImpl>(
+      c10::Storage(qval.storage()),
+      at::DispatchKeySet(tensorDispatchKey),
+      scalarTypeToTypeMeta(quantizer->scalar_type()),
+      quantizer);
+  get_qtensorimpl(tensor)->set_storage_offset(qval.storage_offset());
+  get_qtensorimpl(tensor)->set_sizes_contiguous(qval.sizes());
+  get_qtensorimpl(tensor)->empty_tensor_restride(memory_format);
+  return tensor;
+}
+
 inline Tensor new_qtensor(
     IntArrayRef sizes,
     const TensorOptions& options,
@@ -255,8 +279,6 @@ inline Tensor new_qtensor(
     allocator = at::getCPUAllocator();
   } else if (device.is_meta()) {
     allocator = GetAllocator(kMeta);
-  } else if (device.is_privateuseone()) {
-    allocator = GetAllocator(kPrivateUse1);
   } else {
     TORCH_INTERNAL_ASSERT(0, "unrecognized device for new_qtensor: ", device);
   }
@@ -460,8 +482,8 @@ at::Tensor quantize_int8sym(
 }
 
 at::Tensor create_qtensor_int8sym(
-    const at::Tensor& val,
-    const at::Tensor& scales,
+    at::Tensor& val,
+    at::Tensor& scales,
     int64_t block_size,
     int64_t axis,
     bool is_vnni) {
@@ -469,19 +491,9 @@ at::Tensor create_qtensor_int8sym(
   TORCH_CHECK(val.dtype() == at::kChar && scales.dtype() == at::kFloat);
   auto quantizer = at::make_per_block_affine_quantizer(
       val, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
-  auto qscales =
-      static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())->scales();
-  TORCH_CHECK(qscales.sizes() == scales.sizes());
-  qscales.copy_(scales);
-  at::Tensor qtensor = at::new_qtensor(
-      val.sizes(),
-      val.options().dtype(dtype).memory_format(val.suggest_memory_format()),
-      quantizer);
-
-  int8_t* src = (int8_t*)val.data_ptr();
-  int8_t* dst = (int8_t*)qtensor.data_ptr();
-  memcpy(dst, src, val.numel());
-
+  static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())
+      ->set_scales(scales);
+  at::Tensor qtensor = at::new_qtensor(val, quantizer);
   return qtensor;
 }
 
@@ -513,9 +525,142 @@ int64_t q_per_block_axis(const at::Tensor& self) {
   return static_cast<at::PerBlockQuantizer*>(quantizer.get())->axis();
 }
 
-size_t q_get_ptr(const at::Tensor& self) {
-  // return (size_t)self.data_ptr<uint8_t>();
-  return (size_t)self.data_ptr();
+inline at::Tensor fix_vnni(at::Tensor t) {
+  auto dtype = t.scalar_type();
+  auto dims = t.dim();
+  TPP_ASSERT(dims >= 4, "Invalid shape, dims = %ld\n", dims);
+  auto sizes = t.sizes();
+  auto K1 = sizes[0];
+  auto C1 = sizes[1];
+  auto C2 = sizes[2];
+  auto K2 = sizes[3];
+  auto C3 = dims == 5 ? sizes[4] : 1L;
+  if (dtype == at::kBFloat16) {
+    if (C3 == 2) {
+      return t;
+    } else if (C3 == 4) {
+      return t.view({K1, C1, C2, K2, 2, 2})
+          .permute({0, 1, 2, 4, 3, 5})
+          .contiguous()
+          .view({K1, C1, C2 * 2, K2, 2});
+    } else if (C3 == 1) {
+      TPP_ASSERT(
+          C2 % 2 == 0, "Shape incompatible for VNNI2 layout, C2 = %ld\n", C2);
+      return t.view({K1, C1, C2 / 2, 2, K2})
+          .permute({0, 1, 2, 4, 3})
+          .contiguous();
+    } else {
+      TPP_ASSERT(false, "Shape incompatible for VNNI2 layout\n");
+    }
+  } else if (dtype == at::kFloat) {
+    if (C3 == 1 and dims == 4) {
+      return t;
+    } else if (C3 == 1) {
+      return t.view({K1, C1, C2, K2});
+    } else {
+      return t.permute({0, 1, 2, 4, 3})
+          .contiguous()
+          .view({K1, C1, C2 * C3, K2});
+    }
+  } else {
+    TPP_ASSERT(false, "Unknown dtype for FIX_VNNI layout\n");
+  }
+  return t;
+}
+
+inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
+  RECORD_SCOPE(quant, {t});
+  auto dim = t.dim();
+  if (dim == 5) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C3 = sizes[4];
+    if (K2 < 32 && 32 % K2 == 0) {
+      int RBS = 32 / K2;
+      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
+      t = t.view({K1 / RBS, RBS, C1, C2, K2, C3})
+              .permute({0, 2, 3, 1, 4, 5})
+              .contiguous()
+              .view({K1 / RBS, C1, C2, RBS * K2, C3});
+    }
+  } else if (dim == 4) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    TPP_ASSERT(C2 % 2 == 0, "Shape not compatible for VNNI2\n");
+    if (K2 < 32 && 32 % K2 == 0) {
+      int RBS = 32 / K2;
+      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
+      t = t.view({K1 / RBS, RBS, C1, C2 / 2, 2L, K2})
+              .permute({0, 2, 3, 1, 5, 4})
+              .contiguous()
+              .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
+    } else {
+      t = t.view({K1, C1, C2 / 2, 2L, K2})
+              .permute({0, 1, 2, 4, 3})
+              .contiguous()
+              .view({K1, C1, C2 / 2, K2, 2});
+    }
+  }
+  auto ret = quantize_mxfp4(t, 32, 2, true);
+  return ret;
+}
+
+inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
+  RECORD_SCOPE(quant, {t});
+  auto dim = t.dim();
+  long block_size = 0;
+  if (dim == 5) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C3 = sizes[4];
+    auto C = C1 * C2 * C3;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE / C3;
+      C1 = C / QINT8_BLOCK_SIZE;
+    }
+    if (C3 != 4) {
+      int RBS = 4 / C3;
+      TPP_ASSERT(C2 % RBS == 0, "Shape not compatible for VNNI4\n");
+      t = t.view({K1, C1, C2 / RBS, RBS, K2, C3})
+              .permute({0, 1, 2, 4, 3, 5})
+              .contiguous()
+              .view({K1, C1, C2 / RBS, K2, RBS * C3});
+    }
+    block_size = C2 * C3;
+  } else if (dim == 4) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C = C1 * C2;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE;
+      C1 = C / QINT8_BLOCK_SIZE;
+    }
+    TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
+    t = t.view({K1, C1, C2 / 4, 4, K2})
+            .permute({0, 1, 2, 4, 3})
+            .contiguous()
+            .view({K1, C1, C2 / 4, K2, 4});
+    block_size = C2;
+  }
+  auto ret = quantize_int8sym(t, block_size, 2, true);
+  std::cout << "remap_and_quantize_qint8: " << ret.sizes()
+            << " dt: " << ret.dtype() << std::endl;
+  if (QINT8_EMU == 1) {
+    ret = fix_vnni(ret.dequantize().to(t.dtype()));
+  }
+  return ret;
 }
 
 REGISTER_SUBMODULE(_qtype, m) {
@@ -526,5 +671,7 @@ REGISTER_SUBMODULE(_qtype, m) {
   m.def("q_per_block_scales", &q_per_block_scales);
   m.def("q_per_block_block_size", &q_per_block_block_size);
   m.def("q_per_block_axis", &q_per_block_axis);
-  m.def("q_get_ptr", &q_get_ptr);
+  m.def("remap_and_quantize_mxfp4", &remap_and_quantize_mxfp4);
+  m.def("remap_and_quantize_qint8", &remap_and_quantize_qint8);
+  m.def("fix_vnni", &fix_vnni);
 }

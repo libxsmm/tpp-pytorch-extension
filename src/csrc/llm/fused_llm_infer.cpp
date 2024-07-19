@@ -2367,8 +2367,6 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
   m.def("remap_indices", &remap_indices);
-  m.def("remap_and_quantize_qint8", &remap_and_quantize_qint8);
-  m.def("remap_and_quantize_mxfp4", &remap_and_quantize_mxfp4);
   m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   py::class_<LLMBlock>(m, "LLMBlock").def("forward", &LLMBlock::forward);
   py::class_<GPTJBlock>(m, "GPTJBlock")
