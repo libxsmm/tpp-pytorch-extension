@@ -36,6 +36,9 @@
 #ifdef DEBUG_TRACE_TPP
 extern int tpp_debug_trace;
 #endif
+#ifndef __x86_64__
+#define __rdtsc() (0)
+#endif
 
 #define TPP_ASSERT(cond, x...) \
   do {                         \
