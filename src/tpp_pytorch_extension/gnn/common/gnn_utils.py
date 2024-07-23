@@ -11,7 +11,10 @@
 import torch
 import math
 from tpp_pytorch_extension._C import _gnn_utils as gnn_utils_cpp
-
+import numpy as np
+import os
+from ...qtypes import *
+import tqdm
 
 def affinitize_cores(nthreads, nworkers):
     gnn_utils_cpp.affinitize_cores(nthreads, nworkers)
@@ -120,20 +123,72 @@ def mapped_spmm_copy_lhs_add(dest, indptr, dind, sind, comms, source, edge, soff
     gnn_utils_cpp.mapped_spmm_copy_lhs_add(inputs, rank, soff)
 
 def quantize_dataset(in_name, out_name, out_scf_name, feat_dim=1024, block_size=32):
+    '''
     out, out_scf = gnn_utils_cpp.quantize_dataset(in_name, feat_dim, block_size)
 
     if out.dim() == 1:
         rows = out.shape[0] // feat_dim
         out = out.reshape(rows, feat_dim)
+    '''
+    f = open(in_name)
+    sz = f.seek(0, os.SEEK_END)
+    f.close()
+    elements = sz // 4 # assuming 4-bytes per element, i.e., float
+    rows = elements // feat_dim
+    row_blocks = 1000000
+    rows_main = rows // row_blocks
+    rows_rem = rows % row_blocks
+
+    out = torch.empty(0,dtype=torch.int8)
+    out_scf = torch.empty(0)
+
+    for r in tqdm.tqdm(range(0, rows_main)):
+        offset = r * row_blocks * feat_dim * 4
+        t_in = torch.from_numpy(np.fromfile(in_name, dtype=np.float32, count=row_blocks*feat_dim, offset=offset))
+        t_in = t_in.reshape(row_blocks, feat_dim)
+
+        qt = quantize_int8sym(t_in, block_size, -1, False)
+        val = get_qval(qt)
+        scf = get_scales(qt)
+        if r == 0:
+            out = val
+            out_scf = scf
+        else:
+            out = torch.cat((out, val), 0)
+            out_scf = torch.cat((out_scf, scf), 0)
+
+    print(f'out shape {out.shape}')
+    print(f'out_scf shape {out_scf.shape}')
+    
+    rem_start = rows_main * row_blocks
+    offset = rem_start * feat_dim * 4
+    t_in = torch.from_numpy(np.fromfile(in_name, dtype=np.float32, count=rows_rem*feat_dim, offset=offset))
+    t_in = t_in.reshape(rows_rem, feat_dim)
+    qt = quantize_int8sym(t_in, block_size, -1, False)
+    val = get_qval(qt)
+    scf = get_scales(qt)
+    out = torch.cat((out, val), 0)
+    out_scf = torch.cat((out_scf, scf), 0)
+
+    print(f'out shape {out.shape}')
+    print(f'out_scf shape {out_scf.shape}')
+
     torch.save(out, out_name)
     torch.save(out_scf, out_scf_name)
+    out = None
+    out_scf = None
 
 def quantize_dataset_feat(node_feats, out_name, out_scf_name, block_size=32):
+    '''
     out, out_scf = gnn_utils_cpp.quantize_dataset_feat(node_feats, block_size)
 
     if out.dim() == 1:
         rows = out.shape[0] // feat_dim
         out = out.reshape(rows, feat_dim)
+    '''
+    qt = quantize_int8sym(node_feats, block_size, -1, False)
+    out = get_qval(qt)
+    out_scf = get_scales(qt)
     torch.save(out, out_name)
     torch.save(out_scf, out_scf_name)
 

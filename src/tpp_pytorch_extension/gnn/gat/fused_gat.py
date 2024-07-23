@@ -384,6 +384,29 @@ class GATConvOpt(BlockedModule):
         if self.bias is not None:
             self.bias.block()
 
+    def maybe_unblock_params(self):
+
+        if hasattr(self, "fc"):
+            self.fc.weight.unblock()
+            if self.fc.bias is not None:
+                self.fc.bias.unblock()
+        else:
+            self.fc_src.weight.unblock()
+            if self.fc_src.bias is not None:
+                self.fc_src.bias.unblock()
+            self.fc_dst.weight.unblock()
+            if self.fc_dst.bias is not None:
+                self.fc_dst.bias.unblock()
+
+        self.attn_l.unblock()
+        self.attn_r.unblock()
+
+        if self.res_fc is not None:
+            self.res_fc.weight.unblock()
+
+        if self.bias is not None:
+            self.bias.unblock()
+
     def reset_parameters(self):
         """
 

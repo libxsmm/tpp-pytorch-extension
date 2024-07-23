@@ -96,10 +96,6 @@ inline libxsmm_datatype XsmmDtype<half>() {
   return LIBXSMM_DATATYPE_F16;
 }
 template <>
-inline libxsmm_datatype XsmmDtype<int8_t>() {
-  return LIBXSMM_DATATYPE_I8;
-}
-template <>
 inline libxsmm_datatype XsmmDtype<uint8_t>() {
   return LIBXSMM_DATATYPE_I8;
 }

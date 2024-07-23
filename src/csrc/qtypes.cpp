@@ -478,6 +478,8 @@ at::Tensor quantize_int8sym(
     axis += self.dim();
   auto quantizer = at::make_per_block_affine_quantizer(
       self, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
+  auto qscales =
+      static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())->scales();
   return quantizer->quantize(self);
 }
 
