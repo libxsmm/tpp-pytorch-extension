@@ -30,23 +30,22 @@ struct TppOps {
   AddTPP<float, float, T> add_tpp = AddTPP<float, float, T>(BS);
 };
 
-static TppOps<float> ops_f;
-static TppOps<bfloat16> ops_bf;
-static TppOps<half> ops_hf;
-
 template <typename T>
 static TppOps<T> getOps() {}
 
 template <>
 TppOps<float> getOps<float>() {
+  static TppOps<float> ops_f;
   return ops_f;
 }
 template <>
 TppOps<bfloat16> getOps<bfloat16>() {
+  static TppOps<bfloat16> ops_bf;
   return ops_bf;
 }
 template <>
 TppOps<half> getOps<half>() {
+  static TppOps<half> ops_hf;
   return ops_hf;
 }
 } // namespace shm_tpp
