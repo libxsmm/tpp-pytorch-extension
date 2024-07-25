@@ -2331,6 +2331,14 @@ static at::Tensor fc_plain_wrap(
   at::Tensor t_out;
 
   auto dt_in = t_in.dtype();
+  if (dt_in == at::kQInt8) {
+    if (t_bias.dtype().itemsize() > 0) {
+      dt_in = t_bias.dtype();
+    } else {
+      dt_in = c10::scalarTypeToTypeMeta(at::kFloat);
+    }
+  }
+
   if (dt_in == at::kFloat) {
     typedef float T;
     t_out = fc_plain<T>(t_in, t_wt, t_bias);

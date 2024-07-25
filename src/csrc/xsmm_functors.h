@@ -957,7 +957,7 @@ class QuantTPP {
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
         int qval = nearbyintf((float)in[i * ldi + j] * fscale);
-        qval = std::clamp(qval, max, min);
+        qval = std::clamp(qval, min, max);
         out[i * ldo + j] = (Tout)qval;
       }
     }
