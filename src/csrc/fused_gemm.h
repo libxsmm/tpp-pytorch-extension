@@ -441,7 +441,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockAffine) {
       if (t_wt.dtype() == at::kQInt8) {
         // b_vnni = 2;
-        printf("Using weight type at::kQInt8\n");
+        //printf("Using weight type at::kQInt8\n");
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }

@@ -30,6 +30,17 @@ from tpp_pytorch_extension.utils.blocked_layout import (
 from tpp_pytorch_extension.utils import blocked_layout, xsmm
 from tpp_pytorch_extension._C import _fused_gat_inf as fused_gat_cpp
 from ..common_inference.fused_ops import *
+from tpp_pytorch_extension._C._qtype import (
+    q_per_block_scales,
+    q_per_block_block_size,
+    q_per_block_axis,
+    remap_and_quantize_mxfp4,
+    remap_and_quantize_qint8,
+    quantize_mxfp4,
+    quantize_int8sym,
+    create_qtensor_int8sym,
+)
+import os
 
 import time
 from contextlib import contextmanager
@@ -39,15 +50,16 @@ import numpy as np
 torch.autograd.set_detect_anomaly(False)
 
 global_layer_dtype = torch.float32
-
+global_use_qint8_gemm = False
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, fuse_bias, res_spmm, inputs):
+    def forward(ctx, align, fuse_bias, use_qint8_gemm, res_spmm, inputs):
 
         (mlp_out, attn_out) = fused_gat_cpp.mlp_attn(
-                                      align, 
+                                      align,
                                       1 if fuse_bias else 0, 
+                                      1 if use_qint8_gemm else 0,
                                       inputs
                               )
 
@@ -178,6 +190,7 @@ class GATConvOpt(BlockedModule):
         bias=True,
         match_pyg_gatconv=True,
         layer_dtype=global_layer_dtype,
+        use_qint8_gemm=global_use_qint8_gemm,
     ):
         super(GATConvOpt, self).__init__()
         self._in_src_feats, self._in_dst_feats = expand_as_pair(in_feats)
@@ -191,6 +204,7 @@ class GATConvOpt(BlockedModule):
         self.fdp = feat_drop
         self.adp = attn_drop
         self.inp_needs_grad = input_needs_grad
+        self.block_size = int(os.environ['QINT8_BLOCK_SIZE'])
 
         for cbf in [32]:
             if self.bc % cbf == 0:
@@ -267,6 +281,8 @@ class GATConvOpt(BlockedModule):
         self.bias_act_drop = None
         self.add_bias = None
         self.bias_act = None
+
+        self.use_qint8_gemm = use_qint8_gemm
 
         if self.set_explicit_bias:
             if activation is not None and feat_drop > 0.0:
@@ -394,12 +410,24 @@ class GATConvOpt(BlockedModule):
                     assert h_src.shape[0] == scf_src.shape[0]
                     assert h_dst.shape[0] == scf_dst.shape[0]
 
+                    if self.use_qint8_gemm:
+                        block_size = h_src.shape[1] // scf_src.shape[1]
+                        assert block_size == (h_dst.shape[1] // scf_dst.shape[1])
+
+                        h_src = create_qtensor_int8sym(h_src, scf_src, block_size, 1, False) 
+                        h_dst = create_qtensor_int8sym(h_dst, scf_dst, block_size, 1, False) 
+                else:
+                    if self.use_qint8_gemm:
+                        h_src = quantize_int8sym(h_src, self.block_size, -1, False)
+                        h_dst = quantize_int8sym(h_dst, self.block_size, -1, False)
+
                 if not hasattr(self, "fc"):
                     assert hasattr(self, "fc_src") and hasattr(self, "fc_dst")
-                    if h_src.dtype == torch.int8:
-                        inputs_src = [h_src, scf_src, self.fc_src.weight, self.attn_l]
-                    else:
+
+                    if self.use_qint8_gemm:
                         inputs_src = [h_src, self.fc_src.weight, self.attn_l]
+                    else:
+                        inputs_src = [h_src, scf_src, self.fc_src.weight, self.attn_l]
 
                     if self.fuse_src_bias:
                         inputs_src.append(self.fc_src.bias)
@@ -410,6 +438,7 @@ class GATConvOpt(BlockedModule):
                     el, feat_src_ = MLPAttentionFunction.apply(
                         align,
                         self.fuse_src_bias,
+                        self.use_qint8_gemm,
                         True,
                         inputs_src,
                     )
@@ -419,10 +448,10 @@ class GATConvOpt(BlockedModule):
                     )
 
                     N = h_dst.size(0)
-                    if h_dst.dtype == torch.int8:
-                        inputs_dst = [h_dst, scf_dst, self.fc_dst.weight, self.attn_r]
-                    else:
+                    if self.use_qint8_gemm:
                         inputs_dst = [h_dst, self.fc_dst.weight, self.attn_r]
+                    else:
+                        inputs_dst = [h_dst, scf_dst, self.fc_dst.weight, self.attn_r] 
 
                     if self.fuse_dst_bias:
                         inputs_dst.append(self.fc_dst.bias)
@@ -432,6 +461,7 @@ class GATConvOpt(BlockedModule):
                     er, feat_dst_ = MLPAttentionFunction.apply(
                         align,
                         self.fuse_dst_bias,
+                        self.use_qint8_gemm,
                         False,
                         inputs_dst,
                     )
@@ -439,10 +469,10 @@ class GATConvOpt(BlockedModule):
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
                 else:
-                    if h_src.dtype == torch.int8:
-                        inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
-                    else:
+                    if self.use_qint8_gemm:
                         inputs_src = [h_src, self.fc.weight, self.attn_l]
+                    else:
+                        inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
 
                     N = h_src.size(0)
                     align = self.align if (N > self.align or N == 0) else N
@@ -450,6 +480,7 @@ class GATConvOpt(BlockedModule):
                     el, feat_src_ = MLPAttentionFunction.apply(
                         align,
                         False,
+                        self.use_qint8_gemm,
                         True,
                         inputs_src,
                     )
@@ -462,14 +493,15 @@ class GATConvOpt(BlockedModule):
 
                     align = self.align if (N > self.align or N == 0) else N
 
-                    if h_dst.dtype == torch.int8:
-                        inputs_dst = [h_dst, scf_dst, self.fc.weight, self.attn_r]
-                    else:
+                    if self.use_qint8_gemm:
                         inputs_dst = [h_dst, self.fc.weight, self.attn_r]
+                    else:
+                        inputs_dst = [h_dst, scf_dst, self.fc.weight, self.attn_r]
 
                     er, feat_dst_ = MLPAttentionFunction.apply(
                         align,
                         False,
+                        self.use_qint8_gemm,
                         False,
                         inputs_dst,
                     )
@@ -481,16 +513,28 @@ class GATConvOpt(BlockedModule):
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
                 h_src = feat
 
-                if h_src.dtype == torch.int8:
-                    inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
-                else:
-                    inputs_src = [h_src, self.fc.weight, self.attn_l]
+                if h_src.dtype == torch.int8 and h_dst.dtype == torch.int8:
+                    scf_src = graph.srcdata['scf']
+
+                    assert h_src.shape[0] == scf_src.shape[0]
+
+                    if self.use_qint8_gemm:
+                        block_size = h_src.shape[1] // scf_src.shape[1]
+                        assert block_size == (h_dst.shape[1] // scf_dst.shape[1])
+
+                        h_src = create_qtensor_int8sym(h_src, scf_src, block_size, 1, False) 
+
+                        inputs_src = [h_src, self.fc.weight, self.attn_l]
+                    else:
+                        fc_wt = self.fc.weight
+                        inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
 
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N
 
                 el, feat_src_ = MLPAttentionFunction.apply(
                     align,
+                    self.use_qint8_gemm,
                     False,
                     inputs_src,
                 )

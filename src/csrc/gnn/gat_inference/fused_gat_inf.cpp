@@ -19,6 +19,8 @@
 #include "init.h"
 #include "timing.h"
 #include "xsmm_functors.h"
+#include "fused_gemm.h"
+#include "qtypes.h"
 
 using namespace tpp;
 #include "tensor_helper.h"
@@ -35,37 +37,43 @@ REGISTER_SCOPE(o_attn, "o_attn");
 std::vector<at::Tensor> mlp_attn(
     long align,
     int add_bias,
+    int use_qint8_gemm,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
 
-  auto dact = -1;
-  if(inputs[0].dtype() == at::kChar) dact=0;
-  else if(inputs[0].dtype() == at::kFloat8_e4m3fn) dact=1;
-  else if(inputs[0].dtype() == at::kFloat8_e5m2) dact=2;
-  else if(inputs[0].dtype() == at::kBFloat16) dact=3;
+  if(!use_qint8_gemm) {
+    auto dact = -1;
+    if(inputs[0].dtype() == at::kChar) dact=0;
+    else if(inputs[0].dtype() == at::kFloat8_e4m3fn) dact=1;
+    else if(inputs[0].dtype() == at::kFloat8_e5m2) dact=2;
+    else if(inputs[0].dtype() == at::kBFloat16) dact=3;
 
-  assert(inputs[2].dtype() == at::kBFloat16);
-  assert(inputs[3].dtype() == at::kBFloat16);
+    assert(inputs[2].dtype() == at::kBFloat16);
+    assert(inputs[3].dtype() == at::kBFloat16);
 
-  if(dact==0) {
-  typedef int8_t Tact;
+    if(dact==0) {
+      typedef int8_t Tact;
 #include "mlp_attn_scf.h"
-  }
-  else if(dact==1) {
-  typedef hfloat8 Tact;
+    }
+    else if(dact==1) {
+      typedef hfloat8 Tact;
 #include "mlp_attn.h"
-  }
-  else if(dact==2) {
-  typedef bfloat8 Tact;
+    }
+    else if(dact==2) {
+      typedef bfloat8 Tact;
 #include "mlp_attn.h"
-  }
-  else if(dact==3) {
-  typedef bfloat16 Tact;
+    }
+    else if(dact==3) {
+      typedef bfloat16 Tact;
 #include "mlp_attn.h"
+    }
+    else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+    }
   }
   else {
-    TPP_ASSERT(
-        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+#include "mlp_attn_qint8.h"
   }
 }
 

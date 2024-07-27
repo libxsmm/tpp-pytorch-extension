@@ -657,8 +657,8 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
     block_size = C2;
   }
   auto ret = quantize_int8sym(t, block_size, 2, true);
-  std::cout << "remap_and_quantize_qint8: " << ret.sizes()
-            << " dt: " << ret.dtype() << std::endl;
+  //std::cout << "remap_and_quantize_qint8: " << ret.sizes()
+  //          << " dt: " << ret.dtype() << std::endl;
   if (QINT8_EMU == 1) {
     ret = fix_vnni(ret.dequantize().to(t.dtype()));
   }
