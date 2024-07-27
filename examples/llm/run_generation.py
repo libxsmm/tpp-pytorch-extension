@@ -113,7 +113,10 @@ def dist_init():
 
     global my_rank
     global my_size
-    if int(os.environ.get("PMI_SIZE", "0")) > 1:
+    if (
+        int(os.environ.get("PMI_SIZE", "0")) > 1
+        and int(os.environ.get("MULTI_INSTANCE", "0")) == 0
+    ):
         if args.dist_backend == "ccl":
             try:
                 import oneccl_bindings_for_pytorch
