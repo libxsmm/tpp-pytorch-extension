@@ -392,6 +392,8 @@ struct TORCH_API PerBlockAffineQuantizer : public at::PerBlockQuantizer {
 
 int64_t q_per_block_block_size(const at::Tensor& self);
 
+at::Tensor q_per_block_scales(const at::Tensor& self);
+
 at::Tensor quantize_mxfp4(
     const at::Tensor& self,
     int64_t block_size,

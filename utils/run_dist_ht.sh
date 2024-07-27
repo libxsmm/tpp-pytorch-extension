@@ -53,7 +53,7 @@ while (( "$#" )); do
 done
 
 if ! test -z $SLURM_JOB_ID ; then
-  PREFIX="srun -n 1 -N 1 "
+  PREFIX="mpiexec.hydra -np 1 "
 else
   PREFIX=
 fi
@@ -171,7 +171,7 @@ echo "#### INITIAL ENV ####"
 echo "PyTorch version: `python -c "import torch; print(torch.__version__)" 2> /dev/null`"
 
 if ! test -z $SLURM_JOB_ID ; then
-srun hostname | sort -u
+mpiexec.hydra hostname | sort -u
 fi
 
 export MASTER_ADDR=`$PREFIX hostname`

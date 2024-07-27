@@ -25,6 +25,7 @@ using namespace tpp;
 
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
+static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 128);
 static const char* GEMM_LOOP_SCHEME_REUSE =
     getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
 static const char* GEMM_LOOP_SCHEME_STREAMING =
@@ -105,6 +106,10 @@ class TppBlockedLinearWBase {
 
     Nc = wt_sizes[1];
     Hc = C / Nc;
+    if (Hc > MAX_HC_SIZE && Hc % MAX_HC_SIZE == 0) {
+      Hc = MAX_HC_SIZE;
+      Nc = C / Hc;
+    }
     Nk = wt_sizes[0];
     Hk = wt_sizes[3];
 
@@ -117,6 +122,14 @@ class TppBlockedLinearWBase {
       Ncb = NCB_BLOCK_SIZE;
     return std::make_tuple(Nc, Hc, Nk, Hk, Ncb, BSb, rem, weight_reuse);
   }
+
+  static inline const std::string extra(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias) {
+    return "";
+  }
+
   void operator()(
       at::Tensor t_in,
       at::Tensor t_wt_V,
@@ -141,11 +154,12 @@ class TppBlockedLinearWBase {
     bool weight_reuse;
     std::tie(Nc, Hc, Nk, Hk, Ncb, BSb, rem, weight_reuse) =
         getBlockingParams(t_in, t_wt, t_bias);
+    auto extra = GemmT::extra(t_in, t_wt, t_bias);
     char hash[200] = "";
     snprintf(
         hash,
         199,
-        "gemm_Nc%ld_Hc%ld_Nk%ld_Hk%ld_Bsb%ld_rem%ld_Ncb%ld_wr%d",
+        "gemm_Nc%ld_Hc%ld_Nk%ld_Hk%ld_Bsb%ld_rem%ld_Ncb%ld_wr%d_%s",
         Nc,
         Hc,
         Nk,
@@ -153,7 +167,8 @@ class TppBlockedLinearWBase {
         BSb,
         rem,
         Ncb,
-        weight_reuse ? 1 : 0);
+        weight_reuse ? 1 : 0,
+        extra.c_str());
     auto search = gemm_cache.find(hash);
     GemmT* gemm = NULL;
     if (search != gemm_cache.end())
@@ -161,7 +176,7 @@ class TppBlockedLinearWBase {
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias);
       gemm_cache[hash] = gemm;
-      // printf("Hash: %s\n", hash);
+      printf("Hash: %s\n", hash);
     }
     return *gemm;
   }
@@ -433,6 +448,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
   using BrTout = int32_t;
   SCOPEIT_DECL(BrgemmTPP<BrTin, BrTout, BrTw>) brgemm_tpp, brgemm_tpp_rem;
   SCOPEIT_DECL(DequantTPP<BrTout, Tout, float>) dequant_acc, dequant_acc_rem;
+  long block_size = 0;
+  long n_Hc_blocks = 1;
+  long ScNc = 1;
 
  public:
   TppBlockedQInt8LinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias)
@@ -441,24 +459,43 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockAffine) {
       if (t_wt.dtype() == at::kQInt8) {
         // b_vnni = 2;
-        //printf("Using weight type at::kQInt8\n");
+        block_size = q_per_block_block_size(t_wt);
+        TPP_ASSERT(block_size % Hc == 0, "Block size mismatch\n");
+        n_Hc_blocks = block_size / Hc;
+        ScNc = Nc / n_Hc_blocks;
+        printf(
+            "Using weight type at::kQInt8 q_bs: %ld, Hc: %ld\n",
+            block_size,
+            Hc);
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }
     }
 
-    brgemm_tpp = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
+    brgemm_tpp = SCOPEIT((BrgemmTPP<BrTin, BrTout, BrTw>(
         BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
-    brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<BrTin, BrTout, BrTw>(
+    brgemm_tpp_rem = SCOPEIT((BrgemmTPP<BrTin, BrTout, BrTw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
-    dequant_acc =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, Nc)), EW_RCP);
-    dequant_acc_rem =
-        SCOPEIT((DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, Nc)), EW_RCP);
+    dequant_acc = SCOPEIT(
+        (DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, ScNc)), EW_RCP);
+    dequant_acc_rem = SCOPEIT(
+        (DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, ScNc)), EW_RCP);
 
     loop_scheme =
         weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
   }
+
+  static inline const std::string extra(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias) {
+    TORCH_CHECK(t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockAffine);
+    long block_size = q_per_block_block_size(t_wt);
+    char ehash[20];
+    snprintf(ehash, 19, "bs%ld", block_size);
+    return std::string(ehash);
+  }
+
   std::function<void(int, int, int)> stepFunc(
       at::Tensor& t_in,
       at::Tensor& t_wt_V,
@@ -475,20 +512,12 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     TPP_ASSERT(
         t_wt_V.is_quantized() && t_wt_V.qscheme() == at::kPerBlockAffine,
         "Weight not quantized\n");
-    auto quantizer = at::get_qtensorimpl(t_wt_V)->quantizer();
-    auto w_quantizer =
-        static_cast<at::PerBlockAffineQuantizer*>(quantizer.get());
-    quantizer = at::get_qtensorimpl(t_in)->quantizer();
-    auto i_quantizer =
-        static_cast<at::PerBlockAffineQuantizer*>(quantizer.get());
-    auto pack_size = w_quantizer->pack_size();
-    auto block_size = w_quantizer->block_size();
-    TPP_ASSERT(block_size == Hc, "Block size mismatch\n");
+    auto constexpr pack_size = 1;
     auto wt_V = GetVLAPtr<BrTw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
-    auto t_w_scl = w_quantizer->scales();
-    auto t_i_scl = i_quantizer->scales();
-    auto w_scl = GetVLAPtr<float>(t_w_scl, {Nc, Hk /* *(Hc / block_size)*/});
-    auto i_scl = GetVLAPtr<float>(t_i_scl, {Nc /*, Hc / block_size*/});
+    auto t_w_scl = q_per_block_scales(t_wt_V);
+    auto t_i_scl = q_per_block_scales(t_in);
+    auto w_scl = GetVLAPtr<float>(t_w_scl, {ScNc, Hk});
+    auto i_scl = GetVLAPtr<float>(t_i_scl, {ScNc});
     auto func = [&, in, wt_V, w_scl, i_scl, bias, out, BS, with_bias ](
         int nc, int s1, int nk) __attribute__((always_inline)) {
       auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
@@ -502,11 +531,15 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
             this->zero_tpp(out[s1][nk]);
           }
         }
-        for (int c = 0; c < count; c++) {
-          brgemm_tpp(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, true);
+        for (int c = 0; c < count; c += n_Hc_blocks) {
+          brgemm_tpp(
+              in[s1][nc + c], wt_V[nk][nc + c], tmp_out, n_Hc_blocks, true);
 
           dequant_acc(
-              tmp_out, out[s1][nk], &i_scl[s1][nc + c], w_scl[nk][nc + c]);
+              tmp_out,
+              out[s1][nk],
+              &i_scl[s1][(nc + c) / n_Hc_blocks],
+              w_scl[nk][(nc + c) / n_Hc_blocks]);
         }
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCBs[0])
@@ -525,7 +558,10 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
           brgemm_tpp_rem(in[s1][nc + c], wt_V[nk][nc + c], tmp_out, 1, false);
 
           dequant_acc_rem(
-              tmp_out, out[s1][nk], &i_scl[s1][nc + c], w_scl[nk][nc + c]);
+              tmp_out,
+              out[s1][nk],
+              &i_scl[s1][(nc + c) / n_Hc_blocks],
+              w_scl[nk][(nc + c) / n_Hc_blocks]);
         }
         if (!(nc + Ncb < Nc)) { // last nc iter
           if (postOpCBs[1])
@@ -548,7 +584,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       TORCH_CHECK(t_qin.dtype() == at::kQInt8);
     } else {
       t_in = t_in.contiguous();
-      t_qin = quantize_int8sym(t_in, Hc, -1, false);
+      t_qin = quantize_int8sym(t_in, block_size, -1, false);
     }
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
     {
@@ -585,6 +621,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     long Hc = gemms[0].Hc;
     long Ncb = gemms[0].Ncb;
     long BSb = gemms[0].BSb;
+    long block_size = gemms[0].block_size;
     auto loop_scheme = gemms[0].loop_scheme;
 
     auto t_qin = t_in;
@@ -593,7 +630,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       TORCH_CHECK(t_qin.dtype() == at::kQInt8);
     } else {
       t_in = t_in.contiguous();
-      t_qin = quantize_int8sym(t_in, Hc, -1, false);
+      t_qin = quantize_int8sym(t_in, block_size, -1, false);
     }
     std::vector<std::function<void(int, int, int)>> funcs;
     for (int i = 0; i < n_gemms; i++) {

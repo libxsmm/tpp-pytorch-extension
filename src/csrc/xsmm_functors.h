@@ -36,6 +36,9 @@
 #ifdef DEBUG_TRACE_TPP
 extern int tpp_debug_trace;
 #endif
+#ifndef __x86_64__
+#define __rdtsc() (0)
+#endif
 
 #define TPP_ASSERT(cond, x...) \
   do {                         \
@@ -954,7 +957,7 @@ class QuantTPP {
     for (int i = 0; i < rows; i++) {
       for (int j = 0; j < cols; j++) {
         int qval = nearbyintf((float)in[i * ldi + j] * fscale);
-        qval = std::clamp(qval, max, min);
+        qval = std::clamp(qval, min, max);
         out[i * ldo + j] = (Tout)qval;
       }
     }

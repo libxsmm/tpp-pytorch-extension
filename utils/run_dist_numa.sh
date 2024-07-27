@@ -77,7 +77,9 @@ echo "Running $NP tasks"
 function rank_cmd() {
   RANK=$1
   NCORES=$2
-  PREFIX="-np 1 numactl -m $RANK -C $(( NCORES * RANK ))-$(( NCORES * (RANK+1) - 1 )) "
+  # PREFIX="-np 1 numactl -m $RANK -C $(( NCORES * RANK ))-$(( NCORES * (RANK+1) - 1 )) "
+  CORERANGE=`lscpu | grep "NUMA node$1 CPU" | awk '{print $NF}' | tr "," " " | awk '{print $1}'`
+  PREFIX="-np 1 numactl -m $RANK -C $CORERANGE "
   echo $PREFIX
 }
 
