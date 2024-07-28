@@ -626,6 +626,14 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
     if (C % QINT8_BLOCK_SIZE == 0) {
       C2 = QINT8_BLOCK_SIZE / C3;
       C1 = C / QINT8_BLOCK_SIZE;
+    } else {
+      for (int QBS = 4096; QBS >= 64; QBS /= 2) {
+        if (QINT8_BLOCK_SIZE > QBS && C % QBS == 0) {
+          C2 = QBS / C3;
+          C1 = C / QBS;
+          break;
+        }
+      }
     }
     if (C3 != 4) {
       int RBS = 4 / C3;
@@ -646,6 +654,14 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
     if (C % QINT8_BLOCK_SIZE == 0) {
       C2 = QINT8_BLOCK_SIZE;
       C1 = C / QINT8_BLOCK_SIZE;
+    } else {
+      for (int QBS = 4096; QBS >= 64; QBS /= 2) {
+        if (QINT8_BLOCK_SIZE > QBS && C % QBS == 0) {
+          C2 = QBS;
+          C1 = C / QBS;
+          break;
+        }
+      }
     }
     TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
     t = t.view({K1, C1, C2 / 4, 4, K2})
