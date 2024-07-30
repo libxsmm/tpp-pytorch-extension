@@ -223,6 +223,11 @@ class _ModelFallbackWrapper(GenerationMixin):
         self.saved_past_key_values = None
 
     def __call__(self, *args, **kwargs):
+        if not "past_key_values" in kwargs:
+            kwargs["past_key_values"] = None
+        if len(args) > 0:
+            kwargs["input_ids"] = args[0]
+            assert len(args) == 1, "More than 1 positional arguments not supported"
         first_token = True if kwargs["past_key_values"] is None else False
         if kwargs["past_key_values"] is None and self._default.config.use_cache:
             kwargs["past_key_values"] = generate_past_key_values(
