@@ -8,7 +8,7 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("bias_relu_bwd", std::vector<c10::IValue>());
+RECORD_FUNCTION("bias_lrelu_bwd", std::vector<c10::IValue>());
 
 int i = 0;
 auto t_grad_out = inputs[i++].contiguous();

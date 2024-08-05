@@ -13,7 +13,7 @@ try:
     from torch.autograd.profiler import profile
 except ImportError:
     from torch.autograd.profiler import *
-
+from collections import defaultdict
 
 def el_nested_key_averages(self, only_top_level):
     """Averages all function events over their keys.

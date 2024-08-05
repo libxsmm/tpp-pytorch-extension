@@ -8,9 +8,9 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("mlp_attn", std::vector<c10::IValue>());
+RECORD_FUNCTION("mlp_attn_scf", std::vector<c10::IValue>());
 
-at::Tensor t_in, t_in_scf, t_attn_3d, t_wt, t_bias = at::empty(0);
+at::Tensor t_in, t_in_scf, t_attn_3d, t_wt, t_bias;
 int i = 0;
 
 t_in = inputs[i++];
@@ -19,14 +19,13 @@ t_wt = inputs[i++];
 t_attn_3d = inputs[i++];
 if (add_bias)
   t_bias = inputs[i++];
+else
+  t_bias = at::empty(0, at::kBFloat16);
 
 auto in_sizes = t_in.sizes();
 auto wt_sizes = t_wt.sizes();
 auto scf_sizes = t_in_scf.sizes();
 auto N = in_sizes[0];
-auto bn = align;
-auto nn = N / bn;
-auto rem = N % bn;
 auto blocks = scf_sizes[1];
 
 auto nk = wt_sizes[0];
@@ -48,9 +47,7 @@ if (t_wt.dim() == 5) {
 
 auto t_wt_V = wt_tensor_for_fwd(nk, bk, nc, bc, t_wt);
 
-auto t_out_mlp = at::empty({N, K}, at::kBFloat16); // [N,  K]
-
-auto cvt_f32_bf16_tpp = SCOPEIT((ConvertTPP<float, bfloat16>(bn, C)), EW_COPY);
+auto cvt_f32_bf16_tpp = SCOPEIT((ConvertTPP<float, bfloat16>(1, C)), EW_COPY);
 
 libxsmm_meltw_unary_shape deq_shape;
 deq_shape.m = Cb;
@@ -64,174 +61,25 @@ deq_shape.comp_type = LIBXSMM_DATATYPE_F32;
 libxsmm_meltwfunction_unary dequant_kernel;
 dequant_kernel = libxsmm_dispatch_meltw_unary( LIBXSMM_MELTW_TYPE_UNARY_DEQUANT, deq_shape, LIBXSMM_MELTW_FLAG_UNARY_NONE );
 
-if (add_bias) {
-  //auto in = GetVLAPtr<Tact>(t_in, {bn, nc, bcp});
-  auto in_dq = GetVLAPtr<Tact>(t_in, {bn, blocks, Cb});
-  auto scf = GetVLAPtr<float>(t_in_scf, {bn, blocks});
-  auto wt_V = GetVLAPtr<bfloat16>(t_wt_V, {nc, bcp * bk});
-  auto bias = GetVLAPtr<bfloat16>(t_bias, {bk});
-  auto out = GetVLAPtr<bfloat16>(t_out_mlp, {bn, nk, bk});
+at::Tensor t_in_tmp = at::empty({N,C}, at::kBFloat16);
+auto scf = GetVLAPtr<float>(t_in_scf, {blocks});
+auto in_dq = GetVLAPtr<Tact>(t_in, {blocks, Cb});
+auto in_tmp = GetVLAPtr<bfloat16>(t_in_tmp, {C});
 
-  auto brgemm_tpp = SCOPEIT((BrgemmTPP<bfloat16, bfloat16, bfloat16>(
-          bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-  auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<bfloat16, bfloat16>(bn, bk, K)), BIAS);
-
-  {
-    RECORD_SCOPE(o_mlp_attn, {t_in, t_wt_V});
-    {
-      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel
-      {
-        int tid = omp_get_thread_num();
-        int threads = omp_get_num_threads();
-        int work = nn * nk;
-        int chunk =
-            (work % threads == 0) ? (work / threads) : (work / threads) + 1;
-        int chunk_start = (tid * chunk < work) ? (tid * chunk) : work;
-        int chunk_end = ((tid + 1) * chunk < work) ? ((tid + 1) * chunk) : work;
-
-        float tmp[bn][blocks][Cb];
-        bfloat16 tmp_bf16[bn][C];
-	libxsmm_meltw_unary_param unary_param;
-
-        brgemm_tpp.config();
-
-        for (int n3k = chunk_start; n3k < chunk_end; n3k++) {
-          int n = n3k / nk;
-          int k = n3k % nk;
-          for(auto i = 0; i < bn; i++) {
-            for(auto j = 0; j<blocks; j++) {
-              unary_param.in.primary    = (void*)in_dq[n][i][j];
-              unary_param.in.secondary  = (void*)&scf[n][i][j];
-              unary_param.out.primary   = (void*)tmp[i][j];
-              dequant_kernel( &unary_param );
-            }
-          }
-          cvt_f32_bf16_tpp(tmp[0][0], tmp_bf16[0]);
-
-          cpy_bias_tpp(bias[k], out[n][0][k]);
-          brgemm_tpp(tmp_bf16[0], wt_V[k][0], out[n][0][k], nc);
-        }
-        brgemm_tpp.release();
-      }
-      if (rem > 0) {
-        //auto in = GetVLAPtr<Tact>(t_in, {nc, bcp});
-        auto in_dq = GetVLAPtr<Tact>(t_in, {blocks, Cb});
-        auto scf = GetVLAPtr<float>(t_in_scf, {blocks});
-        auto out = GetVLAPtr<bfloat16>(t_out_mlp, {nk, bk});
-
-        auto cvt_f32_bf16_tpp = SCOPEIT((ConvertTPP<float, bfloat16>(rem, C)), EW_COPY);
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<bfloat16, bfloat16, bfloat16>(
-            rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 1.0, 0, nc)));
-
-        auto cpy_bias_tpp = SCOPEIT((CpyBiasTPP<bfloat16, bfloat16>(1, bk, K)), BIAS);
-
-        float tmp[rem][blocks][Cb];
-        bfloat16 tmp_bf16[rem][C];
-	libxsmm_meltw_unary_param unary_param;
-
-        for(auto i = 0; i < rem; i++) {
-          for(auto j = 0; j<blocks; j++) {
-            unary_param.in.primary    = (void*)in_dq[nn*bn+i][j];
-            unary_param.in.secondary  = (void*)&scf[nn*bn+i][j];
-            unary_param.out.primary   = (void*)tmp[i][j];
-            dequant_kernel( &unary_param );
-          }
-        }
-        cvt_f32_bf16_tpp(tmp[0][0], tmp_bf16[0]);
-
-        brgemm_tpp.config();
-
-        for (int k = 0; k < nk; k++) {
-          for (int r = nn * bn; r < nn * bn + rem; r++)
-            cpy_bias_tpp(bias[k], out[r][k]);
-          brgemm_tpp(tmp_bf16[0], wt_V[k][0], out[nn * bn][k], nc);
-        }
-        brgemm_tpp.release();
-      }
-    }
+#pragma omp parallel for
+for (int n=0; n < N; n++) {
+  float tmp[blocks][Cb];
+  libxsmm_meltw_unary_param unary_param;
+  for(auto j = 0; j<blocks; j++) {
+    unary_param.in.primary    = (void*)in_dq[n][j];
+    unary_param.in.secondary  = (void*)&scf[n][j];
+    unary_param.out.primary   = (void*)tmp[j];
+    dequant_kernel( &unary_param );
   }
-} else {
-  //auto in = GetVLAPtr<Tact>(t_in, {bn, nc, bcp});
-  auto in_dq = GetVLAPtr<Tact>(t_in, {bn, blocks, Cb});
-  auto scf = GetVLAPtr<float>(t_in_scf, {bn, blocks});
-  auto wt_V = GetVLAPtr<bfloat16>(t_wt_V, {nc, bcp * bk});
-  auto out = GetVLAPtr<bfloat16>(t_out_mlp, {bn, nk, bk});
-
-  auto brgemm_tpp = SCOPEIT((BrgemmTPP<bfloat16, bfloat16, bfloat16>(
-          bn, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
-  {
-    RECORD_SCOPE(o_mlp_attn, {t_in, t_wt_V});
-    {
-      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel
-      {
-        int tid = omp_get_thread_num();
-        int threads = omp_get_num_threads();
-        int work = nn * nk;
-        int chunk =
-            (work % threads == 0) ? (work / threads) : (work / threads) + 1;
-        int chunk_start = (tid * chunk < work) ? (tid * chunk) : work;
-        int chunk_end = ((tid + 1) * chunk < work) ? ((tid + 1) * chunk) : work;
-
-        float tmp[bn][blocks][Cb];
-        bfloat16 tmp_bf16[bn][C];
-	libxsmm_meltw_unary_param unary_param;
-
-        brgemm_tpp.config();
-
-        for (int n3k = chunk_start; n3k < chunk_end; n3k++) {
-          int n = n3k / nk;
-          int k = n3k % nk;
-
-          for(auto i = 0; i < bn; i++) {
-            for(auto j = 0; j<blocks; j++) {
-              unary_param.in.primary    = (void*)in_dq[n][i][j];
-              unary_param.in.secondary  = (void*)&scf[n][i][j];
-              unary_param.out.primary   = (void*)tmp[i][j];
-              dequant_kernel( &unary_param );
-            }
-          }
-          cvt_f32_bf16_tpp(tmp[0][0], tmp_bf16[0]);
-
-          brgemm_tpp(tmp_bf16[0], wt_V[k][0], out[n][0][k], nc);
-        }
-
-        brgemm_tpp.release();
-      }
-      if (rem > 0) {
-        //auto in = GetVLAPtr<Tact>(t_in, {nc, bcp});
-        auto in_dq = GetVLAPtr<Tact>(t_in, {blocks, Cb});
-        auto scf = GetVLAPtr<float>(t_in_scf, {blocks});
-        auto out = GetVLAPtr<bfloat16>(t_out_mlp, {nk, bk});
-
-        auto cvt_f32_bf16_tpp = SCOPEIT((ConvertTPP<float, bfloat16>(rem, C)), EW_COPY);
-        auto brgemm_tpp = SCOPEIT((BrgemmTPP<bfloat16, bfloat16, bfloat16>(
-            rem, bk, bcp, bcp, bk * bcp, nc * bcp, bk, nk * bk, 0.0, 0, nc)));
-
-        float tmp[rem][blocks][Cb];
-        bfloat16 tmp_bf16[rem][C];
-	libxsmm_meltw_unary_param unary_param;
-
-        for(auto i = 0; i < rem; i++) {
-          for(auto j = 0; j<blocks; j++) {
-            unary_param.in.primary    = (void*)in_dq[nn*bn+i][j];
-            unary_param.in.secondary  = (void*)&scf[nn*bn+i][j];
-            unary_param.out.primary   = (void*)tmp[i][j];
-            dequant_kernel( &unary_param );
-          }
-        }
-        cvt_f32_bf16_tpp(tmp[0][0], tmp_bf16[0]);
-
-        brgemm_tpp.config();
-        for (int k = 0; k < nk; k++) {
-          brgemm_tpp(tmp_bf16[0], wt_V[k][0], out[nn * bn][k], nc);
-        }
-        brgemm_tpp.release();
-      }
-    }
-  }
+  cvt_f32_bf16_tpp(tmp[0], in_tmp[n]);
 }
+
+at::Tensor t_out_mlp = fc_plain<bfloat16>(t_in_tmp, t_wt_V, t_bias);
 
 auto attn_sizes = t_attn_3d.sizes(); // 3D shape [1, H, F] = [1, 4, 128] let
 

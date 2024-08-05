@@ -51,6 +51,7 @@ torch.autograd.set_detect_anomaly(False)
 
 global_layer_dtype = torch.float32
 global_use_qint8_gemm = False
+QINT8_BLOCK_SIZE=128
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
@@ -97,7 +98,7 @@ class LinearOut(BlockedModule):
     def forward(self, input):
         inputs = [input, self.weight, self.bias]
         N = input.size(0)
-        align = 64 if (N > 64 or N == 0) else N
+        align = 32 if (N > 32 or N == 0) else N
         out = MLPFunction.apply(align, 1, inputs)
 
         return out
@@ -200,11 +201,12 @@ class GATConvOpt(BlockedModule):
         self.bc = self._in_dst_feats
         self.bk = num_heads * self._out_feats
         self.res = False
-        self.align = 64
+        self.align = 32
         self.fdp = feat_drop
         self.adp = attn_drop
         self.inp_needs_grad = input_needs_grad
-        self.block_size = int(os.environ['QINT8_BLOCK_SIZE'])
+        if use_qint8_gemm:
+            self.block_size = QINT8_BLOCK_SIZE
 
         for cbf in [32]:
             if self.bc % cbf == 0:
@@ -346,7 +348,7 @@ class GATConvOpt(BlockedModule):
         """
         self._allow_zero_in_degree = set_value
 
-    def forward(self, graph, feat, get_attention=False):
+    def forward(self, graph, feat, scf_src=None, scf_dst=None, get_attention=False):
         r"""
 
         Description
@@ -404,11 +406,12 @@ class GATConvOpt(BlockedModule):
                 h_dst = feat[1]
 
                 if h_src.dtype == torch.int8 and h_dst.dtype == torch.int8:
-                    scf_src = graph.srcdata['scf']
-                    scf_dst = graph.dstdata['scf']
+                    if scf_src is None and scf_dst is None:
+                        scf_src = graph.srcdata['scf']
+                        scf_dst = graph.dstdata['scf']
 
-                    assert h_src.shape[0] == scf_src.shape[0]
-                    assert h_dst.shape[0] == scf_dst.shape[0]
+                        assert h_src.shape[0] == scf_src.shape[0]
+                        assert h_dst.shape[0] == scf_dst.shape[0]
 
                     if self.use_qint8_gemm:
                         block_size = h_src.shape[1] // scf_src.shape[1]
@@ -424,7 +427,7 @@ class GATConvOpt(BlockedModule):
                 if not hasattr(self, "fc"):
                     assert hasattr(self, "fc_src") and hasattr(self, "fc_dst")
 
-                    if self.use_qint8_gemm:
+                    if self.use_qint8_gemm or h_src.dtype != torch.int8: 
                         inputs_src = [h_src, self.fc_src.weight, self.attn_l]
                     else:
                         inputs_src = [h_src, scf_src, self.fc_src.weight, self.attn_l]
@@ -448,7 +451,7 @@ class GATConvOpt(BlockedModule):
                     )
 
                     N = h_dst.size(0)
-                    if self.use_qint8_gemm:
+                    if self.use_qint8_gemm or h_dst.dtype != torch.int8:
                         inputs_dst = [h_dst, self.fc_dst.weight, self.attn_r]
                     else:
                         inputs_dst = [h_dst, scf_dst, self.fc_dst.weight, self.attn_r] 
@@ -469,7 +472,7 @@ class GATConvOpt(BlockedModule):
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
                 else:
-                    if self.use_qint8_gemm:
+                    if self.use_qint8_gemm or h_src.dtype != torch.int8:
                         inputs_src = [h_src, self.fc.weight, self.attn_l]
                     else:
                         inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
@@ -493,7 +496,7 @@ class GATConvOpt(BlockedModule):
 
                     align = self.align if (N > self.align or N == 0) else N
 
-                    if self.use_qint8_gemm:
+                    if self.use_qint8_gemm or h_dst.dtype != torch.int8:
                         inputs_dst = [h_dst, self.fc.weight, self.attn_r]
                     else:
                         inputs_dst = [h_dst, scf_dst, self.fc.weight, self.attn_r]

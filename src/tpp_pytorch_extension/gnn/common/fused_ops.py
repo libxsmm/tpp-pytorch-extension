@@ -278,9 +278,11 @@ class FusedBiasLeakyReLUDrop(nn.Module):
 #######################FusedBiasLeakyReLU################
 class FusedBiasLeakyReLUFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inp, bias, alpha, training):
+    def forward(ctx, inp, bias, alpha, training, align):
         inputs = [inp, bias]
-        (out, rmask) = fused_ops_cpp.bias_lrelu_fwd(inputs, alpha)
+        N = inp.size(0)
+        align = align if (N > align or N == 0) else N
+        (out, rmask) = fused_ops_cpp.bias_lrelu_fwd(align, inputs, alpha)
         if training:
             ctx.save_for_backward(inp, rmask)
         ctx.alpha = alpha
@@ -305,7 +307,7 @@ class FusedBiasLeakyReLU(nn.Module):
     def __init__(self, alpha: float = 0.01):
         super(FusedBiasLeakyReLU, self).__init__()
         self.alpha = alpha
-        self.align = 64
+        self.align = 32
 
     def extra_repr(self) -> str:
         return "alpha={}".format(self.alpha)

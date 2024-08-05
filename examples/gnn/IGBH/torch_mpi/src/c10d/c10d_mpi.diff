@@ -1,0 +1,284 @@
+diff -ur a/ProcessGroupMPI.cpp b/ProcessGroupMPI.cpp
+--- a/ProcessGroupMPI.cpp	2024-06-13 06:07:36.656748292 -0700
++++ b/ProcessGroupMPI.cpp	2024-07-02 01:24:36.998227961 -0700
+@@ -2,6 +2,9 @@
+ 
+ #ifdef USE_C10D_MPI
+ 
++#include <immintrin.h>
++#include <pthread.h>
++#include <sched.h>
+ #include <iostream>
+ #include <limits>
+ #include <map>
+@@ -27,6 +30,94 @@
+   } while (0)
+ 
+ namespace {
++#ifdef __AVX512F__
++typedef at::BFloat16 bfloat16;
++__m512i LIBXSMM_INTRINSICS_MM512_ROUNDNE_BF16(__m512 a) {
++  const __m512i vnaninf = _mm512_set1_epi32(0x7f800000),
++                vrneadd = _mm512_set1_epi32(0x00007fff);
++  const __m512i vfixup = _mm512_set1_epi32(0x00000001),
++                vfixupmask = _mm512_set1_epi32(0x00010000);
++  const __m512i mm512_roundbf16rne_a_ = _mm512_castps_si512(a);
++  const __mmask16 mm512_roundbf16rne_mask1_ = _mm512_cmp_epi32_mask(
++      _mm512_and_epi32(mm512_roundbf16rne_a_, vnaninf), vnaninf, _MM_CMPINT_NE);
++  const __mmask16 mm512_roundbf16rne_mask2_ = _mm512_cmp_epi32_mask(
++      _mm512_and_epi32(mm512_roundbf16rne_a_, vfixupmask),
++      vfixupmask,
++      _MM_CMPINT_EQ);
++  return _mm512_mask_add_epi32(
++      mm512_roundbf16rne_a_,
++      mm512_roundbf16rne_mask1_,
++      mm512_roundbf16rne_a_,
++      _mm512_mask_add_epi32(
++          vrneadd, mm512_roundbf16rne_mask2_, vrneadd, vfixup));
++}
++
++inline __m512 _mm512_convert_bf_ps(__m256i a) {
++  return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepi16_epi32(a), 16));
++}
++inline __m256i _mm256_convert_ps_bf(__m512 a) {
++  return _mm512_cvtepi32_epi16(
++      _mm512_srai_epi32(LIBXSMM_INTRINSICS_MM512_ROUNDNE_BF16(a), 16));
++}
++
++inline __m512 _mm512_loadu_ps_auto(bfloat16 const* mem_addr) {
++  return _mm512_convert_bf_ps(_mm256_loadu_si256((__m256i*)mem_addr));
++}
++inline __m512 _mm512_maskz_loadu_ps_auto(
++    __mmask16 k,
++    bfloat16 const* mem_addr) {
++  return _mm512_convert_bf_ps(_mm256_maskz_loadu_epi16(k, (__m256i*)mem_addr));
++}
++inline void _mm512_storeu_ps_auto(bfloat16* mem_addr, __m512 a) {
++  _mm256_storeu_si256((__m256i*)mem_addr, _mm256_convert_ps_bf(a));
++}
++inline void _mm512_mask_storeu_ps_auto(
++    bfloat16* mem_addr,
++    __mmask16 k,
++    __m512 a) {
++  _mm256_mask_storeu_epi16((__m256i*)mem_addr, k, _mm256_convert_ps_bf(a));
++}
++#define ALIGNDOWN(N, A) ((N) & ~((A)-1))
++#endif
++
++MPI_Datatype MPI_HALF = MPI_DATATYPE_NULL;
++MPI_Datatype MPI_BFLOAT16 = MPI_DATATYPE_NULL;
++MPI_Op MPI_SUM_LOW_PREC = MPI_OP_NULL;
++
++void low_prec_sum(void* a_, void* b_, int* len, MPI_Datatype* dtype) {
++  if (*dtype == MPI_BFLOAT16) {
++    at::BFloat16* a = (at::BFloat16*)a_;
++    at::BFloat16* b = (at::BFloat16*)b_;
++#ifdef __AVX512F__
++    int i = 0;
++    int N = *len;
++    for (i = 0; i < ALIGNDOWN(N, 16); i += 16) {
++      auto av = _mm512_loadu_ps_auto(&a[i]);
++      auto bv = _mm512_loadu_ps_auto(&b[i]);
++      bv = _mm512_add_ps(av, bv);
++      _mm512_storeu_ps_auto(&b[i], bv);
++    }
++    if (i < N) {
++      int rem = N - i;
++      __mmask16 mask = (1 << rem) - 1;
++      auto av = _mm512_maskz_loadu_ps_auto(mask, &a[i]);
++      auto bv = _mm512_maskz_loadu_ps_auto(mask, &b[i]);
++      bv = _mm512_add_ps(av, bv);
++      _mm512_mask_storeu_ps_auto(&b[i], mask, bv);
++    }
++#else
++    for (int i = 0; i < *len; i++) {
++      b[i] += a[i];
++    }
++#endif
++  } else if (*dtype == MPI_HALF) {
++    at::Half* a = (at::Half*)a_;
++    at::Half* b = (at::Half*)b_;
++    for (int i = 0; i < *len; i++) {
++      b[i] += a[i];
++    }
++  }
++}
+ 
+ // Op mapping
+ std::map<ReduceOp::RedOpType, MPI_Op> mpiOp = {
+@@ -250,6 +341,14 @@
+     } else {
+       TORCH_WARN_ONCE("MPI was previously initialized.");
+     }
++
++    MPI_Type_contiguous(2, MPI_BYTE, &MPI_HALF);
++    MPI_Type_commit(&MPI_HALF);
++    mpiDatatype[at::kHalf] = MPI_HALF;
++    MPI_Type_contiguous(2, MPI_BYTE, &MPI_BFLOAT16);
++    MPI_Type_commit(&MPI_BFLOAT16);
++    mpiDatatype[at::kBFloat16] = MPI_BFLOAT16;
++    MPI_Op_create(&low_prec_sum, 1, &MPI_SUM_LOW_PREC);
+   });
+ }
+ 
+@@ -349,6 +448,48 @@
+ void ProcessGroupMPI::runLoop() {
+   std::unique_lock<std::mutex> lock(pgMutex_);
+ 
++#if 1
++  {
++    auto env = getenv("PYTORCH_MPI_THREAD_AFFINITY");
++    if (env != NULL) {
++      std::vector<int> vect;
++      std::stringstream ss(env);
++      int local_rank = 0;
++      auto local_rank_env = getenv("MPI_LOCALRANKID");
++      if (local_rank_env != NULL) {
++        local_rank = atoi(local_rank_env);
++      }
++
++      for (int i; ss >> i;) {
++        vect.push_back(i);
++        if (ss.peek() == ',' || ss.peek() == ' ')
++          ss.ignore();
++      }
++      if (vect.size() > local_rank) {
++        unsigned int aff = vect[local_rank];
++        cpu_set_t cpuset;
++        CPU_ZERO(&cpuset);
++        CPU_SET(aff, &cpuset);
++        int rc =
++            pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
++        if (rc != 0) {
++          std::cerr << "Error calling pthread_setaffinity_np: " << rc << "\n";
++        }
++        std::this_thread::sleep_for(std::chrono::milliseconds(20));
++        {
++          std::cout << "LocalRank: " << local_rank
++                    << " MPI Thread running on CPU " << sched_getcpu() << "\n";
++        }
++      } else {
++        std::cerr << "MPI Thread affinity - local_rank: " << local_rank
++                  << ", Invalid affinity string: " << env << "\n";
++      }
++    } else {
++      std::cout
++          << "MPI Thread affinity - ENV 'PYTORCH_MPI_THREAD_AFFINITY' not set\n";
++    }
++  }
++#endif
+   while (!stop_) {
+     if (queue_.empty()) {
+       queueProduceCV_.wait(lock);
+@@ -418,9 +559,20 @@
+     const AllreduceOptions& opts) {
+   checkSingleTensor(tensors);
+ 
++  if ((tensors[0].scalar_type() == at::kBFloat16 ||
++       tensors[0].scalar_type() == at::kHalf) &&
++      opts.reduceOp != ReduceOp::SUM) {
++    throw std::runtime_error(
++        "ProcessGroupMPI::allreduce: Only SUM op is supported for BFloat16 or Half type");
++  }
++
+   std::function<void(std::unique_ptr<WorkEntry>&)> runFunc =
+       [opts, this](std::unique_ptr<WorkEntry>& entry) {
+         auto data = (entry->src)[0];
++        MPI_Op reduce_op = mpiOp.at(opts.reduceOp);
++        if (data.scalar_type() == at::kBFloat16 ||
++            data.scalar_type() == at::kHalf)
++          reduce_op = MPI_SUM_LOW_PREC;
+         c10::DeviceGuard guard(data.device());
+         std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
+         MPI_CHECK(MPI_Allreduce(
+@@ -428,7 +580,7 @@
+             data.data_ptr(),
+             data.numel(),
+             mpiDatatype.at(data.scalar_type()),
+-            mpiOp.at(opts.reduceOp),
++            reduce_op,
+             pgComm_));
+       };
+   auto entry =
+@@ -450,12 +602,23 @@
+     const ReduceOptions& opts) {
+   checkSingleTensor(tensors);
+ 
++  if ((tensors[0].scalar_type() == at::kBFloat16 ||
++       tensors[0].scalar_type() == at::kHalf) &&
++      opts.reduceOp != ReduceOp::SUM) {
++    throw std::runtime_error(
++        "ProcessGroupMPI::reduce: Only SUM op is supported for BFloat16 or Half type");
++  }
++
+   std::function<void(std::unique_ptr<WorkEntry>&)> runFunc =
+       [opts, this](std::unique_ptr<WorkEntry>& entry) {
+         auto data = (entry->src)[0];
+         auto dataPtr = (entry->src)[0].data_ptr();
+         void* sendbuf = (rank_ == opts.rootRank) ? MPI_IN_PLACE : dataPtr;
+         void* recvbuf = (rank_ == opts.rootRank) ? dataPtr : nullptr;
++        MPI_Op reduce_op = mpiOp.at(opts.reduceOp);
++        if (data.scalar_type() == at::kBFloat16 ||
++            data.scalar_type() == at::kHalf)
++          reduce_op = MPI_SUM_LOW_PREC;
+ 
+         c10::DeviceGuard guard(data.device());
+         std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
+@@ -464,7 +627,7 @@
+             recvbuf,
+             data.numel(),
+             mpiDatatype.at(data.scalar_type()),
+-            mpiOp.at(opts.reduceOp),
++            reduce_op,
+             opts.rootRank,
+             pgComm_));
+       };
+@@ -933,10 +1096,44 @@
+ }
+ 
+ c10::intrusive_ptr<Work> ProcessGroupMPI::_allgather_base(
+-    at::Tensor& /*unused */,
+-    at::Tensor& /*unused */,
+-    const AllgatherOptions& /*unused */) {
+-  TORCH_CHECK(false, "no support for _allgather_base in MPI process group");
++    at::Tensor& outputTensor,
++    at::Tensor& inputTensor,
++    const AllgatherOptions& opts) {
++  checkSingleTensorHelper(inputTensor);
++  checkSingleTensorHelper(outputTensor);
++
++  TORCH_CHECK(
++      outputTensor.numel() == (size_ * inputTensor.numel()) &&
++          outputTensor.type() == inputTensor.type(),
++      "Tensors are not compatible in size or data type");
++
++  TORCH_CHECK(
++      outputTensor.size(0) % size_ == 0,
++      "Tensor's dim 0 does not divide equally across group size");
++
++  std::function<void(std::unique_ptr<WorkEntry>&)> runFunc =
++      [this](std::unique_ptr<WorkEntry>& entry) {
++        auto srcdata = (entry->src)[0];
++        auto dstdata = (entry->dst)[0];
++        c10::DeviceGuard guard(srcdata.device());
++        std::unique_lock<std::mutex> globalLock(pgGlobalMutex_);
++        MPI_CHECK(MPI_Allgather(
++            srcdata.data_ptr(),
++            srcdata.numel(),
++            mpiDatatype.at(srcdata.scalar_type()),
++            dstdata.data_ptr(),
++            srcdata.numel(),
++            mpiDatatype.at(dstdata.scalar_type()),
++            pgComm_));
++      };
++  std::vector<at::Tensor> inputTensors = {inputTensor};
++  std::vector<at::Tensor> outputTensors = {outputTensor};
++  auto entry = std::make_unique<WorkEntry>(
++      &inputTensors, &outputTensors, std::move(runFunc));
++  return enqueue(
++      std::move(entry),
++      "mpi:all_gather",
++      c10::optional<std::vector<at::Tensor>>(inputTensors));
+ }
+ 
+ } // namespace c10d
