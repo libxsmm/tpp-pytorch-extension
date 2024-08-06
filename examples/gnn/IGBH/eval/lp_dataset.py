@@ -47,6 +47,7 @@ class IGBHeteroDGLDataset(DGLDataset):
           self.graph = dgl.data.utils.load_graphs(path)[0][0]
       except:
           print(f'Could not load graph from {path}')
+      self.graph.predict = 'paper'
       print(self.graph)
 
       label_file = 'node_label_19.npy' if not self.use_label_2K else 'node_label_2K.npy'
@@ -93,14 +94,18 @@ class IGBHeteroDGLDataset(DGLDataset):
           paper_feat_path = osp.join(self.dir, self.dataset_size, 'processed', 'paper', 'node_feat.pt')
           paper_lbl_path = osp.join(self.dir, self.dataset_size, 'processed', 'paper', label_file)
 
-          paper_node_features = torch.load(paper_feat_path, mmap=True) if self.dataset_size in ['large', 'full'] else torch.load(paper_feat_path)
           if self.dataset_size in ['large', 'full']:
+              paper_node_features = torch.load(paper_feat_path, mmap=True)
               paper_node_labels = torch.from_numpy(np.fromfile(paper_lbl_path, dtype=np.float32)).to(torch.long)
           else:
+              paper_node_features = torch.load(paper_feat_path)
               paper_node_labels = torch.from_numpy(np.load(paper_lbl_path)).long()
 
           author_feat_path = osp.join(self.dir, self.dataset_size, 'processed', 'author', 'node_feat.pt')
-          author_node_features = torch.load(author_feat_path, mmap=True) if self.dataset_size in ['large', 'full'] else torch.load(paper_feat_path)
+          if self.dataset_size in ['large', 'full']:
+              author_node_features = torch.load(author_feat_path, mmap=True) 
+          else:
+              author_node_features = torch.load(author_feat_path)
 
           institute_node_path = osp.join(self.dir, self.dataset_size, 'processed', 'institute', 'node_feat.pt')
           institute_node_features = torch.load(institute_node_path)
