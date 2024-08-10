@@ -55,6 +55,7 @@ class distgnn_mb_inf:
         self.rank = args.rank
         self.use_tpp = args.use_tpp
         self.val_fraction = args.val_fraction
+        self.profile = args.profile
 
         self.adjust_batch('val')
         self.reset()
@@ -73,7 +74,10 @@ class distgnn_mb_inf:
 
     def adjust_batch(self, mask):
         self.val_nid_part = th.nonzero(self.node_feats['val_mask'], as_tuple=True)[0]
-        val_nids = int(self.val_nid_part.shape[0] * self.val_fraction)
+        if self.profile:
+            val_nids = 10000
+        else:
+            val_nids = int(self.val_nid_part.shape[0] * self.val_fraction)
         self.val_nid_part = self.val_nid_part[:val_nids]
 
         my_steps = th.tensor(ceil(val_nids/self.batch_size))

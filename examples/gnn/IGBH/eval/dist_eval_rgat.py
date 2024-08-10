@@ -174,42 +174,74 @@ def distgnn_eval(distgnn_inf, pb):
 
     istep = 0
     acc_tensor = []
-    for step in range(s_batch_inf, e_batch_inf):
-        t0 = time.time()
-        predictions = []
-        labels = []
+    with torch.autograd.profiler.profile(
+        enabled=args.profile if args.rank==0 else False, record_shapes=False
+    ) as prof:
+        if args.use_tpp:
+            ppx.reset_debug_timers()
+        for step in range(s_batch_inf, e_batch_inf):
+            t0 = time.time()
+            predictions = []
+            labels = []
 
-        with torch.no_grad():
-            _, blocks, batch_inputs, batch_scf, batch_labels, _ = distgnn_inf.batch_setup(step)
-               
-            predictions.append(model(blocks, batch_inputs, batch_scf).argmax(1).clone().numpy())
-            labels.append(batch_labels.clone().numpy())
-            predictions = np.concatenate(predictions)
-            labels = np.concatenate(labels)
-            acc = sklearn.metrics.accuracy_score(labels, predictions)
-            if math.isnan(acc):
-                acc = -1
+            with torch.no_grad():
+                _, blocks, batch_inputs, batch_scf, batch_labels, _ = distgnn_inf.batch_setup(step)
+                   
+                predictions.append(model(blocks, batch_inputs, batch_scf).argmax(1).clone().numpy())
+                labels.append(batch_labels.clone().numpy())
+                predictions = np.concatenate(predictions)
+                labels = np.concatenate(labels)
+                acc = sklearn.metrics.accuracy_score(labels, predictions)
+                if math.isnan(acc):
+                    acc = -1
 
-            acc_tensor.append(acc)
+                acc_tensor.append(acc)
 
-        t1 = time.time()
+            t1 = time.time()
 
-        if args.rank == 0:
-            if step > 0:
-                stime = distgnn_inf.ticd / step
-                ctime = distgnn_inf.ticlst / step
-            else:
-                stime = distgnn_inf.ticd / (step+1)
-                ctime = distgnn_inf.ticlst / (step+1)
+            if args.rank == 0:
+                if step > 0:
+                    stime = distgnn_inf.ticd / step
+                    ctime = distgnn_inf.ticlst / step
+                else:
+                    stime = distgnn_inf.ticd / (step+1)
+                    ctime = distgnn_inf.ticlst / (step+1)
 
-            print('Batch {:07d} | Sampling time {:.4f} (s) | Comms Time {:.4f} | Inference time {:.4f} (s) |'.format(istep, stime, ctime, t1-t0))
-        istep += 1
+                print('Batch {:07d} | Sampling time {:.4f} (s) | Comms Time {:.4f} | Inference time {:.4f} (s) |'.format(istep, stime, ctime, t1-t0))
+            istep += 1
     
+    if args.use_tpp and args.profile and args.rank == 0:
+        ppx.print_debug_timers(0)
+
+    if prof and args.rank == 0:
+        fname = "gat_"+args.dataset_size+".prof"
+        with open(fname, "w") as prof_f:
+            prof_f.write(
+                prof.key_averages(group_by_input_shape=False).table(
+                    sort_by="cpu_time_total"
+                )
+            )
+        if ppx.extend_profiler:
+            fname = "gat_"+args.dataset_size+"_nested.prof"
+            with open(fname, "w") as prof_f:
+                prof_f.write(
+                    prof.nested_key_averages().table(sort_by=None, row_limit=1000)
+                )
+            fname = "gat_"+args.dataset_size+"_top_level.prof"
+            with open(fname, "w") as prof_f:
+                prof_f.write(
+                    prof.nested_key_averages(only_top_level=True).table(
+                        sort_by="cpu_time_total"
+                    )
+                )
+            prefix = "gat_"+args.dataset_size+"_time"
+            prof.print_op_timings(prefix=prefix)
+
+    dist.barrier()
+
     acc_tensor = torch.tensor(acc_tensor[:distgnn_inf.my_steps])
     global_acc = acc_tensor.sum()
     dist.all_reduce(global_acc, op=dist.ReduceOp.SUM)
-
-    dist.barrier()
 
     if args.rank == 0:
         global_acc = global_acc / ((e_batch_inf-s_batch_inf)*args.world_size)
@@ -268,6 +300,9 @@ if __name__ == '__main__':
                             help='use or not torch distributed data parallel')
     parser.add_argument("--enable_iec", action='store_true', 
             help="enables original embedding cache")
+    parser.add_argument( "--profile", action="store_true",
+        help="Whether to profile",
+    )
     args = parser.parse_args()
 
     args.rank, args.world_size = init_mpi(args.dist_backend, args.dist_url)
