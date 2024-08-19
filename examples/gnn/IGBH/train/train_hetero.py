@@ -2,7 +2,6 @@ import argparse, datetime
 import dgl
 import sklearn.metrics
 import torch, torch.nn as nn, torch.optim as optim
-#import torchmetrics.functional as MF
 import time, tqdm, numpy as np
 from models import *
 from dataset import IGBHeteroDGLDataset

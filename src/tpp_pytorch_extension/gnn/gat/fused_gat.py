@@ -151,7 +151,7 @@ class LinearOut(BlockedModule):
     def forward(self, input):
         inputs = [input, self.weight, self.bias]
         N = input.size(0)
-        align = 64 if (N > 64 or N == 0) else N
+        align = 32 if (N > 32 or N == 0) else N
         out = MLPFunction.apply(align, 1, 1, *inputs)
 
         return out
@@ -253,7 +253,7 @@ class GATConvOpt(BlockedModule):
         self.bc = self._in_dst_feats
         self.bk = num_heads * self._out_feats
         self.res = False
-        self.align = 64
+        self.align = 32
         self.fdp = feat_drop
         self.adp = attn_drop
         self.inp_needs_grad = input_needs_grad

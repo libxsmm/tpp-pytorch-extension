@@ -14,6 +14,7 @@ from contextlib import contextmanager
 
 from tpp_pytorch_extension.gnn.gat import fused_gat as tpp_gat
 from tpp_pytorch_extension.gnn.common import gnn_utils
+from tpp_pytorch_extension.utils.blocked_layout import BlockedParameter
 
 from dgl.nn.pytorch import HeteroGraphConv
 from dgl.nn.pytorch.conv import GATConv
@@ -109,13 +110,18 @@ def block(model):
         if hasattr(m, "maybe_block_params"):
             m.maybe_block_params()
 
+def unblock(model):
+    for m in model.modules():
+        if hasattr(m, "maybe_unblock_params"):
+            m.maybe_unblock_params()
+
 def evaluate(distgnn_inf, model, s_batch, e_batch, epoch_num):
 
-    #if args.rank == 0:
-    #    mllogger.start(
-    #        key=mllog_constants.EVAL_START,
-    #        metadata={mllog_constants.EPOCH_NUM: epoch_num},
-    #    )
+    if args.rank == 0:
+        mllogger.start(
+            key=mllog_constants.EVAL_START,
+            metadata={mllog_constants.EPOCH_NUM: epoch_num},
+        )
     predictions = []
     labels = []
 
@@ -136,17 +142,16 @@ def evaluate(distgnn_inf, model, s_batch, e_batch, epoch_num):
         global_acc = acc_tensor.item() / args.world_size
 
     if args.rank == 0:
-    #    mllogger.event(
-    #        key=mllog_constants.EVAL_ACCURACY,
-    #        value=global_acc,
-    #        metadata={mllog_constants.EPOCH_NUM: epoch_num},
-    #    )
-    #    mllogger.end(
-    #        key=mllog_constants.EVAL_STOP,
-    #        metadata={mllog_constants.EPOCH_NUM: epoch_num},
-    #    )
+        mllogger.event(
+            key=mllog_constants.EVAL_ACCURACY,
+            value=global_acc,
+            metadata={mllog_constants.EPOCH_NUM: epoch_num},
+        )
+        mllogger.end(
+            key=mllog_constants.EVAL_STOP,
+            metadata={mllog_constants.EPOCH_NUM: epoch_num},
+        )
 
-         print('accuracy = {:.4f}'.format(global_acc))
     return global_acc
 
 class AverageMeter(object):
@@ -174,7 +179,7 @@ def distgnn_train(distgnn, distgnn_inf, pb):
 
     with opt_impl(args.tpp_impl, args.use_bf16):
         model = RGAT(g_orig.etypes, in_feats, args.hidden_channels,
-            args.n_classes, args.num_layers, args.num_heads, F.leaky_relu)
+            args.n_classes, args.num_layers, args.num_heads, F.leaky_relu, args.dropout)
     
     block(model)
 
@@ -186,7 +191,6 @@ def distgnn_train(distgnn, distgnn_inf, pb):
     else:
         m = model
 
-    print(m)
     if args.rank == 0:
         #print("###############################")
         #print("Model layers: ", m.layers)
@@ -239,8 +243,8 @@ def distgnn_train(distgnn, distgnn_inf, pb):
     toc = time.time() - tic
 
     for epoch in range(args.n_epochs):
-        #if args.rank==0: 
-        #    mllogger.start(key=mllog_constants.EPOCH_START, metadata={"epoch_num": epoch+1})
+        if args.rank==0: 
+            mllogger.start(key=mllog_constants.EPOCH_START, metadata={"epoch_num": epoch+1})
         batch_fwd_time = AverageMeter()
         batch_bwd_time = AverageMeter()
         mbc_time = AverageMeter()
@@ -347,7 +351,8 @@ def distgnn_train(distgnn, distgnn_inf, pb):
                 if global_acc >= args.target_acc:
                     if args.rank == 0:
                         if args.model_save:
-                            mp = osp.join(args.modelpath, 'model.pt')
+                            mp = osp.join(args.modelpath, 'model_'+args.dataset_size+'.pt')
+                            unblock(model)
                             torch.save(model.state_dict(), mp)
                     target_reached = True
                     break
@@ -356,8 +361,8 @@ def distgnn_train(distgnn, distgnn_inf, pb):
             step += 1
             t0 = time.time()
 
-        #if args.rank==0:
-        #    mllogger.end(key=mllog_constants.EPOCH_STOP, metadata={"epoch_num": epoch+1})
+        if args.rank==0:
+            mllogger.end(key=mllog_constants.EPOCH_STOP, metadata={"epoch_num": epoch+1})
         toc_gg = time.time()
         if capture_graph_stats:
             dist.all_reduce(halo_nodes)
@@ -388,12 +393,12 @@ def distgnn_train(distgnn, distgnn_inf, pb):
         #sched.step()
 
     if args.rank == 0:
-    #    status = mllog_constants.SUCCESS if target_reached else mllog_constants.ABORTED
-    #    mllogger.end(key=mllog_constants.RUN_STOP,
-    #                 metadata={mllog_constants.STATUS: status,
-    #                           mllog_constants.EPOCH_NUM: epoch_num,
-    #                 }
-    #    )
+        status = mllog_constants.SUCCESS if target_reached else mllog_constants.ABORTED
+        mllogger.end(key=mllog_constants.RUN_STOP,
+                     metadata={mllog_constants.STATUS: status,
+                               mllog_constants.EPOCH_NUM: epoch_num,
+                     }
+        )
         print("Total time taken " + str(datetime.timedelta(seconds = int(time.time() - train_start))))
 
 if __name__ == '__main__':
@@ -426,6 +431,7 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_channels', type=int, default=128)
     parser.add_argument('--learning_rate', type=float, default=0.01)
     parser.add_argument('--decay', type=float, default=0.0)
+    parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument( "--adam_epsilon", default=1e-8, type=float)
     parser.add_argument('--n_epochs', type=int, default=20)
     parser.add_argument('--num_layers', type=int, default=3)
@@ -437,6 +443,9 @@ if __name__ == '__main__':
 
     parser.add_argument( "--tpp_impl", action="store_true",
         help="Whether to use optimized MLP impl when available",
+    )
+    parser.add_argument( "--use_int8", action="store_true",
+        help="Whether to use int8 datatype when available",
     )
     parser.add_argument( "--use_bf16", action="store_true",
         help="Whether to use BF16 datatype when available",
@@ -470,21 +479,20 @@ if __name__ == '__main__':
     ppx.manual_seed(seed)
 
 
-    #if args.rank == 0:
-    #    mllogger.event(key=mllog_constants.CACHE_CLEAR, value=True)
-    #    mllogger.start(key=mllog_constants.INIT_START)
-    #    submission_info(mllogger, mllog_constants.GNN, 'Intel', 'Intel Xeon(R) 8592, codenamed Emerald Rapids')
-    #    mllogger.event(key=mllog_constants.GLOBAL_BATCH_SIZE, value=args.world_size*args.batch_size)
-    #    mllogger.event(key=mllog_constants.GRADIENT_ACCUMULATION_STEPS, value=1)
-    #    mllogger.event(key=mllog_constants.OPT_NAME, value='adam')
-    #    mllogger.event(key=mllog_constants.OPT_BASE_LR, value=args.learning_rate)
-    #    mllogger.event(key=mllog_constants.SEED,value=seed)
-    #    mllogger.end(key=mllog_constants.INIT_STOP)
-    #    mllogger.start(key=mllog_constants.RUN_START)
+    if args.rank == 0:
+        mllogger.event(key=mllog_constants.CACHE_CLEAR, value=True)
+        mllogger.start(key=mllog_constants.INIT_START)
+        submission_info(mllogger, mllog_constants.GNN, 'Intel', 'Intel Xeon(R) 8592, codenamed Emerald Rapids')
+        mllogger.event(key=mllog_constants.GLOBAL_BATCH_SIZE, value=args.world_size*args.batch_size)
+        mllogger.event(key=mllog_constants.GRADIENT_ACCUMULATION_STEPS, value=1)
+        mllogger.event(key=mllog_constants.OPT_NAME, value='adam')
+        mllogger.event(key=mllog_constants.OPT_BASE_LR, value=args.learning_rate)
+        mllogger.event(key=mllog_constants.SEED,value=seed)
+        mllogger.end(key=mllog_constants.INIT_STOP)
+        mllogger.start(key=mllog_constants.RUN_START)
 
-    #part_config = os.path.join(args.path, args.dataset, args.dataset_size)
-    part_config = args.path
-    category = 'cites'
+    part_config = os.path.join(args.path, args.dataset, args.dataset_size)
+    category = 'paper'
 
     train_start = time.time()
     pb = create_partition_book(args, part_config, category)
@@ -497,9 +505,9 @@ if __name__ == '__main__':
         print('Unable to load original graph object! exiting...')
         os.sys.exit(1)
 
-    #if args.rank == 0:
-    #    mllogger.event(key=mllog_constants.TRAIN_SAMPLES, value=pb.node_feats['train_samples'].item())
-    #    mllogger.event(key=mllog_constants.EVAL_SAMPLES, value=pb.node_feats['eval_samples'].item())
+    if args.rank == 0:
+        mllogger.event(key=mllog_constants.TRAIN_SAMPLES, value=pb.node_feats['train_samples'].item())
+        mllogger.event(key=mllog_constants.EVAL_SAMPLES, value=pb.node_feats['eval_samples'].item())
 
     t = time.time()
     distgnn = distgnn_mb(pb, args, 'paper')

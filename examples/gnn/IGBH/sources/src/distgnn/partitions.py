@@ -187,8 +187,9 @@ def load_GNNdataset(args):
                 g_orig = None
 
     elif args.dataset == 'IGBH':
+        path = os.path.join(args.path, args.data, args.dataset_size)
         filename = os.path.join(
-                     args.path, 
+                     path, 
                      str(args.world_size)+args.token, 
                      "struct.graph"
                    )
@@ -206,6 +207,9 @@ def partition_book_random(args, part_config, category='', resize_data=False):
     num_parts = args.world_size
 
     dls = time.time()
+    g_orig, n_classes = load_GNNdataset(args)
+    ntypes = g_orig.ntypes
+    g_orig = None
 
     part_config_g = part_config
     di = str(num_parts) + args.token
@@ -223,20 +227,6 @@ def partition_book_random(args, part_config, category='', resize_data=False):
 
     prefix = part_config_g + "/"
     part_files = part_metadata['part-{}'.format(args.rank)]
-    node_feats = load_tensors(prefix + part_files['node_feats'])
-    
-    nf_keys = []
-    for keys in node_feats.keys():
-        nf_keys.append(keys)
-
-    ntypes = []
-    for key in nf_keys:
-        if "feat" in key and "/" in key:
-            nt, _ = key.split("/")
-            if nt not in ntypes:
-                ntypes.append(nt)
-
-    node_feats = None
 
     dle = time.time() - dls
 
@@ -255,7 +245,6 @@ def partition_book_random(args, part_config, category='', resize_data=False):
         if nt == category:
             mask_key = k
         
-
     inner_node = graph.ndata['inner_node']
     orig_id = graph.ndata['orig_id']
     _TYPE = graph.ndata['_TYPE']

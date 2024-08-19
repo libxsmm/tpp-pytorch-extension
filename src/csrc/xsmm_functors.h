@@ -887,8 +887,7 @@ class QuantTPP {
       : rows(rows),
         cols(cols),
         ldi(ldi),
-        ldo(ldo)//,
-        /**
+        ldo(ldo),
         kernel(
             rows,
             cols,
@@ -898,9 +897,9 @@ class QuantTPP {
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_UNARY_NONE,
-            LIBXSMM_MELTW_TYPE_UNARY_QUANT)**/  {}
+            LIBXSMM_MELTW_TYPE_UNARY_QUANT)  {}
   void operator()(Tin* in, Tout* out, Tscale scale) {
-    if constexpr (false || std::is_same_v<Tin, float>) {
+    if constexpr (true || std::is_same_v<Tin, float>) {
       float fscale = (float)scale;
       kernel((void*)in, &fscale, nullptr, (void*)out, nullptr);
     } else {

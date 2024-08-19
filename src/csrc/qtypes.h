@@ -145,10 +145,10 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
     auto in = GetVLAPtr<Tin>(t_in, {bs, post_, vnni});
     auto scales = GetVLAPtr<Ts>(t_scales, {post_});
     auto out = GetVLAPtr<Tout>(t_out, {bs, post_, packed_vnni});
-    // std::cout << "tin: " << t_in.sizes() << std::endl;
-    // std::cout << "bs: " << bs << " vnni: " << vnni << " pre_: " << pre_
-    //           << " post_: " << post_ << " packed_vnni: " << packed_vnni
-    //           << std::endl;
+     //std::cout << "tin: " << t_in.sizes() << std::endl;
+     //std::cout << "bs: " << bs << " vnni: " << vnni << " pre_: " << pre_
+     //          << " post_: " << post_ << " packed_vnni: " << packed_vnni
+     //          << std::endl;
 
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < pre_; i++) {

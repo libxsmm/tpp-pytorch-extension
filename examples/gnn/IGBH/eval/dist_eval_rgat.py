@@ -177,7 +177,7 @@ def distgnn_eval(distgnn_inf, pb):
     with torch.autograd.profiler.profile(
         enabled=args.profile if args.rank==0 else False, record_shapes=False
     ) as prof:
-        if args.use_tpp:
+        if args.use_tpp and args.profile:
             ppx.reset_debug_timers()
         for step in range(s_batch_inf, e_batch_inf):
             t0 = time.time()
@@ -192,6 +192,7 @@ def distgnn_eval(distgnn_inf, pb):
                 predictions = np.concatenate(predictions)
                 labels = np.concatenate(labels)
                 acc = sklearn.metrics.accuracy_score(labels, predictions)
+                print('acc = {:.4f}'.format(acc))
                 if math.isnan(acc):
                     acc = -1
 
@@ -313,7 +314,7 @@ if __name__ == '__main__':
     dgl.random.seed(seed)
     np.random.seed(seed)
 
-    part_config = args.path
+    part_config = os.path.join(args.path, args.dataset, args.dataset_size)
 
     pb = create_partition_book(args, part_config, 'paper')
 
