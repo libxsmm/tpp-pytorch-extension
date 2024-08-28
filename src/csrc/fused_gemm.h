@@ -23,6 +23,7 @@
 
 using namespace tpp;
 
+static int CK_BLOCK_SIZE = env2int("CK_BLOCK_SIZE", 64);
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 128);
@@ -34,6 +35,592 @@ static const char* GEMM_LOOP_SCHEME_STREAMING =
 
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(gemm, "gemm");
+
+template <typename T, typename TOUT>
+class TppFlatLinearBase {
+ public:
+  using Tin = T;
+  using Tout = TOUT;
+
+ protected:
+  static constexpr int nOutputShapes = 4;
+  long Nc, Hc[2], Nk, Hk[2], Ncb[2], BS, BSb[2];
+  bool weight_reuse, Atrans, Btrans;
+  long C, K, aligned_K;
+  SCOPEIT_DECL(CpyBiasTPP<T, Tout>) copy_bias_tpp[2][2];
+  SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp[2][2];
+
+  std::string loop_scheme;
+  std::function<void(const VLAPtr<T, 2, long>&, long, long)>
+      postOpCBs[nOutputShapes];
+
+ public:
+  TppFlatLinearBase(
+      at::Tensor t_in,
+      at::Tensor t_wt,
+      at::Tensor t_bias,
+      long _Hc = 0,
+      long _Hk = 0) {
+    std::tie(
+        Nc,
+        Hc[0],
+        Hc[1],
+        Nk,
+        Hk[0],
+        Hk[1],
+        Ncb[0],
+        BS,
+        BSb[0],
+        BSb[1],
+        weight_reuse,
+        Atrans,
+        Btrans) = getBlockingParams(t_in, t_wt, t_bias, _Hc, _Hk);
+    C = Nc * Hc[0] + Hc[1];
+    K = Nk * Hk[0] + Hk[1];
+    aligned_K = Hk[1] == 0 ? K : K + Hk[0];
+    if (Ncb[0] > 0) {
+      Ncb[1] = Nc % Ncb[0];
+    } else {
+      Ncb[1] = 0;
+    }
+
+    for (int b = 0; b < 2; b++) {
+      if (BSb[b] == 0)
+        continue;
+      for (int k = 0; k < 2; k++) {
+        if (Hk[k] == 0)
+          continue;
+        copy_bias_tpp[b][k] =
+            SCOPEIT((CpyBiasTPP<T, Tout>(BSb[b], Hk[k], K)), BIAS);
+        zero_tpp[b][k] = SCOPEIT(SetZeroTPP<Tout>(BSb[b], Hk[k], K), EW_ZERO);
+      }
+    }
+  }
+  template <typename T1 = Tout>
+  VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor t) {
+    return GetVLAPtr<T1>(t, {K, 1});
+  }
+  int numOutputShapes() {
+    return nOutputShapes;
+  }
+  std::tuple<long, long, long> getOutputShape(int i) {
+    int b = i / 2;
+    int k = i % 2;
+    if (i < nOutputShapes)
+      return std::make_tuple(BSb[b], Hk[k], K);
+    else
+      TPP_ASSERT(false, "Invalid Index");
+  }
+
+  void setPostOpCB(
+      int i,
+      const std::function<void(const VLAPtr<Tout, 2, long>&, long, long)>& f) {
+    TPP_ASSERT(i < nOutputShapes, "Invalid Index");
+    postOpCBs[i] = f;
+  }
+
+  at::Tensor new_empty(at::Tensor t_in) {
+    auto sizes = t_in.sizes().vec();
+    auto dim = t_in.dim();
+    sizes[dim - 1] = K;
+    return t_in.new_empty(sizes, c10::CppTypeToScalarType<Tout>::value);
+  }
+
+  static std::tuple<
+      long,
+      long,
+      long,
+      long,
+      long,
+      long,
+      long,
+      long,
+      long,
+      long,
+      bool,
+      bool,
+      bool>
+  getBlockingParams(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias,
+      long _Hc,
+      long _Hk) {
+    long Nc, Nk, Hc[2], Hk[2], Ncb, BSb[2];
+    auto in_sizes = t_in.sizes();
+    auto wt_sizes = t_wt.sizes();
+    // auto in_dim = t_in.dim();
+    TORCH_CHECK(t_in.is_contiguous() || t_in.t().is_contiguous());
+    TORCH_CHECK(wt_sizes.size() == 2);
+    TORCH_CHECK(t_wt.is_contiguous() || t_wt.t().is_contiguous());
+    bool Atrans = t_in.is_contiguous() ? false : true;
+    bool Btrans = t_wt.is_contiguous() ? false : true;
+    auto C = wt_sizes[0];
+    auto K = wt_sizes[1];
+    auto BS = t_in.numel() / C;
+    const int default_block_size = CK_BLOCK_SIZE;
+
+    if (_Hc == 0)
+      _Hc = C <= default_block_size ? C : default_block_size;
+    if (_Hk == 0)
+      _Hk = K <= default_block_size ? K : default_block_size;
+    Hc[0] = _Hc;
+    Hc[1] = C % Hc[0];
+    Nc = C / Hc[0];
+
+    Hk[0] = _Hk;
+    Hk[1] = K % Hk[0];
+    Nk = K / Hk[0];
+
+    Ncb = Nc;
+    BSb[0] = BS <= BSB_BLOCK_SIZE ? BS : BSB_BLOCK_SIZE;
+    BSb[1] = BS % BSb[0];
+    auto nBS = BS / BSb[0];
+    bool weight_reuse = nBS > 4;
+    if (weight_reuse)
+      Ncb = NCB_BLOCK_SIZE;
+    return std::make_tuple(
+        Nc,
+        Hc[0],
+        Hc[1],
+        Nk,
+        Hk[0],
+        Hk[1],
+        Ncb,
+        BS,
+        BSb[0],
+        BSb[1],
+        weight_reuse,
+        Atrans,
+        Btrans);
+  }
+
+  static inline const std::string extra(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias) {
+    return "";
+  }
+
+  void operator()(
+      at::Tensor t_in,
+      at::Tensor t_wt_V,
+      at::Tensor t_bias,
+      at::Tensor t_out) {
+    TPP_ASSERT(false, "Should not come here\n");
+  }
+
+  static TppFlatLinearBase<Tin, Tout> get(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias,
+      long _Hc = 0,
+      long _Hk = 0) {
+    TPP_ASSERT(false, "Should not come here\n");
+    return TppFlatLinearBase<Tin, Tout>(t_in, t_wt, t_bias, _Hc, _Hk);
+  }
+
+ protected:
+  template <typename GemmT>
+  static GemmT _get(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias,
+      long _Hc = 0,
+      long _Hk = 0) {
+    static ska::flat_hash_map<std::string, GemmT*> gemm_cache;
+    long Nc, Hc[2], Nk, Hk[2], Ncb, BS, BSb[2];
+    bool weight_reuse, Atrans, Btrans;
+    std::tie(
+        Nc,
+        Hc[0],
+        Hc[1],
+        Nk,
+        Hk[0],
+        Hk[1],
+        Ncb,
+        BS,
+        BSb[0],
+        BSb[1],
+        weight_reuse,
+        Atrans,
+        Btrans) = getBlockingParams(t_in, t_wt, t_bias, _Hc, _Hk);
+    auto extra = GemmT::extra(t_in, t_wt, t_bias);
+    char hash[200] = "";
+    snprintf(
+        hash,
+        199,
+        "gemm_Nc%ld_Hc0:%ld_Hc1:%ld_Nk%ld_Hk0:%ld_Hk1:%ld_BS%ld_Bsb0:%ld_BSb1:%ld_Ncb%ld_wr%d_at%d_bt%d_%s",
+        Nc,
+        Hc[0],
+        Hc[1],
+        Nk,
+        Hk[0],
+        Hk[1],
+        Atrans ? BS : 0,
+        BSb[0],
+        BSb[1],
+        Ncb,
+        weight_reuse ? 1 : 0,
+        Atrans ? 1 : 0,
+        Btrans ? 1 : 0,
+        extra.c_str());
+    auto search = gemm_cache.find(hash);
+    GemmT* gemm = NULL;
+    if (search != gemm_cache.end())
+      gemm = search->second;
+    if (gemm == NULL) {
+      gemm = new GemmT(t_in, t_wt, t_bias, _Hc, _Hk);
+      gemm_cache[hash] = gemm;
+      printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
+    }
+    return *gemm;
+  }
+};
+
+template <typename T, typename TW, typename TOUT = T>
+class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
+ public:
+  using Tin = T;
+  using Tout = TOUT;
+  using Tw = TW;
+  using Base = TppFlatLinearBase<Tin, Tout>;
+  using Base::Atrans;
+  using Base::BS;
+  using Base::BSb;
+  using Base::Btrans;
+  using Base::C;
+  using Base::Hc;
+  using Base::Hk;
+  using Base::K;
+  using Base::Nc;
+  using Base::Ncb;
+  using Base::Nk;
+  using Base::loop_scheme;
+  using Base::postOpCBs;
+  using Base::weight_reuse;
+
+ protected:
+  SCOPEIT_DECL(BrgemmTPP<T, Tout, Tw>) brgemm_tpp[2][2][2];
+
+ public:
+  TppFlatLinear(
+      at::Tensor t_in,
+      at::Tensor t_wt,
+      at::Tensor t_bias,
+      long _Hc = 0,
+      long _Hk = 0)
+      : TppFlatLinearBase<Tin, Tout>(t_in, t_wt, t_bias, _Hc, _Hk) {
+    int b_vnni = 0;
+    int a_vnni = 0;
+    if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockMxFP) {
+      if (t_wt.dtype() == at::kQUInt4x2) {
+        // b_vnni = 4;
+        throw std::runtime_error("FlatGemm Wt: at::kQUInt4x2 not supported\n");
+        printf("FlatGemm Using Wt: at::kQUInt4x2\n");
+      } else {
+        TPP_ASSERT(false, "Unsupported qtype\n");
+      }
+    }
+
+    for (int b = 0; b < 2; b++) {
+      if (BSb[b] == 0)
+        continue;
+      for (int k = 0; k < 2; k++) {
+        if (Hk[k] == 0)
+          continue;
+        for (int c = 0; c < 2; c++) {
+          if (Hc[c] == 0)
+            continue;
+          auto str_a = Atrans ? Hc[0] * BS : Hc[0];
+          auto str_b = Btrans ? Hc[0] : Hc[0] * K;
+          auto lda = Atrans ? BS : C;
+          auto ldb = Btrans ? C : K;
+          auto ldc = K;
+          auto beta = 1.0f;
+          int a_trans = Atrans ? 1 : 0;
+          int b_trans = Btrans ? 1 : 0;
+          int uh = Ncb[0];
+
+          printf(
+              "MNK=%ld %ld %ld, str= %ld %ld, ld= %ld %ld %ld\n",
+              BSb[b],
+              Hk[k],
+              Hc[c],
+              str_a,
+              str_b,
+              lda,
+              ldb,
+              ldc);
+          brgemm_tpp[b][k][c] = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
+              BSb[b],
+              Hk[k],
+              Hc[c],
+              str_a,
+              str_b,
+              lda,
+              ldb,
+              ldc,
+              beta,
+              a_trans,
+              uh,
+              b_vnni,
+              b_trans,
+              a_vnni)));
+        }
+      }
+    }
+
+    loop_scheme =
+        weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
+  }
+  std::function<void(int, int, int)> stepFunc(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias,
+      at::Tensor& t_out,
+      long BS) {
+    auto bias = GetVLAPtr<T>(t_bias, {1});
+    auto out = GetVLAPtr<Tout>(t_out, {K, 1});
+    bool with_bias = (t_bias.numel() > 0);
+    if (!t_wt.is_quantized()) {
+      if (!Atrans && !Btrans) {
+        auto in = GetVLAPtr<T>(t_in, {C, 1});
+        auto wt = GetVLAPtr<Tw>(t_wt, {K, 1});
+        auto func = [&, in, wt, bias, out, BS, with_bias ](int c, int s, int k)
+            __attribute__((always_inline)) {
+          auto rb = s + BSb[0] > BS ? 1 : 0;
+          auto rc = c + Ncb[0] * Hc[0] > C ? 1 : 0;
+          auto rk = k + Hk[0] > K ? 1 : 0;
+          auto count = Ncb[rc];
+          bool no_tilecfg = !(rb || rk);
+          if (c == 0) {
+            if (with_bias) {
+              this->copy_bias_tpp[rb][rk](bias[k], out[s][k]);
+            } else {
+              this->zero_tpp[rb][rk](out[s][k]);
+            }
+          }
+          if (count > 0) {
+            brgemm_tpp[rb][rk][0](
+                in[s][c], wt[c][k], out[s][k], count, no_tilecfg);
+          }
+          if (rc == 1 && Hc[1] > 0) {
+            // Adjust c to account for brgemm call above
+            c += count * Hc[0];
+            brgemm_tpp[rb][rk][1](in[s][c], wt[c][k], out[s][k], 1, false);
+          }
+          if (!(c + Ncb[0] * Hc[0] < C)) { // last c iter
+            if (postOpCBs[rb * 2 + rk])
+              postOpCBs[rb * 2 + rk](out, s, k);
+          }
+        };
+        return func;
+      } else if (!Atrans && Btrans) {
+        auto in = GetVLAPtr<T>(t_in, {C, 1});
+        auto wt = GetVLAPtr<Tw>(t_wt.t(), {C, 1});
+        auto func = [&, in, wt, bias, out, BS, with_bias ](int c, int s, int k)
+            __attribute__((always_inline)) {
+          auto rb = s + BSb[0] > BS ? 1 : 0;
+          auto rc = c + Ncb[0] * Hc[0] > C ? 1 : 0;
+          auto rk = k + Hk[0] > K ? 1 : 0;
+          auto count = Ncb[rc];
+          bool no_tilecfg = !(rb || rk);
+          if (c == 0) {
+            if (with_bias) {
+              this->copy_bias_tpp[rb][rk](bias[k], out[s][k]);
+            } else {
+              this->zero_tpp[rb][rk](out[s][k]);
+            }
+          }
+          if (count > 0) {
+            brgemm_tpp[rb][rk][0](
+                in[s][c], wt[k][c], out[s][k], count, no_tilecfg);
+          }
+          if (rc == 1 && Hc[1] > 0) {
+            c += count * Hc[0];
+            brgemm_tpp[rb][rk][1](in[s][c], wt[k][c], out[s][k], 1, false);
+          }
+          if (!(c + Ncb[0] * Hc[0] < C)) { // last c iter
+            if (postOpCBs[rb * 2 + rk])
+              postOpCBs[rb * 2 + rk](out, s, k);
+          }
+        };
+        return func;
+      } else if (Atrans && !Btrans) {
+        auto in = GetVLAPtr<T>(t_in.t(), {BS, 1});
+        auto wt = GetVLAPtr<Tw>(t_wt, {K, 1});
+        auto func = [&, in, wt, bias, out, BS, with_bias ](int c, int s, int k)
+            __attribute__((always_inline)) {
+          auto rb = s + BSb[0] > BS ? 1 : 0;
+          auto rc = c + Ncb[0] * Hc[0] > C ? 1 : 0;
+          auto rk = k + Hk[0] > K ? 1 : 0;
+          auto count = Ncb[rc];
+          bool no_tilecfg = !(rb || rk);
+          if (c == 0) {
+            if (with_bias) {
+              this->copy_bias_tpp[rb][rk](bias[k], out[s][k]);
+            } else {
+              this->zero_tpp[rb][rk](out[s][k]);
+            }
+          }
+          if (count > 0) {
+            brgemm_tpp[rb][rk][0](
+                in[c][s], wt[c][k], out[s][k], count, no_tilecfg);
+          }
+          if (rc == 1 && Hc[1] > 0) {
+            c += count * Hc[0];
+            brgemm_tpp[rb][rk][1](in[c][s], wt[c][k], out[s][k], 1, false);
+          }
+          if (!(c + Ncb[0] * Hc[0] < C)) { // last c iter
+            if (postOpCBs[rb * 2 + rk])
+              postOpCBs[rb * 2 + rk](out, s, k);
+          }
+        };
+        return func;
+      } else {
+        auto in = GetVLAPtr<T>(t_in.t(), {BS, 1});
+        auto wt = GetVLAPtr<Tw>(t_wt.t(), {C, 1});
+        auto func = [&, in, wt, bias, out, BS, with_bias ](int c, int s, int k)
+            __attribute__((always_inline)) {
+          auto rb = s + BSb[0] > BS ? 1 : 0;
+          auto rc = c + Ncb[0] * Hc[0] > C ? 1 : 0;
+          auto rk = k + Hk[0] > K ? 1 : 0;
+          auto count = Ncb[rc];
+          bool no_tilecfg = !(rb || rk);
+          if (c == 0) {
+            if (with_bias) {
+              this->copy_bias_tpp[rb][rk](bias[k], out[s][k]);
+            } else {
+              this->zero_tpp[rb][rk](out[s][k]);
+            }
+          }
+          if (count > 0) {
+            brgemm_tpp[rb][rk][0](
+                in[c][s], wt[k][c], out[s][k], count, no_tilecfg);
+          }
+          if (rc == 1 && Hc[1] > 0) {
+            c += count * Hc[0];
+            brgemm_tpp[rb][rk][1](in[c][s], wt[k][c], out[s][k], 1, false);
+          }
+          if (!(c + Ncb[0] * Hc[0] < C)) { // last c iter
+            if (postOpCBs[rb * 2 + rk])
+              postOpCBs[rb * 2 + rk](out, s, k);
+          }
+        };
+        return func;
+      }
+    } else {
+      throw std::runtime_error("QTensor not supported yet by TppFlatLinear\n");
+    }
+  }
+
+  void operator()(
+      at::Tensor t_in,
+      at::Tensor t_wt_V,
+      at::Tensor t_bias,
+      at::Tensor t_out) {
+    // t_in = t_in.contiguous();
+
+    auto BS = t_in.numel() / this->C;
+    auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
+    {
+      RECORD_OMP_TIME();
+      auto gemm_loop = ThreadedLoop<3>(
+          {LoopSpecs{0L, C, Ncb[0] * Hc[0], false},
+           LoopSpecs{0L, BS, BSb[0]},
+           LoopSpecs{0L, K, Hk[0]}},
+          loop_scheme);
+      gemm_loop(
+          [&](int* ind) {
+            int c = ind[0], s = ind[1], k = ind[2];
+            func(c, s, k);
+          },
+          [&]() {
+            TimerStart();
+            brgemm_tpp[0][0][0].config();
+          },
+          [&]() {
+            brgemm_tpp[0][0][0].release();
+            TimerEnd();
+          });
+    }
+  }
+
+  static void fused_gemm(
+      std::vector<TppFlatLinear<T, Tw, Tout>>& gemms,
+      at::Tensor& t_in,
+      std::vector<at::Tensor>& t_wt,
+      std::vector<at::Tensor>& t_bias,
+      std::vector<at::Tensor>& t_out) {
+    int n_gemms = gemms.size();
+
+    // Check if gemms are fusable
+    long Hc = gemms[0].Hc[0];
+    long Ncb = gemms[0].Ncb[0];
+    long BSb = gemms[0].BSb[0];
+    long Hk0 = gemms[0].Hk[0];
+    long totalN = gemms[0].aligned_K;
+    bool fusable = true;
+    for (int i = 1; i < n_gemms; i++) {
+      auto& g = gemms[i];
+      if (g.Hc[0] != Hc || g.Ncb[0] != Ncb || g.BSb[0] != BSb ||
+          g.Hk[0] != Hk) {
+        fusable = false;
+        break;
+      }
+      totalN += g.aligned_K;
+    }
+
+    if (!fusable) {
+      for (int i = 0; i < n_gemms; i++) {
+        gemms[i](t_in, t_wt[i], t_bias[i], t_out[i]);
+      }
+    } else {
+      auto C = gemms[0].C;
+      auto BS = t_in.numel() / C;
+      auto loop_scheme = gemms[0].loop_scheme;
+      std::vector<std::function<void(int, int, int)>> funcs;
+      for (int i = 0; i < n_gemms; i++) {
+        auto& g = gemms[i];
+        funcs.push_back(g.stepFunc(t_in, t_wt[i], t_bias[i], t_out[i], BS));
+      }
+      {
+        RECORD_OMP_TIME();
+        auto gemm_loop = ThreadedLoop<3>(
+            {LoopSpecs{0L, C, Ncb * Hc, false},
+             LoopSpecs{0L, BS, BSb},
+             LoopSpecs{0L, totalN, Hk}},
+            loop_scheme);
+        gemm_loop(
+            [&](int* ind) {
+              int c = ind[0], s = ind[1], k = ind[2];
+              int i = 0;
+              while (k >= gemms[i].aligned_K) {
+                k -= gemms[i].aligned_K;
+                i++;
+              }
+              funcs[i](c, s, k);
+            },
+            [&]() {
+              TimerStart();
+              gemms[0].brgemm_tpp[0][0][0].config();
+            },
+            [&]() {
+              gemms[0].brgemm_tpp[0][0][0].release();
+              TimerEnd();
+            });
+      }
+    }
+  }
+
+  static TppFlatLinear<T, Tw, Tout> get(
+      at::Tensor& t_in,
+      at::Tensor& t_wt,
+      at::Tensor& t_bias) {
+    return Base::template _get<TppFlatLinear<T, Tw, Tout>>(t_in, t_wt, t_bias);
+  }
+};
 
 template <typename T, typename TOUT>
 class TppBlockedLinearWBase {
@@ -176,7 +763,7 @@ class TppBlockedLinearWBase {
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias);
       gemm_cache[hash] = gemm;
-      printf("Hash: %s\n", hash);
+      printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
     }
     return *gemm;
   }
@@ -693,6 +1280,8 @@ class GeluPostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto gelu_tpp = SCOPEIT(GeluFwdTPP<T>(M, N, LD, LD), ACT);
       gemm.setPostOpCB(
           i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
@@ -711,6 +1300,8 @@ class SiluPostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto silu_tpp = SCOPEIT(SiLUFwdTPP<T>(M, N, LD, LD), ACT);
       gemm.setPostOpCB(
           i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
@@ -729,6 +1320,8 @@ class ReluPostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto relu_tpp = SCOPEIT(ReLUFwdTPP<T>(M, N, LD, LD, false), ACT);
       gemm.setPostOpCB(
           i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
@@ -749,6 +1342,8 @@ class MulPostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto mul_tpp = SCOPEIT((MulTPP<T, T>(M, N, LD, LD)), EW_MUL);
       gemm.setPostOpCB(
           i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
@@ -772,6 +1367,8 @@ class AddScalePostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(M, N, LD, LD)), EW_ADD);
       gemm.setPostOpCB(
           i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
@@ -798,6 +1395,8 @@ class Add2ScalePostOp {
     for (int i = 0; i < num_shapes; i++) {
       long M, N, LD;
       std::tie(M, N, LD) = gemm.getOutputShape(i);
+      if (M == 0 || N == 0)
+        continue;
       auto add_tpp = SCOPEIT((AddTPP<T, T>(M, N, LD, LD)), EW_ADD);
       auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(M, N, LD, LD)), EW_ADD);
       gemm.setPostOpCB(
@@ -861,29 +1460,56 @@ inline at::Tensor call_gemm_with_post_op(
   } else if (t_wt.is_sparse_csr()) {
   } else {
     auto dtype = t_wt.scalar_type();
-    switch (dtype) {
-      case at::kFloat:
-        return dispatch_gemm<TppBlockedLinearW<Tin, float, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kBFloat16:
-        return dispatch_gemm<TppBlockedLinearW<Tin, bfloat16, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kHalf:
-        return dispatch_gemm<TppBlockedLinearW<Tin, half, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kHFloat8:
-        return dispatch_gemm<TppBlockedLinearW<Tin, hfloat8, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kBFloat8:
-        return dispatch_gemm<TppBlockedLinearW<Tin, bfloat8, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      default:
-        TPP_ASSERT(false, "Unsupported dtype\n");
+    if (t_wt.dim() > 2) {
+      switch (dtype) {
+        case at::kFloat:
+          return dispatch_gemm<TppBlockedLinearW<Tin, float, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kBFloat16:
+          return dispatch_gemm<TppBlockedLinearW<Tin, bfloat16, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kHalf:
+          return dispatch_gemm<TppBlockedLinearW<Tin, half, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kHFloat8:
+          return dispatch_gemm<TppBlockedLinearW<Tin, hfloat8, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kBFloat8:
+          return dispatch_gemm<TppBlockedLinearW<Tin, bfloat8, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        default:
+          TPP_ASSERT(false, "Unsupported dtype\n");
+      }
+    } else {
+      switch (dtype) {
+        case at::kFloat:
+          return dispatch_gemm<TppFlatLinear<Tin, float, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kBFloat16:
+          return dispatch_gemm<TppFlatLinear<Tin, bfloat16, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kHalf:
+          return dispatch_gemm<TppFlatLinear<Tin, half, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kHFloat8:
+          return dispatch_gemm<TppFlatLinear<Tin, hfloat8, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        case at::kBFloat8:
+          return dispatch_gemm<TppFlatLinear<Tin, bfloat8, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+          break;
+        default:
+          TPP_ASSERT(false, "Unsupported dtype \n");
+      }
     }
   }
   return at::Tensor();

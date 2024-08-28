@@ -193,6 +193,54 @@ struct Int8SymQuant {
   }
 };
 
+template <typename TIN>
+struct Int4SymQuant {
+  using Tin = TIN;
+  using Tout = uint8_t;
+  using Ts = float;
+  static constexpr int lkp_tbl[] =
+      {0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1};
+
+  Ts scale;
+  Ts iscale;
+
+  Int4SymQuant() : scale(0), iscale(0) {}
+  Int4SymQuant(float max) {
+    scale = max / 7.0;
+    iscale = (scale != 0) ? (1.0f / scale) : 0;
+  }
+
+  Ts get_scale() {
+    return scale;
+  }
+
+  void set_scale(Ts sc) {
+    scale = sc;
+    iscale = (scale != 0) ? (1.0f / scale) : 0;
+  }
+
+  inline int quantize(Tin val) {
+    int qval = 0;
+    qval = nearbyintf((float)val * iscale);
+    qval = std::clamp(qval, -8, 7);
+    return qval;
+  }
+
+  static auto GetQuantizeTPP(int N) {
+    return nullptr;
+  }
+
+  template <typename T_QTPP>
+  inline void quantize(Tin* inp, Tout* outp, T_QTPP& qtpp) {
+    // qtpp(inp, outp, iscale);
+  }
+
+  inline Tin dequantize(int qval) {
+    Tin val = lkp_tbl[qval] * scale;
+    return val;
+  }
+};
+
 namespace at {
 
 Tensor& dequantize_tensor_per_block_mxfp(
@@ -390,6 +438,16 @@ Tensor PerBlockAffineQuantizer::quantize(const Tensor& rtensor) {
     } else {
       TPP_ASSERT(false, "Unsupported input type for Affine Quant\n");
     }
+  } else if (scalar_type_ == kQUInt4x2 && has_zp_ == false) {
+    if (rtensor.dtype() == kFloat) {
+      this->quantize_symetric<Int4SymQuant<float>>(
+          rtensor_contig, scales_, qtensor);
+    } else if (rtensor.dtype() == kBFloat16) {
+      this->quantize_symetric<Int4SymQuant<bfloat16>>(
+          rtensor_contig, scales_, qtensor);
+    } else {
+      TPP_ASSERT(false, "Unsupported input type for Affine Quant\n");
+    }
   } else {
     TPP_ASSERT(false, "Unsupported Affine datatype\n");
   }
@@ -424,6 +482,16 @@ Tensor& PerBlockAffineQuantizer::dequantize_out(
           qtensor_contig, scales_, rtensor);
     } else if (rtensor.dtype() == kBFloat16) {
       this->dequantize_symetric<Int8SymQuant<bfloat16>>(
+          qtensor_contig, scales_, rtensor);
+    } else {
+      TPP_ASSERT(false, "Unsupported output type for Per Block QInt8\n");
+    }
+  } else if (scalar_type_ == kQUInt4x2) {
+    if (rtensor.dtype() == kFloat) {
+      this->dequantize_symetric<Int4SymQuant<float>>(
+          qtensor_contig, scales_, rtensor);
+    } else if (rtensor.dtype() == kBFloat16) {
+      this->dequantize_symetric<Int4SymQuant<bfloat16>>(
           qtensor_contig, scales_, rtensor);
     } else {
       TPP_ASSERT(false, "Unsupported output type for Per Block QInt8\n");
@@ -481,6 +549,19 @@ at::Tensor quantize_int8sym(
   return quantizer->quantize(self);
 }
 
+at::Tensor quantize_int4sym(
+    const at::Tensor& self,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni) {
+  at::ScalarType dtype = at::kQUInt4x2;
+  if (axis < 0)
+    axis += self.dim();
+  auto quantizer = at::make_per_block_affine_quantizer(
+      self, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
+  return quantizer->quantize(self);
+}
+
 at::Tensor create_qtensor_int8sym(
     at::Tensor& val,
     at::Tensor& scales,
@@ -489,6 +570,22 @@ at::Tensor create_qtensor_int8sym(
     bool is_vnni) {
   at::ScalarType dtype = at::kQInt8;
   TORCH_CHECK(val.dtype() == at::kChar && scales.dtype() == at::kFloat);
+  auto quantizer = at::make_per_block_affine_quantizer(
+      val, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
+  static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())
+      ->set_scales(scales);
+  at::Tensor qtensor = at::new_qtensor(val, quantizer);
+  return qtensor;
+}
+
+at::Tensor create_qtensor_int4sym(
+    at::Tensor& val,
+    at::Tensor& scales,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni) {
+  at::ScalarType dtype = at::kQUInt4x2;
+  TORCH_CHECK(val.dtype() == at::kByte && scales.dtype() == at::kFloat);
   auto quantizer = at::make_per_block_affine_quantizer(
       val, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
   static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())
@@ -679,15 +776,86 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
   return ret;
 }
 
+inline at::Tensor remap_and_quantize_qint4(at::Tensor t) {
+  RECORD_SCOPE(quant, {t});
+  auto dim = t.dim();
+  long block_size = 0;
+  if (dim == 5) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C3 = sizes[4];
+    auto C = C1 * C2 * C3;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE / C3;
+      C1 = C / QINT8_BLOCK_SIZE;
+    } else {
+      for (int QBS = 4096; QBS >= 64; QBS /= 2) {
+        if (QINT8_BLOCK_SIZE > QBS && C % QBS == 0) {
+          C2 = QBS / C3;
+          C1 = C / QBS;
+          break;
+        }
+      }
+    }
+    if (C3 != 4) {
+      int RBS = 4 / C3;
+      TPP_ASSERT(C2 % RBS == 0, "Shape not compatible for VNNI4\n");
+      t = t.view({K1, C1, C2 / RBS, RBS, K2, C3})
+              .permute({0, 1, 2, 4, 3, 5})
+              .contiguous()
+              .view({K1, C1, C2 / RBS, K2, RBS * C3});
+    }
+    block_size = C2 * C3;
+  } else if (dim == 4) {
+    auto sizes = t.sizes();
+    auto K1 = sizes[0];
+    auto C1 = sizes[1];
+    auto C2 = sizes[2];
+    auto K2 = sizes[3];
+    auto C = C1 * C2;
+    if (C % QINT8_BLOCK_SIZE == 0) {
+      C2 = QINT8_BLOCK_SIZE;
+      C1 = C / QINT8_BLOCK_SIZE;
+    } else {
+      for (int QBS = 4096; QBS >= 64; QBS /= 2) {
+        if (QINT8_BLOCK_SIZE > QBS && C % QBS == 0) {
+          C2 = QBS;
+          C1 = C / QBS;
+          break;
+        }
+      }
+    }
+    TPP_ASSERT(C2 % 4 == 0, "Shape not compatible for VNNI4\n");
+    t = t.view({K1, C1, C2 / 4, 4, K2})
+            .permute({0, 1, 2, 4, 3})
+            .contiguous()
+            .view({K1, C1, C2 / 4, K2, 4});
+    block_size = C2;
+  }
+  auto ret = quantize_int4sym(t, block_size, 2, true);
+  std::cout << "remap_and_quantize_qint8: " << ret.sizes()
+            << " dt: " << ret.dtype() << std::endl;
+  if (QINT8_EMU == 1) {
+    ret = fix_vnni(ret.dequantize().to(t.dtype()));
+  }
+  return ret;
+}
+
 REGISTER_SUBMODULE(_qtype, m) {
   m.def("quantize_mxfp", &quantize_mxfp);
   m.def("quantize_mxfp4", &quantize_mxfp4);
   m.def("quantize_int8sym", &quantize_int8sym);
+  m.def("quantize_int4sym", &quantize_int4sym);
   m.def("create_qtensor_int8sym", &create_qtensor_int8sym);
+  m.def("create_qtensor_int4sym", &create_qtensor_int4sym);
   m.def("q_per_block_scales", &q_per_block_scales);
   m.def("q_per_block_block_size", &q_per_block_block_size);
   m.def("q_per_block_axis", &q_per_block_axis);
   m.def("remap_and_quantize_mxfp4", &remap_and_quantize_mxfp4);
   m.def("remap_and_quantize_qint8", &remap_and_quantize_qint8);
+  m.def("remap_and_quantize_qint4", &remap_and_quantize_qint4);
   m.def("fix_vnni", &fix_vnni);
 }

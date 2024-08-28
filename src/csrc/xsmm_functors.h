@@ -2415,7 +2415,9 @@ class BrgemmTPP {
       float beta,
       int a_trans,
       int unroll_hint,
-      int b_vnni = 1)
+      int b_vnni = 1,
+      int b_trans = 0,
+      int a_vnni = 1)
       : M(M),
         N(N),
         K(K),
@@ -2426,7 +2428,9 @@ class BrgemmTPP {
         ldc(ldc),
         beta(beta),
         a_trans(a_trans),
+        b_trans(b_trans),
         unroll_hint(unroll_hint),
+        a_vnni(a_vnni),
         b_vnni(b_vnni),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
@@ -2618,12 +2622,14 @@ class BrgemmTPP {
               (std::is_same<Tw, uint8_t>::value),
               "MXFP4 must use uint8_t for weights\n");
         }
-        if (p->a_trans == 1) {
+        if (p->a_trans == 1 && p->a_vnni == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
       }
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+      if (p->b_trans == 1)
+        l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
 
       // config = 0 - normal
       // config = 1 - no tile release
@@ -2682,8 +2688,10 @@ class BrgemmTPP {
   libxsmm_blasint ldc;
   float beta;
   int a_trans;
+  int b_trans;
   long brgemm_type = -1;
   int unroll_hint;
+  int a_vnni;
   int b_vnni;
   libxsmm_tilecfg_state l_tilestate;
   BrgemmKernel k_gemm_with_tc;

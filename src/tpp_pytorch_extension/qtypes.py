@@ -16,8 +16,10 @@ from tpp_pytorch_extension._C._qtype import (
     q_per_block_axis,
     remap_and_quantize_mxfp4,
     remap_and_quantize_qint8,
+    remap_and_quantize_qint4,
     quantize_mxfp4,
     quantize_int8sym,
+    quantize_int4sym,
     create_qtensor_int8sym,
 )
 
