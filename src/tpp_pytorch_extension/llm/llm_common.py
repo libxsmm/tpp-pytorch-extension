@@ -381,6 +381,12 @@ def optimize_for_first_token(
     return model
 
 
+def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]):
+    return torch.ops.tpp_llm.fc_plain(
+        input, self.weight, bias, parallel_dim, split_sizes
+    )
+
+
 class BlockedLinear(BlockedModule, torch.nn.Linear):
     def maybe_block_params(self):
         self.weight.block()
@@ -407,9 +413,7 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         input = input.to(self.weight.dtype)
         parallel_dim = self.parallel_dim if self.model_parallel == True else -1
         split_sizes = self.split_sizes if hasattr(self, "split_sizes") else []
-        ret = torch.ops.tpp_llm.fc_plain(
-            input, self.weight, bias, parallel_dim, split_sizes
-        )
+        ret = fc_plain(input, self.weight, bias, parallel_dim, split_sizes)
         # if self.model_parallel == True:
         #     with torch.inference_mode(False):
         #         if self.parallel_dim == 0:
