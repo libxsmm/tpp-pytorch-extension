@@ -382,9 +382,7 @@ def optimize_for_first_token(
 
 
 def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]):
-    return torch.ops.tpp_llm.fc_plain(
-        input, self.weight, bias, parallel_dim, split_sizes
-    )
+    return torch.ops.tpp_llm.fc_plain(input, weight, bias, parallel_dim, split_sizes)
 
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
@@ -405,7 +403,7 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
     def forward(self, input):
         # if self.model_parallel == True and self.parallel_dim == 1:
         #    input = input.chunk(self.parallel_size, dim=-1)[self.parallel_rank].contiguous()
-        # self.maybe_block_params()
+        self.maybe_block_params()
         bias = (
             self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
         )
