@@ -95,13 +95,16 @@ class IGBHeteroDGLDataset(DGLDataset):
           paper_lbl_path = osp.join(self.dir, self.dataset_size, 'processed', 'paper', label_file)
 
           if self.dataset_size in ['large', 'full']:
-              paper_node_features = torch.load(paper_feat_path, mmap=True)
-              paper_node_labels = torch.from_numpy(np.fromfile(paper_lbl_path, dtype=np.float32)).to(torch.long)
+              paper_node_features = torch.load(paper_feat_path, mmap=True) 
           else:
               paper_node_features = torch.load(paper_feat_path)
+          if self.dataset_size in ['large', 'full']:
+              paper_node_labels = torch.from_numpy(np.fromfile(paper_lbl_path, dtype=np.float32)).to(torch.long)
+          else:
               paper_node_labels = torch.from_numpy(np.load(paper_lbl_path)).long()
 
           author_feat_path = osp.join(self.dir, self.dataset_size, 'processed', 'author', 'node_feat.pt')
+
           if self.dataset_size in ['large', 'full']:
               author_node_features = torch.load(author_feat_path, mmap=True) 
           else:
@@ -158,6 +161,7 @@ class IGBHeteroDGLDataset(DGLDataset):
               self.graph.nodes['paper'].data['scf'] = paper_feat_scf
           self.graph.num_paper_nodes = paper_node_features.shape[0]
           self.graph.nodes['paper'].data['label'] = paper_node_labels[0:graph_paper_nodes]
+
       self.graph.nodes['author'].data['feat'] = author_node_features
       if self.data_type == 'int8':
           self.graph.nodes['author'].data['scf'] = author_feat_scf

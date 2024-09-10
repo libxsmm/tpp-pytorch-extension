@@ -32,17 +32,17 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--ntype",
         type=str,
-        default='',
+        default='all',
         help="node type",
     )
 
     args = argparser.parse_args()
 
-    ntypes = ['author', 'institute', 'fos', 'conference', 'journal', 'paper']
+    ntypes = ['author', 'fos', 'institute', 'conference', 'journal', 'paper']
     if args.dataset_size in ['large', 'full']:
         if args.target_dtype in ["hf8", "bf8", "bf16"]:
             dt = args.target_dtype
-            if args.ntype == '':
+            if args.ntype == 'all':
                 for ntype in ntypes:
                     in_name = osp.join(args.path, args.dataset_size, 'processed', ntype, 'node_feat.npy')
                     out_name = osp.join(args.path, args.dataset_size,  'processed', ntype, 'node_feat_'+dt+'.pt')
@@ -72,7 +72,7 @@ if __name__ == "__main__":
                     torch.save(nf, out_name)
         elif args.target_dtype == "int8":
             bsz = args.block_size
-            if args.ntype == '':
+            if args.ntype == 'all':
                 for ntype in ntypes:
                     in_name = osp.join(args.path, args.dataset_size, 'processed', ntype, 'node_feat.npy')
                     out_name = osp.join(args.path, args.dataset_size, 'processed', ntype, 'node_feat_int8.pt')

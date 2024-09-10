@@ -126,7 +126,7 @@ def track_acc(g, category, args, device):
     sampler = NeighborSampler(fanouts, fused=True)
 
     val_nid = torch.nonzero(g.nodes[category].data['val_mask'], as_tuple=True)[0]
-    if args.profile:
+    if args.profile or args.tpp_profile:
         val_nids = 10000
     else:
         val_nids = int(args.validation_frac * val_nid.shape[0])
@@ -177,9 +177,9 @@ def track_acc(g, category, args, device):
     ) as prof:
         for step_ in range(0, val_nid.shape[0], args.batch_size):
             if args.use_tpp and step_ == 0:
-                cores = int(os.environ["OMP_NUM_THREADS"])
-                gnn_utils.affinitize_cores(cores, 0)
-                ppx.reset_debug_timers()
+                #cores = int(os.environ["OMP_NUM_THREADS"])
+                #gnn_utils.affinitize_cores(cores, 0)
+                if args.tpp_profile: ppx.reset_debug_timers()
 
             step = int(step_ / args.batch_size)
             if step_ + args.batch_size < val_nid.shape[0]:
@@ -198,9 +198,6 @@ def track_acc(g, category, args, device):
             batch_inputs, batch_labels = load_subtensor_dict(
                 nfeat, labels, seeds, input_nodes
             )
-            #if args.data_type == 'hf8_mm':
-            #    for k in batch_inputs.keys():
-            #        batch_inputs[k] = batch_inputs[k].to(torch.float8_e4m3fn)
             t1 = time.time()
 
             if args.batch_size == 1:
@@ -237,7 +234,7 @@ def track_acc(g, category, args, device):
 
             end = time.time()
 
-    if args.use_tpp and args.profile:
+    if args.use_tpp and args.tpp_profile:
         ppx.print_debug_timers(0)
 
     if prof:
@@ -280,7 +277,7 @@ def track_acc(g, category, args, device):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # Loading dataset
-    parser.add_argument('--path', type=str, default='/mnt/beegfs/savancha/IGBH',
+    parser.add_argument('--path', type=str, default='/root/savancha/IGBH',
         help='path containing the datasets')
     parser.add_argument('--dataset_size', type=str, default='full',
         choices=['tiny', 'small', 'medium', 'large', 'full'],
@@ -317,6 +314,9 @@ if __name__ == '__main__':
     )
     parser.add_argument( "--profile", action="store_true",
         help="Whether to profile",
+    )
+    parser.add_argument( "--tpp_profile", action="store_true",
+        help="Whether to profile TPP",
     )
 
     args = parser.parse_args()

@@ -20,49 +20,55 @@ auto bn = align;
 auto nn = N / bn;
 auto rem = N % bn;
 auto K = in_sizes[1];
-auto dK = (K + 15) / 16;
+auto bk = 16;
+auto nk = K / bk;
+auto dK = (bk + 15) / 16;
 auto t_lrelu_mask = at::empty({N, dK}, at::kShort);
 auto t_out = t_in.new_empty({N, K}); // [N,  K]
 
-auto in = GetVLAPtr<Tact>(t_in, {bn, K});
-auto bias = GetVLAPtr<Tprm>(t_bias, {K});
-auto out = GetVLAPtr<Tact>(t_out, {bn, K});
+auto in = GetVLAPtr<Tact>(t_in, {bn, nk, bk});
+auto bias = GetVLAPtr<Tprm>(t_bias, {bk});
+auto out = GetVLAPtr<Tact>(t_out, {bn, nk, bk});
 auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {bn, dK});
 
-auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(bn, K)), EW_COPY);
-auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(bn, K), BIAS);
+auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(bn, bk)), EW_COPY);
+auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(bn, bk), BIAS);
 auto leaky_relu_fwd_tpp =
-    SCOPEIT((LeakyReLUFwdTPP<float, Tact>(bn, K, alpha)), ACT);
+    SCOPEIT((LeakyReLUFwdTPP<float, Tact>(bn, bk, alpha)), ACT);
 {
   RECORD_SCOPE(go_bias_lrelu_drop, {t_in});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
     {
-      float tmp[bn][K];
+      float tmp[bn][bk];
 #pragma omp for
       for (int n = 0; n < nn; n++) {
-        cvt_f32_tpp(in[n][0], tmp[0]);
-        add_bias_tpp(bias[0], tmp[0]);
-        leaky_relu_fwd_tpp(tmp[0], out[n][0], lrelu_mask[n][0]);
+        for(int k = 0; k < nk; k++) {
+          cvt_f32_tpp(in[n][0][k], tmp[0]);
+          add_bias_tpp(bias[k], tmp[0]);
+          leaky_relu_fwd_tpp(tmp[0], out[n][0][k], lrelu_mask[n][0]);
+        }
       }
     }
     if (rem > 0) {
-      auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, K)), EW_COPY);
-      auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, K), BIAS);
+      auto cvt_f32_tpp = SCOPEIT((ConvertTPP<Tact, float>(1, bk)), EW_COPY);
+      auto add_bias_tpp = SCOPEIT(AddBiasTPP<Tprm>(1, bk), BIAS);
       auto leaky_relu_fwd_tpp =
-          SCOPEIT((LeakyReLUFwdTPP<float, Tact>(1, K, alpha)), ACT);
+          SCOPEIT((LeakyReLUFwdTPP<float, Tact>(1, bk, alpha)), ACT);
 
-      auto in = GetVLAPtr<Tact>(t_in, {K});
-      auto bias = GetVLAPtr<Tprm>(t_bias, {K});
-      auto out = GetVLAPtr<Tact>(t_out, {K});
+      auto in = GetVLAPtr<Tact>(t_in, {nk, bk});
+      auto bias = GetVLAPtr<Tprm>(t_bias, {bk});
+      auto out = GetVLAPtr<Tact>(t_out, {nk, bk});
       auto lrelu_mask = GetVLAPtr<short>(t_lrelu_mask, {dK});
-      float tmp[K];
+      float tmp[bk];
 
       for (int n = nn * bn; n < nn * bn + rem; n++) {
-        cvt_f32_tpp(in[n], tmp);
-        add_bias_tpp(bias[0], tmp);
-        leaky_relu_fwd_tpp(tmp, out[n], lrelu_mask[n]);
+        for (int k=0; k < nk; k++) {
+          cvt_f32_tpp(in[n][k], tmp);
+          add_bias_tpp(bias[k], tmp);
+          leaky_relu_fwd_tpp(tmp, out[n][k], lrelu_mask[n]);
+        }
       }
     }
   }

@@ -47,7 +47,7 @@ REGISTER_SCOPE(gdo_bias_lrelu, "gdo_bias_lrelu");
 // ######################################## Leaky ReLU
 // ################################################
 
-std::vector<at::Tensor> leakyrelu_fwd(float alpha, at::Tensor inp) {
+std::vector<at::Tensor> leakyrelu_fwd(float alpha, int align, at::Tensor inp) {
   GlobalPass _gp(FWD);
   if (inp.dtype() == at::kFloat) {
     typedef float T;
@@ -60,7 +60,7 @@ std::vector<at::Tensor> leakyrelu_fwd(float alpha, at::Tensor inp) {
   }
 }
 
-at::Tensor leakyrelu_bwd(float alpha, std::vector<at::Tensor> inputs) {
+at::Tensor leakyrelu_bwd(float alpha, int align, std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
   if (inputs[0].dtype() == at::kFloat) {
     typedef float T;

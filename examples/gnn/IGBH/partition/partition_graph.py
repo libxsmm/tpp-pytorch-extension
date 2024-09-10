@@ -180,6 +180,14 @@ if __name__ == "__main__":
         filename = osp.join(args.path, args.dataset_size, 'struct.graph')
         g = dgl.load_graphs(filename)[0][0]
 
+        label_file = 'node_label_2K.npy'
+        paper_lbl_path = osp.join(args.path, args.dataset_size, 'processed', 'paper', label_file)
+
+        if args.dataset_size in ['large', 'full']:
+            paper_node_labels = torch.from_numpy(np.fromfile(paper_lbl_path, dtype=np.float32)).to(torch.long)
+        else:
+            paper_node_labels = torch.from_numpy(np.load(paper_lbl_path)).to(torch.long)
+
         if args.data_type == 'bf16':
             feat_path = osp.join(args.path, args.dataset_size, 'processed', 'author', 'node_feat.pt')
             g.nodes['author'].data['feat'] = torch.load(feat_path)
@@ -200,6 +208,7 @@ if __name__ == "__main__":
             feat_path = osp.join(args.path, args.dataset_size, 'processed', 'paper', 'node_feat.pt')
             graph_paper_nodes = g.num_nodes('paper')
             g.nodes['paper'].data['feat'] = torch.load(feat_path)[:graph_paper_nodes]
+            g.nodes['paper'].data['label'] = paper_node_labels[:graph_paper_nodes]
 
         elif args.data_type == 'int8':
 
@@ -234,6 +243,7 @@ if __name__ == "__main__":
             graph_paper_nodes = g.num_nodes('paper')
             g.nodes['paper'].data['feat'] = torch.load(feat_path)[:graph_paper_nodes]
             g.nodes['paper'].data['scf'] = torch.load(scf_path)[:graph_paper_nodes]
+            g.nodes['paper'].data['label'] = paper_node_labels[:graph_paper_nodes]
 
     dgl.distributed.partition_graph(
         g,
@@ -248,5 +258,8 @@ if __name__ == "__main__":
         num_trainers_per_machine=1,
         feat_part_only=args.feat_part_only
     )
-    print(f'Stored graph partitions and features in {output}', flush=True)
+    if args.graph_struct_only:
+        print(f'Stored graph partitions in {output}', flush=True)
+    elif args.feat_part_only:
+        print(f'Stored graph features in {output}', flush=True)
 

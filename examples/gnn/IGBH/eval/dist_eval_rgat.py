@@ -167,6 +167,9 @@ def distgnn_eval(distgnn_inf, pb):
     s_batch_inf, e_batch_inf = distgnn_inf.init_setup(args.fan_out)
 
     model.eval()
+    fanout = ""
+    for f in args.fan_out.split(","):
+        fanout += f
 
     toc = time.time() - tic
 
@@ -177,7 +180,7 @@ def distgnn_eval(distgnn_inf, pb):
     with torch.autograd.profiler.profile(
         enabled=args.profile if args.rank==0 else False, record_shapes=False
     ) as prof:
-        if args.use_tpp and args.profile:
+        if args.use_tpp and args.tpp_profile:
             ppx.reset_debug_timers()
         for step in range(s_batch_inf, e_batch_inf):
             t0 = time.time()
@@ -192,11 +195,19 @@ def distgnn_eval(distgnn_inf, pb):
                 predictions = np.concatenate(predictions)
                 labels = np.concatenate(labels)
                 acc = sklearn.metrics.accuracy_score(labels, predictions)
-                print('acc = {:.4f}'.format(acc))
+
                 if math.isnan(acc):
                     acc = -1
 
                 acc_tensor.append(acc)
+                if istep > 0 and istep % 1000 == 0:
+                    acc_ten = torch.tensor(acc_tensor)
+                    int_acc = acc_ten.sum()
+                    dist.all_reduce(int_acc, op=dist.ReduceOp.SUM)
+                    if args.rank == 0:
+                        div = args.world_size * istep
+                        print('acc@{:d}: {:.4f}'.format(istep,int_acc/div))
+
 
             t1 = time.time()
 
@@ -211,11 +222,11 @@ def distgnn_eval(distgnn_inf, pb):
                 print('Batch {:07d} | Sampling time {:.4f} (s) | Comms Time {:.4f} | Inference time {:.4f} (s) |'.format(istep, stime, ctime, t1-t0))
             istep += 1
     
-    if args.use_tpp and args.profile and args.rank == 0:
+    if args.use_tpp and args.tpp_profile and args.rank == 0:
         ppx.print_debug_timers(0)
 
     if prof and args.rank == 0:
-        fname = "gat_"+args.dataset_size+".prof"
+        fname = os.path.join(args.prof_dir, "gat_"+fanout+".prof")
         with open(fname, "w") as prof_f:
             prof_f.write(
                 prof.key_averages(group_by_input_shape=False).table(
@@ -223,19 +234,19 @@ def distgnn_eval(distgnn_inf, pb):
                 )
             )
         if ppx.extend_profiler:
-            fname = "gat_"+args.dataset_size+"_nested.prof"
+            fname = os.path.join("gat_"+fanout+"_nested.prof")
             with open(fname, "w") as prof_f:
                 prof_f.write(
                     prof.nested_key_averages().table(sort_by=None, row_limit=1000)
                 )
-            fname = "gat_"+args.dataset_size+"_top_level.prof"
+            fname = os.path.join("gat_"+fanout+"_top_level.prof")
             with open(fname, "w") as prof_f:
                 prof_f.write(
                     prof.nested_key_averages(only_top_level=True).table(
                         sort_by="cpu_time_total"
                     )
                 )
-            prefix = "gat_"+args.dataset_size+"_time"
+            prefix = os.path.join("gat_"+fanout+"_time")
             prof.print_op_timings(prefix=prefix)
 
     dist.barrier()
@@ -304,6 +315,10 @@ if __name__ == '__main__':
     parser.add_argument( "--profile", action="store_true",
         help="Whether to profile",
     )
+    parser.add_argument( "--tpp_profile", action="store_true",
+        help="Whether to profile TPPs",
+    )
+    parser.add_argument('--prof_dir', type=str, default='.')
     args = parser.parse_args()
 
     args.rank, args.world_size = init_mpi(args.dist_backend, args.dist_url)

@@ -55,7 +55,7 @@ class distgnn_mb_inf:
         self.rank = args.rank
         self.use_tpp = args.use_tpp
         self.val_fraction = args.val_fraction
-        self.profile = args.profile
+        self.profile = args.profile or args.tpp_profile
 
         self.adjust_batch('val')
         self.reset()
@@ -104,11 +104,6 @@ class distgnn_mb_inf:
 
     def printname(self):
         self.gobj.printname()
-
-    def profile(self):
-        self.gobj.profile()
-        if self.rank == 0:
-            print(f'ticd: {self.ticd: .3f}, ticlst: {self.ticlst: .3f}')
 
     def reset(self):
         self.ticd, self.ticlst = 0, 0

@@ -74,10 +74,11 @@ def FixLinear(
 ##################LeakyReLU#################
 class LeakyReLUFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, alpha, input):
-        (out, mask) = fused_ops_cpp.leakyrelu_fwd(alpha, input)
+    def forward(ctx, alpha, align, input):
+        (out, mask) = fused_ops_cpp.leakyrelu_fwd(alpha, align, input)
         ctx.save_for_backward(input, mask)
         ctx.alpha = alpha
+        ctx.align = align
 
         return out
 
@@ -85,9 +86,9 @@ class LeakyReLUFn(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        grad_inp = fused_ops_cpp.leakyrelu_bwd(ctx.alpha, inputs)
+        grad_inp = fused_ops_cpp.leakyrelu_bwd(ctx.alpha, ctx.align, inputs)
 
-        return (None, grad_inp)
+        return (None, None, grad_inp)
 
 
 class LeakyReLU(nn.Module):
@@ -97,10 +98,11 @@ class LeakyReLU(nn.Module):
         super(LeakyReLU, self).__init__()
         self.alpha = alpha
         self.inplace = False  # inplace
+        self.align = 32
 
     def forward(self, input):
         input = input.contiguous()
-        output = LeakyReLUFn.apply(self.alpha, input)
+        output = LeakyReLUFn.apply(self.alpha, self.align, input)
         return output
 
 
@@ -263,7 +265,7 @@ class FusedBiasLeakyReLUDrop(nn.Module):
             )
         self.alpha = alpha
         self.p = p
-        self.align = 64
+        self.align = 32
 
     def extra_repr(self) -> str:
         return "alpha={}, p={}, inplace={}".format(self.alpha, self.p, self.inplace)
