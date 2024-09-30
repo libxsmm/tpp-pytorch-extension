@@ -2378,7 +2378,7 @@ template <
     typename Tout,
     typename Tw = Tin,
     typename Tcomp =
-        typename std::conditional<std::is_same_v<Tout, int>, int, float>::type>
+        typename std::conditional<std::is_same_v<Tout, int> || std::is_same_v<Tin, int8_t>, int, float>::type>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}
@@ -2480,6 +2480,28 @@ class BrgemmTPP {
     gemm_param.a.primary = (void*)B;
     gemm_param.a.tertiary = (void*)B_scales;
     gemm_param.b.primary = (void*)A;
+    if (!no_tile_cfg) {
+      k_gemm_with_tc(&gemm_param);
+    } else {
+      k_gemm_no_tc(&gemm_param);
+    }
+  }
+  void operator()(
+      Tin* A,
+      float* A_scales,
+      Tw* B,
+      Tw* B_scales,
+      Tout* C,
+      unsigned long long count,
+      bool no_tile_cfg = false) {
+    libxsmm_gemm_param gemm_param;
+    memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+    gemm_param.op.tertiary = &count;
+    gemm_param.c.primary = (void*)C;
+    gemm_param.a.primary = (void*)B;
+    gemm_param.a.tertiary = (void*)B_scales;
+    gemm_param.b.primary = (void*)A;
+    gemm_param.b.tertiary = (void*)A_scales;
     if (!no_tile_cfg) {
       k_gemm_with_tc(&gemm_param);
     } else {
@@ -2616,8 +2638,13 @@ class BrgemmTPP {
       if (brgemm_type != 0) {
         if (p->b_vnni)
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
-        if (p->b_vnni == 2) {
-          l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
+        if (p->b_vnni >= 2) {
+          if (p->b_vnni == 2)
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
+          else if (p->b_vnni == 8)
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI8_INTLV;
+          else
+            TPP_ASSERT(0, "Invalid B VNNI type\n");
           TPP_ASSERT(
               (std::is_same<Tw, uint8_t>::value),
               "MXFP4 must use uint8_t for weights\n");
@@ -2658,7 +2685,7 @@ class BrgemmTPP {
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = (p->b_vnni == 2)
+      l_brconfig.br_stride_a_hint = (p->b_vnni == 2 || p->b_vnni == 8)
           ? (p->str_b * sizeof(Tw)) / 2
           : p->str_b * sizeof(Tw);
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);

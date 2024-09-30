@@ -637,7 +637,7 @@ class TppBlockedLinearWBase {
   SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp, zero_tpp_rem;
 
   std::string loop_scheme;
-  std::function<void(const VLAPtr<T, 2, long>&, long, long)>
+  std::function<void(const VLAPtr<Tout, 2, long>&, long, long)>
       postOpCBs[nOutputShapes];
 
  public:
@@ -798,7 +798,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     int b_vnni = 1;
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
-        b_vnni = 2;
+        b_vnni = t_wt.size(-1);
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }
@@ -869,10 +869,19 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
         auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
         auto t_scl = mxfp_quantizer->scales();
         auto scl = GetVLAPtr<Tw>(t_scl, {Nc, (Hc * Hk) / block_size});
-        auto func = [&, in, wt_V, scl, bias, out, BS, with_bias ](
+        at::Tensor t_i_scl = t_in.new_empty({0}, at::kFloat);
+        bool is_input_quantized = t_in.is_quantized();
+        if (is_input_quantized) {
+          t_i_scl = q_per_block_scales(t_in);
+          TPP_ASSERT(t_in.qscheme() == at::kPerBlockAffine, "Unsupported input qscheme\n");
+        }
+        auto i_scl = GetVLAPtr<float>(t_i_scl, {Nc});
+        auto func = [&, in, wt_V, scl, i_scl, bias, out, BS, with_bias, is_input_quantized ](
             int nc, int s1, int nk) __attribute__((always_inline)) {
           auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
           bool is_rem = (s1 + BSb > BS);
+          float i_scl_contig[BSb];
+          float *i_scl_ptr = is_input_quantized ? i_scl_contig : nullptr;
           if (!is_rem) {
             if (nc == 0) {
               if (with_bias) {
@@ -881,8 +890,14 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
                 this->zero_tpp(out[s1][nk]);
               }
             }
+            if (is_input_quantized) {
+              for (int i = 0; i < BSb; i++) {
+                i_scl_contig[i] = i_scl[s1+i][nc];
+              }
+            }
             brgemm_tpp(
                 in[s1][nc],
+                i_scl_ptr,
                 wt_V[nk][nc],
                 scl[nk][nc],
                 out[s1][nk],
@@ -900,8 +915,14 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
                 this->zero_tpp_rem(out[s1][nk]);
               }
             }
+            if (is_input_quantized) {
+              for (int i = 0; i < rem; i++) {
+                i_scl_contig[i] = i_scl[s1+i][nc];
+              }
+            }
             brgemm_tpp_rem(
                 in[s1][nc],
+                i_scl_ptr,
                 wt_V[nk][nc],
                 scl[nk][nc],
                 out[s1][nk],
@@ -928,7 +949,18 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     t_in = t_in.contiguous();
 
     auto BS = t_in.numel() / this->C;
-    auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
+    auto t_qin = t_in;
+    if (std::is_same<Tw, uint8_t>::value && std::is_same<Tin, int8_t>::value) {
+      TPP_ASSERT(t_wt_V.size(-1) == 8, "Unsupported vnni packing for weights\n");
+      if (t_in.is_quantized()) {
+        TORCH_CHECK(t_qin.is_contiguous());
+        TORCH_CHECK(t_qin.dtype() == at::kQInt8);
+      } else {
+        t_in = t_in.contiguous();
+        t_qin = quantize_int8sym(t_in, q_per_block_block_size(t_wt_V), -1, false);
+      }
+    }
+    auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
     {
       RECORD_OMP_TIME();
       auto gemm_loop = ThreadedLoop<3>(
@@ -964,6 +996,17 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     long BSb = gemms[0].BSb;
     auto loop_scheme = gemms[0].loop_scheme;
     std::vector<std::function<void(int, int, int)>> funcs;
+    auto t_qin = t_in;
+    if (std::is_same<Tw, uint8_t>::value && std::is_same<Tin, int8_t>::value) {
+      //TPP_ASSERT(t_wt_V[0].size(-1) == 8, "Unsupported vnni packing for weights\n");
+      if (t_in.is_quantized()) {
+        TORCH_CHECK(t_qin.is_contiguous());
+        TORCH_CHECK(t_qin.dtype() == at::kQInt8);
+      } else {
+        t_in = t_in.contiguous();
+        t_qin = quantize_int8sym(t_in, q_per_block_block_size(t_wt_V[0]), -1, false);
+      }
+    }
     for (int i = 0; i < n_gemms; i++) {
       auto& g = gemms[i];
       funcs.push_back(g.stepFunc(t_in, t_wt_V[i], t_bias[i], t_out[i], BS));
@@ -1442,8 +1485,13 @@ inline at::Tensor call_gemm_with_post_op(
   if (t_wt.is_quantized()) {
     if (t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
-        return dispatch_gemm<TppBlockedLinearW<Tin, uint8_t, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
+        if (t_wt.size(-1) == 2) {
+          return dispatch_gemm<TppBlockedLinearW<Tin, uint8_t, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+        } else {
+          return dispatch_gemm<TppBlockedLinearW<int8_t, uint8_t, Tout>, CB>(
+              cb, t_in, t_wt, t_bias);
+        }
       } else {
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }

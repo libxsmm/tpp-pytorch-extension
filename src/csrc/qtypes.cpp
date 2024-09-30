@@ -26,6 +26,7 @@
 
 static const int QINT8_EMU = env2int("QINT8_EMU", 0);
 static const int QINT8_BLOCK_SIZE = env2int("QINT8_BLOCK_SIZE", 256);
+static const int USE_MXFP4_INT8 = env2int("USE_MXFP4_INT8", 0);
 
 REGISTER_LOCAL_SCOPE(quant, "quant");
 
@@ -667,6 +668,12 @@ inline at::Tensor fix_vnni(at::Tensor t) {
 
 inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
   RECORD_SCOPE(quant, {t});
+  auto desired_K2 = 32L;
+  auto VBS = 2L;
+  if (USE_MXFP4_INT8) {
+    VBS = 8L;
+    desired_K2 = 8L;
+  }
   auto dim = t.dim();
   if (dim == 5) {
     auto sizes = t.sizes();
@@ -675,13 +682,19 @@ inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
     auto C2 = sizes[2];
     auto K2 = sizes[3];
     auto C3 = sizes[4];
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
+    if (K2 < desired_K2 && desired_K2 % K2 == 0) {
+      int RBS = desired_K2 / K2;
       TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
       t = t.view({K1 / RBS, RBS, C1, C2, K2, C3})
               .permute({0, 2, 3, 1, 4, 5})
               .contiguous()
               .view({K1 / RBS, C1, C2, RBS * K2, C3});
+    } else if (K2 > desired_K2 && K2 % desired_K2 == 0) {
+      int RBS = K2 / desired_K2;
+      t = t.view({K1, C1, C2, RBS, desired_K2, C3})
+              .permute({0, 3, 1, 2, 4, 5})
+              .contiguous()
+              .view({K1 * RBS, C1, C2, desired_K2, C3});
     }
   } else if (dim == 4) {
     auto sizes = t.sizes();
@@ -689,20 +702,48 @@ inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
     auto C1 = sizes[1];
     auto C2 = sizes[2];
     auto K2 = sizes[3];
-    TPP_ASSERT(C2 % 2 == 0, "Shape not compatible for VNNI2\n");
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
+    TPP_ASSERT(C2 % VBS == 0, "Shape not compatible for VNNI2\n");
+    if (K2 < desired_K2 && desired_K2 % K2 == 0) {
+      int RBS = desired_K2 / K2;
       TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
-      t = t.view({K1 / RBS, RBS, C1, C2 / 2, 2L, K2})
+      t = t.view({K1 / RBS, RBS, C1, C2 / VBS, VBS, K2})
               .permute({0, 2, 3, 1, 5, 4})
               .contiguous()
-              .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
+              .view({K1 / RBS, C1, C2 / VBS, RBS * K2, VBS});
+    } else if (K2 > desired_K2 && K2 % desired_K2 == 0) {
+      int RBS = K2 / desired_K2;
+      t = t.view({K1, C1, C2 / VBS, VBS, RBS, desired_K2})
+              .permute({0, 4, 1, 2, 5, 3})
+              .contiguous()
+              .view({K1 * RBS, C1, C2 / VBS, desired_K2, VBS});
     } else {
-      t = t.view({K1, C1, C2 / 2, 2L, K2})
+      t = t.view({K1, C1, C2 / VBS, VBS, K2})
               .permute({0, 1, 2, 4, 3})
               .contiguous()
-              .view({K1, C1, C2 / 2, K2, 2});
+              .view({K1, C1, C2 / VBS, K2, VBS});
     }
+  }
+  if (VBS == 8) {
+    auto sizes = t.sizes();
+    if (sizes[4] < 8) {
+      auto sizes = t.sizes();
+      auto K1 = sizes[0];
+      auto C1 = sizes[1];
+      auto C2 = sizes[2];
+      auto K2 = sizes[3];
+      auto C3 = sizes[4];
+      auto RBS = 8 / C3;
+      TPP_ASSERT(C2 % RBS == 0, "Shape not compatible for VNNI8\n");
+      t = t.view({K1, C1, C2 / RBS, RBS, K2, C3})
+              .permute({0, 1, 2, 4, 3, 5})
+              .contiguous()
+              .view({K1, C1, C2 / RBS, K2, RBS * C3});
+    }
+    sizes = t.sizes();
+    auto new_sizes = sizes.vec();
+    new_sizes.push_back(4);
+    new_sizes[4] = 2;
+    t = t.view(new_sizes).permute({0, 1, 2, 3, 5, 4}).contiguous().view(sizes);
   }
   auto ret = quantize_mxfp4(t, 32, 2, true);
   return ret;
