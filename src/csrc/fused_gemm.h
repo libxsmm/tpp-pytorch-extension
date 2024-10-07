@@ -41,13 +41,15 @@ class TppFlatLinearBase {
  public:
   using Tin = T;
   using Tout = TOUT;
+  using Tbias =
+      typename std::conditional<std::is_same_v<Tin, int8_t>, Tout, Tin>::type;
 
  protected:
   static constexpr int nOutputShapes = 4;
   long Nc, Hc[2], Nk, Hk[2], Ncb[2], BS, BSb[2];
   bool weight_reuse, Atrans, Btrans;
   long C, K, aligned_K;
-  SCOPEIT_DECL(CpyBiasTPP<T, Tout>) copy_bias_tpp[2][2];
+  SCOPEIT_DECL(CpyBiasTPP<Tbias, Tout>) copy_bias_tpp[2][2];
   SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp[2][2];
 
   std::string loop_scheme;
@@ -91,7 +93,7 @@ class TppFlatLinearBase {
         if (Hk[k] == 0)
           continue;
         copy_bias_tpp[b][k] =
-            SCOPEIT((CpyBiasTPP<T, Tout>(BSb[b], Hk[k], K)), BIAS);
+            SCOPEIT((CpyBiasTPP<Tbias, Tout>(BSb[b], Hk[k], K)), BIAS);
         zero_tpp[b][k] = SCOPEIT(SetZeroTPP<Tout>(BSb[b], Hk[k], K), EW_ZERO);
       }
     }
@@ -285,6 +287,7 @@ class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
   using Tout = TOUT;
   using Tw = TW;
   using Base = TppFlatLinearBase<Tin, Tout>;
+  using Tbias = typename Base::Tbias;
   using Base::Atrans;
   using Base::BS;
   using Base::BSb;
@@ -380,7 +383,7 @@ class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
       at::Tensor& t_bias,
       at::Tensor& t_out,
       long BS) {
-    auto bias = GetVLAPtr<T>(t_bias, {1});
+    auto bias = GetVLAPtr<Tbias>(t_bias, {1});
     auto out = GetVLAPtr<Tout>(t_out, {K, 1});
     bool with_bias = (t_bias.numel() > 0);
     if (!t_wt.is_quantized()) {
@@ -627,13 +630,15 @@ class TppBlockedLinearWBase {
  public:
   using Tin = T;
   using Tout = TOUT;
+  using Tbias =
+      typename std::conditional<std::is_same_v<Tin, int8_t>, Tout, Tin>::type;
 
  protected:
   static constexpr int nOutputShapes = 2;
   long Nc, Hc, Nk, Hk, Ncb, BSb, rem;
   bool weight_reuse;
   long C, K;
-  SCOPEIT_DECL(CpyBiasTPP<T, Tout>) copy_bias_tpp, copy_bias_tpp_rem;
+  SCOPEIT_DECL(CpyBiasTPP<Tbias, Tout>) copy_bias_tpp, copy_bias_tpp_rem;
   SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp, zero_tpp_rem;
 
   std::string loop_scheme;
@@ -647,8 +652,8 @@ class TppBlockedLinearWBase {
     C = Nc * Hc;
     K = Nk * Hk;
 
-    copy_bias_tpp = SCOPEIT((CpyBiasTPP<T, Tout>(BSb, Hk, K)), BIAS);
-    copy_bias_tpp_rem = SCOPEIT((CpyBiasTPP<T, Tout>(rem, Hk, K)), BIAS);
+    copy_bias_tpp = SCOPEIT((CpyBiasTPP<Tbias, Tout>(BSb, Hk, K)), BIAS);
+    copy_bias_tpp_rem = SCOPEIT((CpyBiasTPP<Tbias, Tout>(rem, Hk, K)), BIAS);
     zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
     zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
   }
@@ -776,6 +781,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
   using Tout = TOUT;
   using Tw = TW;
   using Base = TppBlockedLinearWBase<Tin, Tout>;
+  using Tbias = typename Base::Tbias;
   using Base::BSb;
   using Base::C;
   using Base::Hc;
@@ -796,6 +802,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
   TppBlockedLinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias)
       : TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias) {
     int b_vnni = 1;
+    printf("Using class: %s\n", get_class_name<decltype(*this)>().c_str());
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
         b_vnni = t_wt.size(-1);
@@ -819,7 +826,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor& t_out,
       long BS) {
     auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-    auto bias = GetVLAPtr<T>(t_bias, {Hk});
+    auto bias = GetVLAPtr<Tbias>(t_bias, {Hk});
     auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
     bool with_bias = (t_bias.numel() > 0);
     if (!t_wt_V.is_quantized()) {
@@ -860,6 +867,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     } else {
       if (t_wt_V.qscheme() == at::kPerBlockMxFP) {
         // We are using kQUInt4x2 for MXFP4 and uint8_t for scale
+
         TPP_ASSERT((std::is_same_v<Tw, uint8_t>), "MXFP use uint8_t\n");
         auto quantizer = at::get_qtensorimpl(t_wt_V)->quantizer();
         auto mxfp_quantizer =
@@ -873,15 +881,16 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
         bool is_input_quantized = t_in.is_quantized();
         if (is_input_quantized) {
           t_i_scl = q_per_block_scales(t_in);
-          TPP_ASSERT(t_in.qscheme() == at::kPerBlockAffine, "Unsupported input qscheme\n");
+          TPP_ASSERT(
+              t_in.qscheme() == at::kPerBlockAffine,
+              "Unsupported input qscheme\n");
         }
         auto i_scl = GetVLAPtr<float>(t_i_scl, {Nc});
         auto func = [&, in, wt_V, scl, i_scl, bias, out, BS, with_bias, is_input_quantized ](
             int nc, int s1, int nk) __attribute__((always_inline)) {
           auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
           bool is_rem = (s1 + BSb > BS);
-          float i_scl_contig[BSb];
-          float *i_scl_ptr = is_input_quantized ? i_scl_contig : nullptr;
+          float* i_scl_ptr = nullptr;
           if (!is_rem) {
             if (nc == 0) {
               if (with_bias) {
@@ -891,9 +900,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
               }
             }
             if (is_input_quantized) {
-              for (int i = 0; i < BSb; i++) {
-                i_scl_contig[i] = i_scl[s1+i][nc];
-              }
+              i_scl_ptr = &i_scl[s1][nc];
             }
             brgemm_tpp(
                 in[s1][nc],
@@ -916,9 +923,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
               }
             }
             if (is_input_quantized) {
-              for (int i = 0; i < rem; i++) {
-                i_scl_contig[i] = i_scl[s1+i][nc];
-              }
+              i_scl_ptr = &i_scl[s1][nc];
             }
             brgemm_tpp_rem(
                 in[s1][nc],
@@ -951,13 +956,17 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     auto BS = t_in.numel() / this->C;
     auto t_qin = t_in;
     if (std::is_same<Tw, uint8_t>::value && std::is_same<Tin, int8_t>::value) {
-      TPP_ASSERT(t_wt_V.size(-1) == 8, "Unsupported vnni packing for weights\n");
+      TPP_ASSERT(
+          t_wt_V.size(-1) == 8, "Unsupported vnni packing for weights\n");
       if (t_in.is_quantized()) {
         TORCH_CHECK(t_qin.is_contiguous());
         TORCH_CHECK(t_qin.dtype() == at::kQInt8);
       } else {
         t_in = t_in.contiguous();
-        t_qin = quantize_int8sym(t_in, q_per_block_block_size(t_wt_V), -1, false);
+        t_qin =
+            quantize_int8sym(t_in, q_per_block_block_size(t_wt_V), -1, false);
+        auto scl = q_per_block_scales(t_qin);
+        scl.mul_(6.0 / 127.0);
       }
     }
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
@@ -998,18 +1007,22 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
     std::vector<std::function<void(int, int, int)>> funcs;
     auto t_qin = t_in;
     if (std::is_same<Tw, uint8_t>::value && std::is_same<Tin, int8_t>::value) {
-      //TPP_ASSERT(t_wt_V[0].size(-1) == 8, "Unsupported vnni packing for weights\n");
+      // TPP_ASSERT(t_wt_V[0].size(-1) == 8, "Unsupported vnni packing for
+      // weights\n");
       if (t_in.is_quantized()) {
         TORCH_CHECK(t_qin.is_contiguous());
         TORCH_CHECK(t_qin.dtype() == at::kQInt8);
       } else {
         t_in = t_in.contiguous();
-        t_qin = quantize_int8sym(t_in, q_per_block_block_size(t_wt_V[0]), -1, false);
+        t_qin = quantize_int8sym(
+            t_in, q_per_block_block_size(t_wt_V[0]), -1, false);
+        auto scl = q_per_block_scales(t_qin);
+        scl.mul_(6.0 / 127.0);
       }
     }
     for (int i = 0; i < n_gemms; i++) {
       auto& g = gemms[i];
-      funcs.push_back(g.stepFunc(t_in, t_wt_V[i], t_bias[i], t_out[i], BS));
+      funcs.push_back(g.stepFunc(t_qin, t_wt_V[i], t_bias[i], t_out[i], BS));
       totalN += g.Nk;
       TPP_ASSERT(
           g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
@@ -1059,6 +1072,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
   using Tout = TOUT;
   using Tw = TW;
   using Base = TppBlockedLinearWBase<Tin, Tout>;
+  using Tbias = typename Base::Tbias;
   using Base::BSb;
   using Base::C;
   using Base::Hc;
@@ -1133,7 +1147,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       at::Tensor& t_out,
       long BS) {
     auto in = GetVLAPtr<BrTin>(t_in, {Nc, Hc});
-    auto bias = GetVLAPtr<T>(t_bias, {Hk});
+    auto bias = GetVLAPtr<Tbias>(t_bias, {Hk});
     auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
     bool with_bias = (t_bias.numel() > 0);
     TPP_ASSERT(

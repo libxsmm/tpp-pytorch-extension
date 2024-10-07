@@ -2377,8 +2377,10 @@ template <
     typename Tin,
     typename Tout,
     typename Tw = Tin,
-    typename Tcomp =
-        typename std::conditional<std::is_same_v<Tout, int> || std::is_same_v<Tin, int8_t>, int, float>::type>
+    typename Tcomp = typename std::conditional<
+        std::is_same_v<Tout, int> || std::is_same_v<Tin, int8_t>,
+        int,
+        float>::type>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}

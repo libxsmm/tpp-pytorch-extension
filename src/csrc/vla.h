@@ -151,6 +151,9 @@ inline T* pt_get_data_ptr(at::Tensor t) {
   }
 #ifdef DEBUG_TRACE_TPP
   if (c10::CppTypeToScalarType<T>::value != t.dtype()) {
+    if (t.is_quantized() &&
+        (std::is_same<T, uint8_t>::value || std::is_same<T, int8_t>::value))
+      return t.data_ptr<T>();
     std::cout << "Warning: Tensor dtype " << t.dtype()
               << " is not same as requested template type "
               << c10::CppTypeToScalarType<T>::value << std::endl;

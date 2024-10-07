@@ -180,7 +180,7 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout>, impl> {
 
   void operator()(
       Tin* A,
-      float *A_scales,
+      float* A_scales,
       Tin* B,
       Tin* B_scales,
       Tout* C,
@@ -251,7 +251,7 @@ class ScopedTPP<tpp::BrgemmTPP<Tin, Tout, Tw>, impl> {
 
   void operator()(
       Tin* A,
-      float *A_scales,
+      float* A_scales,
       Tw* B,
       Tw* B_scales,
       Tout* C,

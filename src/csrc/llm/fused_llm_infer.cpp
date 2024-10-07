@@ -516,8 +516,13 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
   if (t_wt.is_quantized()) {
     if (t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
-        return fused_qkv_gemm_spl<TppBlockedLinearW<Tin, uint8_t, Tout>>(
-            t_in, t_wts, t_bias);
+        if (t_wt.size(-1) == 2) {
+          return fused_qkv_gemm_spl<TppBlockedLinearW<Tin, uint8_t, Tout>>(
+              t_in, t_wts, t_bias);
+        } else {
+          return fused_qkv_gemm_spl<TppBlockedLinearW<int8_t, uint8_t, Tout>>(
+              t_in, t_wts, t_bias);
+        }
       } else {
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
