@@ -298,7 +298,7 @@ inline Tensor new_qtensor(Tensor qval, QuantizerPtr quantizer) {
   auto options = qval.options().dtype(quantizer->scalar_type());
   auto memory_format =
       options.memory_format_opt().value_or(MemoryFormat::Contiguous);
-  auto device = options.device();
+  // auto device = options.device();
 
   at::DispatchKey tensorDispatchKey = options.computeDispatchKey();
 

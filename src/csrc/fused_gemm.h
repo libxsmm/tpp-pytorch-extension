@@ -149,7 +149,7 @@ class TppFlatLinearBase {
       long _Hc,
       long _Hk) {
     long Nc, Nk, Hc[2], Hk[2], Ncb, BSb[2];
-    auto in_sizes = t_in.sizes();
+    // auto in_sizes = t_in.sizes();
     auto wt_sizes = t_wt.sizes();
     // auto in_dim = t_in.dim();
     TORCH_CHECK(t_in.is_contiguous() || t_in.t().is_contiguous());
@@ -1262,7 +1262,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     long totalN = 0;
     auto BS = t_in.numel() / gemms[0].C;
     long Nc = gemms[0].Nc;
-    long Hc = gemms[0].Hc;
+    // long Hc = gemms[0].Hc;
     long Ncb = gemms[0].Ncb;
     long BSb = gemms[0].BSb;
     long block_size = gemms[0].block_size;
