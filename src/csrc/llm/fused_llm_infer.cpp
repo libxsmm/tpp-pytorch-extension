@@ -50,6 +50,7 @@ static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
+static const int USE_MXFP4_FT = env2int("USE_MXFP4_FT", 0);
 static const int USE_QINT8 = env2int("USE_QINT8", 0);
 static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
 
@@ -443,6 +444,8 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   if (dim < 5) {
     if (USE_QINT8_FT == 1)
       return remap_and_quantize_qint8(t);
+    else if (USE_MXFP4_FT == 1)
+      return remap_and_quantize_mxfp4(t);
     else
       return t;
   }
@@ -480,6 +483,8 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
 #endif
   if (USE_QINT8_FT == 1)
     return remap_and_quantize_qint8(t_new);
+  else if (USE_MXFP4_FT == 1)
+    return remap_and_quantize_mxfp4(t_new);
   else
     return t_new;
 }
