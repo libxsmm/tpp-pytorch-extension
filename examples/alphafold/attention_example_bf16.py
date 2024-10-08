@@ -100,25 +100,25 @@ class GatingAttention(nn.Module):
 
 
 set = 1
-
+length = 764
 if set == 1:
-    B, S, HS = 512, 764, 256
+    B, S, HS = 512, length, 256
     N, H = 8, 32
 
 if set == 2:
-    B, S, HS = 764, 764, 64
+    B, S, HS = length, length, 64
     N, H = 4, 16
 
 if set == 3:
-    B, S, HS = 320, 764, 64
+    B, S, HS = 320, length, 64
     N, H = 8, 8
 
 if set == 4:
-    B, S, HS = 764, 764, 128
+    B, S, HS = length, length, 128
     N, H = 4, 32
 
 if set == 5:
-    B, S, HS = 764, 512, 256
+    B, S, HS = length, 512, 256
     N, H = 8, 32
 
 
@@ -186,8 +186,6 @@ Y1 = net1(q_data, m_data, bias, nonbatched_bias)
 Y2 = net2(q_data.type(torch.bfloat16), m_data, bias, nonbatched_bias)
 r = Y1.max() - Y1.min()
 
-# print(Y1[3,3,10:15])
-# print(Y2[3,3,10:15])
 print(
     "    Foward pass check: ",
     ((torch.abs(Y1 - Y2.type(torch.float32)) / r < 0.25).sum() == B * S * HS).item(),
@@ -202,7 +200,7 @@ print(
 forward1 = 0  # variables to store time values
 forward2 = 0
 
-N = 5  # Number of iterations
+N = 10  # Number of iterations
 for _ in range(N):  # MKLDNN PyTorch layer Forward and Backward pass timing
     start = time.time()
     Y1 = net1(q_data, m_data, bias, nonbatched_bias)
