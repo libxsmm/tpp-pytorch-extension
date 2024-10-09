@@ -4637,8 +4637,10 @@ class LayerNormFwdTPP {
       v = v * c;
       v = LIBXSMM_MAX(v - m * m, 0.0f);
       v = 1.0f / ((float)sqrt(v + eps));
-      mean[s2] = m;
-      var[s2] = v;
+      if (mean)
+        mean[s2] = m;
+      if (var)
+        var[s2] = v;
       float s = v;
       float b = -1.0 * v * m;
       for (s1 = 0; s1 < S1; s1++) {
