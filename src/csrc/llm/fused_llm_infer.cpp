@@ -333,9 +333,8 @@ inline void lyr_norm(
     at::Tensor t_out,
     float eps) {
   RECORD_SCOPE(lnorm, {t_in, t_gamma, t_beta});
-  auto in_sizes = t_in.sizes();
-  auto BS = in_sizes[0] * in_sizes[1];
-  auto K = in_sizes[2];
+  auto K = t_in.size(-1);
+  auto BS = t_in.numel() / K;
 
   auto in = GetVLAPtr<T>(t_in, {K});
   auto gamma = GetVLAPtr<LT>(t_gamma);
