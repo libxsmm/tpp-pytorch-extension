@@ -169,12 +169,25 @@ auto a_brgemm_tpp = SCOPEITGEMM(
         T,
         T>(A_BLOCKSIZE, A_BLOCKSIZE, H_t, 0, 0, H_t, S_t, S_t, 0.0, 0, 1)));
 
+// auto a_brgemm2_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
+//     A_BLOCKSIZE,
+//     H_t,
+//     A_BLOCKSIZE,
+//     0,
+//     0,
+//     S_t,
+//     N_t* H_t,
+//     H_t,
+//     1.0,
+//     0,
+//     1)));
+
 auto a_brgemm2_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
     A_BLOCKSIZE,
     H_t,
     A_BLOCKSIZE,
-    0,
-    0,
+    A_BLOCKSIZE,
+    A_BLOCKSIZE*N_t*H_t,
     S_t,
     N_t* H_t,
     H_t,
@@ -188,7 +201,7 @@ auto a_brgemm2_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
 //     SCOPEIT((AddTPP<T, T>(A_BLOCKSIZE, A_BLOCKSIZE, ldc, ldc)), BIAS);
 
 auto a_add_sfmask_tpp =
-    SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t - Sp_t, ldc), BIAS);
+    SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t - Sp_t, S_t), BIAS);
 auto a_softmax_tpp =
     SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, S_t)), SOFTMAX);
 
@@ -203,9 +216,15 @@ auto a_softmax_tpp =
 // 764, 8, 32] */
 
 auto a_addbias2_tpp =
-    SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t, ldc), BIAS);
+    SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t, S_t), BIAS);
 auto a_add_nbbias2_tpp =
-    SCOPEIT((AddTPP<T, T>(A_BLOCKSIZE, S_t, ldc, ldc)), BIAS);
+    SCOPEIT((AddTPP<T, T>(A_BLOCKSIZE, S_t, S_t, S_t)), BIAS);
+
+// auto a_add_sfmask2_tpp =
+//     SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t - Sp_t, S_t), BIAS);
+// auto a_softmax2_tpp =
+//     SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, A_BLOCKSIZE)), SOFTMAX);
+
 {
   RECORD_SCOPE(alpha_a_gemm, {q, k, bias});
   {
@@ -226,6 +245,13 @@ auto a_add_nbbias2_tpp =
             //       &nonbatched_bias_a[0][n][j1][j2],
             //       &tmp_logits[0][j2],
             //       &tmp_logits[0][j2]);
+            
+            // if ((S_t != Sp_t) && j2 == (S_t - A_BLOCKSIZE)){
+            //   a_add_sfmask_tpp(&sfmask_a[0][0], &tmp_logits[0][Sp_t]);
+              // a_softmax2_tpp(1, &tmp_logits[0][j2], &tmp_logits[0][j2]);
+            // } else {
+              // a_softmax2_tpp(1, &tmp_logits[0][j2], &tmp_logits[0][j2]);
+            // }
           }
           a_addbias2_tpp(&bias_a[i][0], &tmp_logits[0][0]);
           if(flag)
@@ -239,9 +265,10 @@ auto a_add_nbbias2_tpp =
           }
 
           a_zero_tpp(&tmp_qv[0]);
-          for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-            a_brgemm2_tpp(&tmp_logits[0][j2], &v_a[i][j2][n][0], &tmp_qv[0], 1);
-          }
+          // for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
+          //   a_brgemm2_tpp(&tmp_logits[0][j2], &v_a[i][j2][n][0], &tmp_qv[0], 1);
+          // }
+          a_brgemm2_tpp(&tmp_logits[0][0], &v_a[i][0][n][0], &tmp_qv[0], S_t/A_BLOCKSIZE);
           a_cpy2_tpp(&tmp_qv[0], &weighted_avg_a[i][j1][n][0]);
         }
       }

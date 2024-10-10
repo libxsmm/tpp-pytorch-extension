@@ -146,24 +146,24 @@ class Net2(nn.Module):  # Second network containing optimized attention layer
         return x
 
 
-net1 = Net1()
-net2 = Net2()
+net1 = Net1().to(torch.bfloat16)
+net2 = Net2().to(torch.bfloat16)
 
-torch.manual_seed(11)  # Set random seed for reproducibility
+torch.manual_seed(10)  # Set random seed for reproducibility
 
-q_data = torch.randn(B, S, HS, requires_grad=False)
-m_data = torch.randn(B, S, HS, requires_grad=False)
-bias = torch.randn(B, 1, 1, S, requires_grad=False)
-nonbatched_bias = torch.randn(N, S, S, requires_grad=False)
+q_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
+m_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
+bias = torch.randn(B, 1, 1, S, requires_grad=False).to(torch.bfloat16)
+nonbatched_bias = torch.randn(N, S, S, requires_grad=False).to(torch.bfloat16)
 # nonbatched_bias = torch.Tensor()
 
-query_w = torch.randn(HS, N, H)
-key_w = torch.randn(HS, N, H)
-value_w = torch.randn(HS, N, H)
-gating_w = torch.randn(HS, N, H)
-gating_b = torch.randn(N, H)
-output_w = torch.randn(N, H, HS)
-output_b = torch.randn(HS)
+query_w = torch.randn(HS, N, H).to(torch.bfloat16)
+key_w = torch.randn(HS, N, H).to(torch.bfloat16)
+value_w = torch.randn(HS, N, H).to(torch.bfloat16)
+gating_w = torch.randn(HS, N, H).to(torch.bfloat16)
+gating_b = torch.randn(N, H).to(torch.bfloat16)
+output_w = torch.randn(N, H, HS).to(torch.bfloat16)
+output_b = torch.randn(HS).to(torch.bfloat16)
 
 net1.attention.query_w.data = query_w
 net1.attention.key_w.data = key_w
@@ -183,17 +183,17 @@ net2.attention.output_b.data = output_b
 
 
 Y1 = net1(q_data, m_data, bias, nonbatched_bias)
-Y2 = net2(q_data.type(torch.bfloat16), m_data, bias, nonbatched_bias)
-r = Y1.max() - Y1.min()
+Y2 = net2(q_data, m_data, bias, nonbatched_bias)
+r = Y1.max().to(torch.float32) - Y1.min().to(torch.float32)
 
 print(
     "    Foward pass check: ",
-    ((torch.abs(Y1 - Y2.type(torch.float32)) / r < 0.25).sum() == B * S * HS).item(),
+    ((torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum() == B * S * HS).item(),
 )
 # print("diff: ", r)
 print(
     " Number of errors: ",
-    B * S * HS - (torch.abs(Y1 - Y2.type(torch.float32)) / r < 0.25).sum(),
+    B * S * HS - (torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum(),
 )
 
 
@@ -209,7 +209,8 @@ for _ in range(N):  # MKLDNN PyTorch layer Forward and Backward pass timing
 tpp_pytorch_extension.reset_debug_timers()
 for _ in range(N):  # Optimized PyTorch layer Forward and Backward pass timing
     start = time.time()
-    Y2 = net2(q_data.type(torch.bfloat16), m_data, bias, nonbatched_bias)
+    Y2 = net2(q_data, m_data, bias, nonbatched_bias)
+    # Y2 = net2(q_data.type(torch.bfloat16), m_data, bias, nonbatched_bias)
     forward2 += time.time() - start
 tpp_pytorch_extension.print_debug_timers()
 

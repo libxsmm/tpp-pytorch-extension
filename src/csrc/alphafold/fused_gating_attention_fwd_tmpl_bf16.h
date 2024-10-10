@@ -206,10 +206,15 @@ auto a_brgemm_tpp = SCOPEITGEMM(
         T,
         float>(A_BLOCKSIZE, A_BLOCKSIZE, H_t, 1, 1, H_t, S_t, S_t, 0.0, 0, 1)));
 
+// auto a_brgemm2_tpp = SCOPEITGEMM(
+//     (BrgemmTPP<
+//         T,
+//         T>(A_BLOCKSIZE, H_t, A_BLOCKSIZE, 1, 1, S_t, N_t*H_t, H_t, 1.0, 0, 1)));
+
 auto a_brgemm2_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(A_BLOCKSIZE, H_t, A_BLOCKSIZE, 1, 1, S_t, N_t*H_t, H_t, 1.0, 0, 1)));
+        T>(A_BLOCKSIZE, H_t, A_BLOCKSIZE, A_BLOCKSIZE, A_BLOCKSIZE*N_t*H_t, S_t, N_t*H_t, H_t, 1.0, 0, 1)));
 
 // auto a_addbias_tpp =
 //     SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, A_BLOCKSIZE, S_t), BIAS);
@@ -248,6 +253,9 @@ auto a_addbias2_tpp =
 auto a_add_nbbias2_tpp =
     SCOPEIT((AddTPP<float, float>(A_BLOCKSIZE, S_t, S_t, S_t)), BIAS);
 
+// auto a_scale_tpp =
+//     SCOPEIT((ScaleTPP<float, float>(A_BLOCKSIZE * S_t)), EW_SCL);
+
 {
   RECORD_SCOPE(alpha_a_gemm, {q, k, bias});
   {
@@ -273,7 +281,7 @@ auto a_add_nbbias2_tpp =
             // }
           }
           a_brgemm_tpp.release();
-
+          // a_scale_tpp(&tmp_logits[0][0], &tmp_logits[0][0], alpha);
           a_addbias2_tpp(&bias_a[i][0], &tmp_logits[0][0]);
           if(flag)
             a_add_nbbias2_tpp(&nonbatched_bias_a[0][n][j1][0], &tmp_logits[0][0], &tmp_logits[0][0]);
@@ -287,11 +295,12 @@ auto a_add_nbbias2_tpp =
           }
 
           a_zero_tpp(&tmp_qv[0]);
-          a_brgemm2_tpp.config();
-          for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-            a_brgemm2_tpp(&tmp_logits_bf16[0][j2], &v_a[i][j2*N_t*H_t + n*H_t*2], &tmp_qv[0], 1, true);
-          }
-          a_brgemm2_tpp.release();
+          // a_brgemm2_tpp.config();
+          // for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
+          //   a_brgemm2_tpp(&tmp_logits_bf16[0][j2], &v_a[i][j2*N_t*H_t + n*H_t*2], &tmp_qv[0], 1, true);
+          // }
+          a_brgemm2_tpp(&tmp_logits_bf16[0][0], &v_a[i][n*H_t*2], &tmp_qv[0], S_t/A_BLOCKSIZE, false);
+          // a_brgemm2_tpp.release();
           a_cpy2_tpp(&tmp_qv[0], &weighted_avg_a[i][j1][n][0]);
         }
       }
