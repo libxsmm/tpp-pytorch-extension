@@ -103,24 +103,28 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 // (1.0/sqrt(key_dim))) ;     /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
 // 32] */
 {
-  q_brgemm_tpp.config();
   RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
   {
     qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        float tmp[QKV_BLOCKSIZE][N_t][H_t];
-        zero_tpp(&tmp[0][0][0]);
-        q_brgemm_tpp(
-            &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0][0][0], 1);
-        scale_tpp(&tmp[0][0][0], &tmp[0][0][0], alpha);
-        q_convert_tpp(&tmp[0][0][0], &q_a[i][j][0][0]);
+// #pragma omp parallel for collapse(2)
+  #pragma omp parallel
+    {
+      q_brgemm_tpp.config();
+      #pragma omp for collapse(2)
+      for (int i = 0; i < B_t; i++) {
+        for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
+          float tmp[QKV_BLOCKSIZE][N_t][H_t];
+          zero_tpp(&tmp[0][0][0]);
+          q_brgemm_tpp(
+              &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0][0][0], 1, true);
+          scale_tpp(&tmp[0][0][0], &tmp[0][0][0], alpha);
+          q_convert_tpp(&tmp[0][0][0], &q_a[i][j][0][0]);
+        }
       }
+      q_brgemm_tpp.release();
     }
   }
-  q_brgemm_tpp.release();
 }
 
 auto k_trans_tpp = SCOPEIT(
@@ -151,20 +155,25 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
         T>(QKV_BLOCKSIZE, N_t* H_t, HS_t, 1, 1, lda, ldb, ldc, 0.0, 0, 1)));
 // auto k = at::einsum("bka,ahc->bkhc", {m_data, key_w});
 // /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8, 32] */
-kv_brgemm_tpp.config();
 {
   RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
   {
     qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        T tmp[QKV_BLOCKSIZE*N_t*H_t];
-        kv_brgemm_tpp(
-            &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1);
-        k_trans_tpp(&tmp[0], &k_a[i][2*j]);    // B, S, N, H ----> B, N, H, S (FP32)  ---> B, N, H/2, S, 2
+// #pragma omp parallel for collapse(2)
+  #pragma omp parallel
+    {
+      kv_brgemm_tpp.config();
+      #pragma omp for collapse(2)
+      for (int i = 0; i < B_t; i++) {
+        for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
+          T tmp[QKV_BLOCKSIZE*N_t*H_t];
+          kv_brgemm_tpp(
+              &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          k_trans_tpp(&tmp[0], &k_a[i][2*j]);    // B, S, N, H ----> B, N, H, S (FP32)  ---> B, N, H/2, S, 2
+        }
       }
+      kv_brgemm_tpp.release();
     }
   }
 }
@@ -177,20 +186,25 @@ kv_brgemm_tpp.config();
   {
     qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        // kv_brgemm_tpp(
-        //     &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &v_a[i][j][0][0], 1);
-        T tmp[QKV_BLOCKSIZE*N_t*H_t];
-        kv_brgemm_tpp(
-            &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1);
-        v_vnni_trans_tpp(&tmp[0], &v_a[i][j*N_t*H_t]);
+// #pragma omp parallel for collapse(2)
+    #pragma omp parallel
+    {
+      kv_brgemm_tpp.config();
+      #pragma omp for collapse(2)
+      for (int i = 0; i < B_t; i++) {
+        for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
+          // kv_brgemm_tpp(
+          //     &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &v_a[i][j][0][0], 1);
+          T tmp[QKV_BLOCKSIZE*N_t*H_t];
+          kv_brgemm_tpp(
+              &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          v_vnni_trans_tpp(&tmp[0], &v_a[i][j*N_t*H_t]);
+        }
       }
+      kv_brgemm_tpp.release();
     }
   }
 }
-kv_brgemm_tpp.release();
 
 lda = H_t;
 ldb = A_BLOCKSIZE;
@@ -271,7 +285,7 @@ auto a_add_nbbias2_tpp =
 
           a_brgemm_tpp.config();
           for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-            a_brgemm_tpp(&tmp_qv[0], &k_a[i][n*H_t*S_t + 2*j2], &tmp_logits[0][j2], 1);
+            a_brgemm_tpp(&tmp_qv[0], &k_a[i][n*H_t*S_t + 2*j2], &tmp_logits[0][j2], 1, true);
             // a_addbias_tpp(&bias_a[i][j2], &tmp_logits[0][j2]);
             // if (flag) {
             //   a_add_nbbias_tpp(
@@ -281,7 +295,6 @@ auto a_add_nbbias2_tpp =
             // }
           }
           a_brgemm_tpp.release();
-          // a_scale_tpp(&tmp_logits[0][0], &tmp_logits[0][0], alpha);
           a_addbias2_tpp(&bias_a[i][0], &tmp_logits[0][0]);
           if(flag)
             a_add_nbbias2_tpp(&nonbatched_bias_a[0][n][j1][0], &tmp_logits[0][0], &tmp_logits[0][0]);
@@ -295,12 +308,10 @@ auto a_add_nbbias2_tpp =
           }
 
           a_zero_tpp(&tmp_qv[0]);
-          // a_brgemm2_tpp.config();
           // for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-          //   a_brgemm2_tpp(&tmp_logits_bf16[0][j2], &v_a[i][j2*N_t*H_t + n*H_t*2], &tmp_qv[0], 1, true);
+            // a_brgemm2_tpp(&tmp_logits_bf16[0][j2], &v_a[i][j2*N_t*H_t + n*H_t*2], &tmp_qv[0], 1, true);
           // }
           a_brgemm2_tpp(&tmp_logits_bf16[0][0], &v_a[i][n*H_t*2], &tmp_qv[0], S_t/A_BLOCKSIZE, false);
-          // a_brgemm2_tpp.release();
           a_cpy2_tpp(&tmp_qv[0], &weighted_avg_a[i][j1][n][0]);
         }
       }
@@ -401,34 +412,38 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 // at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}), output_b);
 // /* [512, 764, 256]  = [512, 764, 8, 32] * [8, 32, 256] + [256] */
 {
-  c_brgemm_tpp.config();
   RECORD_SCOPE(alpha_c_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
     qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-        float tmp[C_BLOCKSIZE * N_t * H_t]; // Should be in float for bf16
-        float tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
-        T tmp_bf16[C_BLOCKSIZE * N_t * H_t];
+// #pragma omp parallel for collapse(2)
+  #pragma omp parallel
+    {
+      c_brgemm_tpp.config();
+      #pragma omp for collapse(2)
+      for (int i = 0; i < B_t; i++) {
+        for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
+          float tmp[C_BLOCKSIZE * N_t * H_t]; // Should be in float for bf16
+          float tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
+          T tmp_bf16[C_BLOCKSIZE * N_t * H_t];
 
-        c_brgemm_tpp(&q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1);
-        c_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
+          c_brgemm_tpp(&q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          c_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
 
-        c_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[0]);
+          c_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[0]);
 
-        c_convert_tpp(&tmp_gate_values[0], &tmp_bf16[0]);
-        c_mul_tpp(&tmp_bf16[0], &weighted_avg_a[i][j][0][0], &tmp_bf16[0]);
+          c_convert_tpp(&tmp_gate_values[0], &tmp_bf16[0]);
+          c_mul_tpp(&tmp_bf16[0], &weighted_avg_a[i][j][0][0], &tmp_bf16[0]);
 
-        out_gemm_tpp(&tmp_bf16[0], &output_w_vnni_a[0][0][0], &tmp[0], 1);
-        out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
-        out_convert_tpp(&tmp[0], &output_a[i][j][0]);
+          out_gemm_tpp(&tmp_bf16[0], &output_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
+          out_convert_tpp(&tmp[0], &output_a[i][j][0]);
+        }
       }
+      c_brgemm_tpp.release();
     }
   }
-  c_brgemm_tpp.release();
 }
 
 if (S_t != Sp_t) {

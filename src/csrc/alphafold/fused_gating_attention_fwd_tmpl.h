@@ -245,13 +245,6 @@ auto a_add_nbbias2_tpp =
             //       &nonbatched_bias_a[0][n][j1][j2],
             //       &tmp_logits[0][j2],
             //       &tmp_logits[0][j2]);
-            
-            // if ((S_t != Sp_t) && j2 == (S_t - A_BLOCKSIZE)){
-            //   a_add_sfmask_tpp(&sfmask_a[0][0], &tmp_logits[0][Sp_t]);
-              // a_softmax2_tpp(1, &tmp_logits[0][j2], &tmp_logits[0][j2]);
-            // } else {
-              // a_softmax2_tpp(1, &tmp_logits[0][j2], &tmp_logits[0][j2]);
-            // }
           }
           a_addbias2_tpp(&bias_a[i][0], &tmp_logits[0][0]);
           if(flag)
