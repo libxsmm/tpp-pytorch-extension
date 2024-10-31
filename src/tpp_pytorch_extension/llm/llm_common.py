@@ -278,7 +278,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         if self.token_latency == True:
             self.token_latencies = []
 
-        print("inp=",kwargs["input_ids"].shape)
+        # print("inp=",kwargs["input_ids"].shape)
         output = super().generate(*args, **kwargs)
         if self.token_latency == True:
             self.token_latencies.append(time.time())

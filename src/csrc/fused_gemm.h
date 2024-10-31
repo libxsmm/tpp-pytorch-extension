@@ -345,16 +345,16 @@ class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
           int b_trans = Btrans ? 1 : 0;
           int uh = Ncb[0];
 
-          printf(
-              "MNK=%ld %ld %ld, str= %ld %ld, ld= %ld %ld %ld\n",
-              BSb[b],
-              Hk[k],
-              Hc[c],
-              str_a,
-              str_b,
-              lda,
-              ldb,
-              ldc);
+          // printf(
+          //     "MNK=%ld %ld %ld, str= %ld %ld, ld= %ld %ld %ld\n",
+          //     BSb[b],
+          //     Hk[k],
+          //     Hc[c],
+          //     str_a,
+          //     str_b,
+          //     lda,
+          //     ldb,
+          //     ldc);
           brgemm_tpp[b][k][c] = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
               BSb[b],
               Hk[k],
@@ -802,7 +802,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
   TppBlockedLinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias)
       : TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias) {
     int b_vnni = 1;
-    printf("Using class: %s\n", get_class_name<decltype(*this)>().c_str());
+    // printf("Using class: %s\n", get_class_name<decltype(*this)>().c_str());
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
         b_vnni = t_wt.size(-1);
