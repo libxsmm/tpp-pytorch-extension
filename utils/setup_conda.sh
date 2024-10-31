@@ -13,7 +13,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 CONDA_INSTALL_DIR=`realpath ./miniforge3`
-ENV_NAME=pt231
+ENV_NAME=pt251
 
 while (( "$#" )); do
   case "$1" in
@@ -54,7 +54,7 @@ source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 if [ $(uname -m) == "x86_64" ] ; then
   conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
   conda install -y gperftools -c conda-forge
-  conda install -y pytorch==2.3.1 torchvision torchaudio cpuonly -c pytorch
+  conda install -y pytorch==2.5.1 torchvision torchaudio cpuonly -c pytorch
 elif [ $(uname -m) == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
 conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
@@ -77,7 +77,7 @@ if [ $(uname -m) == "x86_64" ] ; then
   pip install intel-openmp
   # Need to downgrad mkl from 2024.1 due to undefined symbol error
   # conda install -y mkl=2024.0 -c intel
-  pip install mkl==2024.0
+  #pip install mkl==2024.0
 fi
 
 # ENV_FN_NAME=env_${ENV_NAME}.sh
@@ -87,7 +87,7 @@ cat <<EOF > ${ENV_FN_NAME}
 #!/bin/bash
 
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
-torch_ccl_path=\$(python -c "import torch; import oneccl_bindings_for_pytorch; import os;  print(os.path.abspath(os.path.dirname(oneccl_bindings_for_pytorch.__file__)))" 2> /dev/null)
+torch_ccl_path=\$(python -c "import torch; import oneccl_bindings_for_pytorch; import os;  print(os.path.abspath(os.path.dirname(oneccl_bindings_for_pytorch.__file__)))" 2> /dev/null | grep oneccl_bind_pt )
 if test -f \$torch_ccl_path/env/setvars.sh ; then
   source \$torch_ccl_path/env/setvars.sh
 fi
