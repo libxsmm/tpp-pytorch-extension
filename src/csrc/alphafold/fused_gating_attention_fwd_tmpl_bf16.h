@@ -271,7 +271,7 @@ auto a_add_nbbias2_tpp =
 //     SCOPEIT((ScaleTPP<float, float>(A_BLOCKSIZE * S_t)), EW_SCL);
 
 {
-  RECORD_SCOPE(alpha_a_gemm, {q, k, bias});
+  RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(3)
@@ -319,59 +319,6 @@ auto a_add_nbbias2_tpp =
   }
 }
 
-// {
-//   RECORD_SCOPE(alpha_a_gemm, {q, k, bias});
-//   {
-//     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// #pragma omp parallel for collapse(2)
-//     for (int i = 0; i < B_t; i++) {
-//       for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-//         T tmp_qv[A_BLOCKSIZE * H_t];
-//         T tmp_k[A_BLOCKSIZE * H_t];
-//         T tmp_logits_bf16[A_BLOCKSIZE][S_t];
-//         float tmp_logits[A_BLOCKSIZE][S_t]; // Convert this into float
-
-//         for (int k = 0; k < N_t; k++) {
-//           a_cpy_tpp(&q_a[i][j1][k][0], &tmp_qv[0]);
-
-//           a_brgemm_tpp.config();
-//           for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-//             a_trans_tpp(
-//                 &k_a[i][j2][k][0],
-//                 &tmp_k[0]); // [A_BLOCKSIZE, 8, 32]  ----> [32, A_BLOCKSIZE]
-
-//             a_brgemm_tpp(&tmp_qv[0], &tmp_k[0], &tmp_logits[0][j2], 1, true);
-//             a_addbias_tpp(&bias_a[i][j2], &tmp_logits[0][j2]);
-//             if (flag) {
-//               a_add_nbbias_tpp(
-//                   &nonbatched_bias_a[0][k][j1][j2],
-//                   &tmp_logits[0][j2],
-//                   &tmp_logits[0][j2]);
-//             }
-//           }
-//           a_brgemm_tpp.release();
-//           a_brgemm2_tpp.config();
-//           if (S_t == Sp_t) {
-//             a_softmax_tpp(1, &tmp_logits[0][0], &tmp_logits_bf16[0][0]);
-//             // Have a new tmp for tmp_logits in bf16
-//           } else {
-//             a_add_sfmask_tpp(&sfmask_a[0][0], &tmp_logits[0][Sp_t]);
-//             a_softmax_tpp(1, &tmp_logits[0][0], &tmp_logits_bf16[0][0]);
-//           }
-
-//           a_zero_tpp(&tmp_qv[0]);
-//           for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-//             a_vnni_trans_tpp(&v_a[i][j2][k][0], &tmp_k[0]);
-//             a_brgemm2_tpp(&tmp_logits_bf16[0][j2], &tmp_k[0], &tmp_qv[0], 1, true);
-//           }
-//           a_brgemm2_tpp.release();
-//           a_cpy2_tpp(&tmp_qv[0], &weighted_avg_a[i][j1][k][0]);
-//         }
-//       }
-//     }
-//   }
-// }
-
 lda = HS_t;
 ldb = N_t * H_t;
 ldc = N_t * H_t;
@@ -412,7 +359,7 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 // at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}), output_b);
 // /* [512, 764, 256]  = [512, 764, 8, 32] * [8, 32, 256] + [256] */
 {
-  RECORD_SCOPE(alpha_c_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
+  RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
     qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);

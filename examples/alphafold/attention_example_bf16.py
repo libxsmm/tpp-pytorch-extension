@@ -149,7 +149,7 @@ class Net2(nn.Module):  # Second network containing optimized attention layer
 net1 = Net1().to(torch.bfloat16)
 net2 = Net2().to(torch.bfloat16)
 
-torch.manual_seed(10)  # Set random seed for reproducibility
+torch.manual_seed(11)  # Set random seed for reproducibility
 
 q_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
 m_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)

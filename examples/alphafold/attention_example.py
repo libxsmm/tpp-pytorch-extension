@@ -208,7 +208,7 @@ N = 10  # Number of iterations
 #     ) as prof:
 for _ in range(N):  # MKLDNN PyTorch layer Forward and Backward pass timing
     start = time.time()
-    # Y1 = net1(q_data, m_data, bias, nonbatched_bias)
+    Y1 = net1(q_data, m_data, bias, nonbatched_bias)
     forward1 += time.time() - start
     # prof.step()
 

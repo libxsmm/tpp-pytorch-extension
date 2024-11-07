@@ -28,14 +28,15 @@ using namespace tpp;
 
 #define QKV_BLOCKSIZE 64
 #define A_BLOCKSIZE 64
+// #define Ak_BLOCKSIZE 64
 #define C_BLOCKSIZE 64
 
 REGISTER_SCOPE(alpha_q_gemm, "alpha_q_gemm");
 REGISTER_SCOPE(alpha_k_gemm, "alpha_k_gemm");
 REGISTER_SCOPE(alpha_v_gemm, "alpha_v_gemm");
 
-REGISTER_SCOPE(alpha_a_gemm, "alpha_a_gemm");
-REGISTER_SCOPE(alpha_c_gemm, "alpha_c_gemm");
+REGISTER_SCOPE(alpha_ac_gemm, "alpha_ac_gemm");
+REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
 
 REGISTER_SCOPE(proj_gemm, "proj_gemm");
 REGISTER_SCOPE(out_gemm, "out_gemm");
