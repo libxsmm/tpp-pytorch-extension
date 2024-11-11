@@ -46,7 +46,7 @@ static int TPP_CACHE_REMAPPED_WEIGHTS =
     env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
-static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
+static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 128);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
@@ -1319,7 +1319,8 @@ inline at::Tensor attn(
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
   long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
+  // const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
+  const long Skb = SK_BLOCK_SIZE;
   long krem = Sk % Skb;
   int pad = Sk_pad - Sk;
 
@@ -1349,6 +1350,16 @@ inline at::Tensor attn(
   auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
   auto AM2 = GetVLAPtr<T>(t_AM, {Sq, Sk_pad});
   int kl_in_vnni = 1;
+  static bool print_flag = true;
+  if (print_flag) {
+    if (my_rank == 0)
+      printf(
+          "Attn: Sqb = %ld Skb = %ld use_flash = %s\n",
+          Sqb,
+          Skb,
+          USE_FLASH ? "True" : "False");
+    print_flag = false;
+  }
 
   AttnKernels<T, Tv> attn_kern[4] = {
       AttnKernels<T, Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),

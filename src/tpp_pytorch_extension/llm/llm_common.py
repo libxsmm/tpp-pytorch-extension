@@ -42,6 +42,8 @@ BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
 
 tensor_parallel_enabled = True
 
+use_discrete_kv = int(os.environ.get("USE_DISCRETE_KV_CACHE", 0))
+
 
 def compare(ref, opt, name=""):
     ref = ref.detach()
@@ -195,8 +197,11 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
     dummy_input = tokenizer.batch_encode_plus(inputs, return_tensors="pt")
     dummy_input = dummy_input.to(model.device)
     if model.config.use_cache:
+        assert (
+            use_discrete_kv == 1
+        ), "Using TorchScript JIT requires use_discrete_kv = 1"
         dummy_input["past_key_values"] = generate_past_key_values(
-            model, batch_size, 1, num_beams=num_beams
+            model, batch_size, 1, num_beams=num_beams, indirect_kv=use_discrete_kv
         )
     if len(dummy_input["past_key_values"][0]) < 4:
         dummy_input["attention_mask"] = torch.cat(
@@ -233,7 +238,11 @@ class _ModelFallbackWrapper(GenerationMixin):
         first_token = True if kwargs["past_key_values"] is None else False
         if kwargs["past_key_values"] is None and self._default.config.use_cache:
             kwargs["past_key_values"] = generate_past_key_values(
-                self._default, kwargs["input_ids"].shape[0], 0, num_beams=self.num_beams
+                self._default,
+                kwargs["input_ids"].shape[0],
+                0,
+                num_beams=self.num_beams,
+                indirect_kv=use_discrete_kv,
             )
         # kwargs.pop("position_ids", None)
         if first_token == True and self.num_beams > 1:
@@ -554,7 +563,7 @@ def get_layer_past_and_offset(
     n = len(layer_past)
     B_DIM = BATCH_DIM_IN_KV_CACHE
     if n < 4:  # cache with beam_idx
-        if discrete_kv == True:
+        if discrete_kv == True and use_discrete_kv == 1:
             B1, N, S, H = layer_past[0].shape
             if n == 3:
                 B2 = layer_past[2].shape[0]
