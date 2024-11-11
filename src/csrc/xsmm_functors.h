@@ -3969,7 +3969,7 @@ class VarSoftMaxFwdTPP {
       float* omax_buf = nullptr) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
-      float max = omax_buf ? omax_buf[s2] : (float)in[s2 * S3];
+      float max = (omax_buf && isFlash) ? omax_buf[s2] : (float)in[s2 * S3];
       float sum = 0.0f;
       for (int s1 = 0; s1 < S1; s1++) {
         float rmax = 0;
@@ -4014,7 +4014,7 @@ class VarSoftMaxFwdTPP {
 #if defined(__AVX512F__)
     for (s2 = 0; s2 < S2; s2++) {
       float tmp[S1][S3];
-      float max = omax_buf
+      float max = (omax_buf && isFlash)
           ? omax_buf[s2]
           : upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
       float sum = 0.0;
@@ -4098,7 +4098,7 @@ class VarSoftMaxFwdTPP {
     // #warning "Not using AVX512 path for VarSoftMax"
     for (s2 = 0; s2 < S2; s2++) {
       float tmp[S1][S3];
-      float max = omax_buf
+      float max = (omax_buf && isFlash)
           ? omax_buf[s2]
           : upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
       float sum = 0.0;
