@@ -53,6 +53,7 @@ static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
 static const int USE_MXFP4_FT = env2int("USE_MXFP4_FT", 0);
 static const int USE_QINT8 = env2int("USE_QINT8", 0);
 static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
+static const bool USE_FLASH = env2int("USE_FLASH", 1);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
@@ -584,6 +585,7 @@ struct AttnKernels {
   SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
   SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
   SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
+  SCOPEIT_DECL(SoftMaxFlashScaleTPP<T>) softmax_scale;
 
   AttnKernels(
       long Sqb,
@@ -605,8 +607,11 @@ struct AttnKernels {
     scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
     add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
     add_2dmask_tpp = SCOPEIT((AddTPP<T, float, float>(Sqb, Skb)), EW_ADD);
-    softmax_fwd_tpp = SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
-    softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H)), EW_RCP);
+    softmax_fwd_tpp =
+        SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
+    softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
+    softmax_scale =
+        SCOPEIT((SoftMaxFlashScaleTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
     // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
     c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
         Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
@@ -1405,15 +1410,11 @@ inline at::Tensor attn(
                 else
                   ak.add_mask_tpp(&AM[b][sk], AS[0]);
               }
-              float *pmax, *psum;
               if (sk == 0) {
-                pmax = omax;
-                psum = osum;
+                ak.softmax_fwd_tpp(1, AS[0], AST[0], omax, osum, nullptr);
               } else {
-                pmax = cmax;
-                psum = csum;
+                ak.softmax_fwd_tpp(1, AS[0], AST[0], cmax, csum, omax);
               }
-              ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
               // for (int xx=0;xx<kbs;xx++)
               // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n",
               // sk+xx, (float)AST[0][xx]);
@@ -1432,6 +1433,7 @@ inline at::Tensor attn(
                 ak.softmax_fixup(tmp, CL[b][nq][sq], cmax, csum, omax, osum);
               }
             }
+            attn_kern[qid * 2].softmax_scale(CL[b][nq][sq], osum);
           }
         }
       }

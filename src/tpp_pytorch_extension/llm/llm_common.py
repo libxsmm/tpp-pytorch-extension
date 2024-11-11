@@ -42,6 +42,7 @@ BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
 
 tensor_parallel_enabled = True
 
+
 def compare(ref, opt, name=""):
     ref = ref.detach()
     opt = opt.detach()
@@ -514,7 +515,8 @@ def ShardLinear(m, dim, rank, size, block_size=1):
 
 
 def get_rank():
-    if not tensor_parallel_enabled: return 0
+    if not tensor_parallel_enabled:
+        return 0
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     else:
@@ -523,7 +525,8 @@ def get_rank():
 
 
 def get_size():
-    if not tensor_parallel_enabled: return 1
+    if not tensor_parallel_enabled:
+        return 1
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         size = torch.distributed.get_world_size()
     else:
@@ -537,7 +540,8 @@ def all_reduce(t):
 
 
 def set_pg():
-    if not tensor_parallel_enabled: return
+    if not tensor_parallel_enabled:
+        return
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 

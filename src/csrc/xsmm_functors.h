@@ -3894,9 +3894,10 @@ template <typename Tin, typename Tout>
 class VarSoftMaxFwdTPP {
  public:
   VarSoftMaxFwdTPP() {}
-  VarSoftMaxFwdTPP(int S2, int S3)
+  VarSoftMaxFwdTPP(int S2, int S3, bool isFlash = false)
       : S2(S2),
         S3(S3),
+        isFlash(isFlash),
         kmax(
             1,
             S3,
@@ -3948,16 +3949,27 @@ class VarSoftMaxFwdTPP {
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
-            LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
+            LIBXSMM_MELTW_TYPE_BINARY_MUL),
+        kcpy(
+            1,
+            S3,
+            S3,
+            S3,
+            LIBXSMM_DATATYPE_F32,
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_IDENTITY) {}
   void operator()(
       int S1,
       Tin* in,
       Tout* out,
       float* max_buf = nullptr,
-      float* sum_buf = nullptr) {
+      float* sum_buf = nullptr,
+      float* omax_buf = nullptr) {
     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
     for (int s2 = 0; s2 < S2; s2++) {
-      float max = (float)in[s2 * S3];
+      float max = omax_buf ? omax_buf[s2] : (float)in[s2 * S3];
       float sum = 0.0f;
       for (int s1 = 0; s1 < S1; s1++) {
         float rmax = 0;
@@ -3977,9 +3989,15 @@ class VarSoftMaxFwdTPP {
         max_buf[s2] = max;
       if (sum_buf)
         sum_buf[s2] = sum;
-      sum = 1.0 / sum;
-      for (int s1 = 0; s1 < S1; s1++) {
-        kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
+      if (!isFlash) {
+        sum = 1.0 / sum;
+        for (int s1 = 0; s1 < S1; s1++) {
+          kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
+        }
+      } else {
+        for (int s1 = 0; s1 < S1; s1++) {
+          kcpy(&tmp[s1 * S3], &out[s1 * S2 * S3 + s2 * S3]);
+        }
       }
     }
   }
@@ -3988,15 +4006,17 @@ class VarSoftMaxFwdTPP {
       Tin* pinp,
       Tout* pout,
       float* max_buf = nullptr,
-      float* sum_buf = nullptr) {
+      float* sum_buf = nullptr,
+      float* omax_buf = nullptr) {
     int s1, s2, s3;
     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
 #if defined(__AVX512F__)
     for (s2 = 0; s2 < S2; s2++) {
       float tmp[S1][S3];
-      float max =
-          upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
+      float max = omax_buf
+          ? omax_buf[s2]
+          : upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
       float sum = 0.0;
       __m512 vmax = _mm512_set1_ps(max);
       __m512 vsum = _mm512_setzero_ps();
@@ -4046,21 +4066,31 @@ class VarSoftMaxFwdTPP {
         max_buf[s2] = max;
       if (sum_buf)
         sum_buf[s2] = sum;
-      sum = 1.0 / sum;
-      vsum = _mm512_set1_ps(sum);
-      for (s1 = 0; s1 < S1; s1++) {
-        for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-          _mm512_storeu_ps_auto(
-              &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
-              _mm512_mul_ps(vsum, _mm512_loadu_ps(&tmp[s1][s3])));
+      if (!isFlash) {
+        sum = 1.0 / sum;
+        vsum = _mm512_set1_ps(sum);
+        for (s1 = 0; s1 < S1; s1++) {
+          for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
+            _mm512_storeu_ps_auto(
+                &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
+                _mm512_mul_ps(vsum, _mm512_loadu_ps(&tmp[s1][s3])));
+          }
+          if (s3 < S3) {
+            int rem = S3 - s3;
+            __mmask16 mask = (1 << rem) - 1;
+            _mm512_mask_storeu_ps_auto(
+                &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
+                mask,
+                _mm512_mul_ps(vsum, _mm512_maskz_loadu_ps(mask, &tmp[s1][s3])));
+          }
         }
-        if (s3 < S3) {
-          int rem = S3 - s3;
-          __mmask16 mask = (1 << rem) - 1;
-          _mm512_mask_storeu_ps_auto(
-              &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
-              mask,
-              _mm512_mul_ps(vsum, _mm512_maskz_loadu_ps(mask, &tmp[s1][s3])));
+      } else {
+        for (s1 = 0; s1 < S1; s1++) {
+          for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
+            _mm512_storeu_ps_auto(
+                &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
+                _mm512_loadu_ps(&tmp[s1][s3]));
+          }
         }
       }
     }
@@ -4068,8 +4098,9 @@ class VarSoftMaxFwdTPP {
     // #warning "Not using AVX512 path for VarSoftMax"
     for (s2 = 0; s2 < S2; s2++) {
       float tmp[S1][S3];
-      float max =
-          upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
+      float max = omax_buf
+          ? omax_buf[s2]
+          : upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
       float sum = 0.0;
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < S3; s3++) {
@@ -4092,13 +4123,21 @@ class VarSoftMaxFwdTPP {
         max_buf[s2] = max;
       if (sum_buf)
         sum_buf[s2] = sum;
-      sum = 1.0 / sum;
-      for (s1 = 0; s1 < S1; s1++) {
-        for (s3 = 0; s3 < S3; s3++) {
-          float cur = tmp[s1][s3] * sum;
-          // libxsmm_rne_convert_fp32_bf16( &cur, &LIBXSMM_VLA_ACCESS(3, out,
-          // s1, s2, s3, S2, S3), 1 );
-          LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) = cur;
+      if (!isFlash) {
+        sum = 1.0 / sum;
+        for (s1 = 0; s1 < S1; s1++) {
+          for (s3 = 0; s3 < S3; s3++) {
+            float cur = tmp[s1][s3] * sum;
+            // libxsmm_rne_convert_fp32_bf16( &cur, &LIBXSMM_VLA_ACCESS(3, out,
+            // s1, s2, s3, S2, S3), 1 );
+            LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) = cur;
+          }
+        }
+      } else {
+        for (s1 = 0; s1 < S1; s1++) {
+          for (s3 = 0; s3 < S3; s3++) {
+            LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) = tmp[s1][s3];
+          }
         }
       }
     }
@@ -4107,11 +4146,13 @@ class VarSoftMaxFwdTPP {
 
  private:
   int S2, S3;
+  bool isFlash;
   UnaryTPP kmax;
   BinaryTPP ksub;
   UnaryTPP kexp;
   UnaryTPP ksum;
   BinaryTPP kmul;
+  UnaryTPP kcpy;
 };
 
 template <typename T1, typename T2, typename T3>
@@ -4301,7 +4342,8 @@ template <typename T>
 class SoftMaxFixUpTPP {
  public:
   SoftMaxFixUpTPP() {}
-  SoftMaxFixUpTPP(int S2, int S3) : S2(S2), S3(S3), eqn(S3) {}
+  SoftMaxFixUpTPP(int S2, int S3, bool isFlash)
+      : S2(S2), S3(S3), isFlash(isFlash), eqn(S3, isFlash) {}
   void operator()(
       T* cur,
       T* out,
@@ -4314,46 +4356,74 @@ class SoftMaxFixUpTPP {
     eqn_param.inputs = arg_array;
 
     for (int s2 = 0; s2 < S2; s2++) {
-      float nmax = std::max(cmax[s2], omax[s2]);
-      float oexp = expf(omax[s2] - nmax);
-      float cexp = expf(cmax[s2] - nmax);
-      float nsum = cexp * csum[s2] + oexp * osum[s2];
-      float rsum = 1.0 / nsum;
-      float oscale = osum[s2] * oexp * rsum;
-      float cscale = csum[s2] * cexp * rsum;
-      arg_array[0].primary = &out[s2 * S3];
-      arg_array[1].primary = &oscale;
-      arg_array[2].primary = &cur[s2 * S3];
-      arg_array[3].primary = &cscale;
-      eqn_param.output.primary = (void*)&out[s2 * S3];
-      eqn(&eqn_param);
-      omax[s2] = nmax;
-      osum[s2] = nsum;
+      if (!isFlash) {
+        float nmax = std::max(cmax[s2], omax[s2]);
+        float oexp = expf(omax[s2] - nmax);
+        float cexp = expf(cmax[s2] - nmax);
+        float nsum = cexp * csum[s2] + oexp * osum[s2];
+        float rsum = 1.0 / nsum;
+        float oscale = osum[s2] * oexp * rsum;
+        float cscale = csum[s2] * cexp * rsum;
+        arg_array[0].primary = &out[s2 * S3];
+        arg_array[1].primary = &oscale;
+        arg_array[2].primary = &cur[s2 * S3];
+        arg_array[3].primary = &cscale;
+        eqn_param.output.primary = (void*)&out[s2 * S3];
+        eqn(&eqn_param);
+        omax[s2] = nmax;
+        osum[s2] = nsum;
+      } else {
+        float nmax = std::max(cmax[s2], omax[s2]);
+        TPP_ASSERT(nmax == cmax[s2], "Flash attention nmax must equal cmax\n");
+        float oexp = exp(omax[s2] - nmax);
+        // float cexp = exp(cmax[s2] - nmax); // must be 1.0
+        float nsum = csum[s2] + oexp * osum[s2];
+        arg_array[0].primary = &out[s2 * S3];
+        arg_array[1].primary = &oexp;
+        arg_array[2].primary = &cur[s2 * S3];
+        eqn_param.output.primary = (void*)&out[s2 * S3];
+        eqn(&eqn_param);
+        omax[s2] = nmax;
+        osum[s2] = nsum;
+      }
     }
   }
 
   void ref(T* cur, T* out, float* cmax, float* csum, float* omax, float* osum) {
     for (int s2 = 0; s2 < S2; s2++) {
-      float nmax = std::max(cmax[s2], omax[s2]);
-      float oexp = exp(omax[s2] - nmax);
-      float cexp = exp(cmax[s2] - nmax);
-      float nsum = cexp * csum[s2] + oexp * osum[s2];
-      float rsum = 1.0 / nsum;
-      float oscale = osum[s2] * oexp * rsum;
-      float cscale = csum[s2] * cexp * rsum;
-      for (int s3 = 0; s3 < S3; s3++) {
-        out[s2 * S3 + s3] =
-            oscale * out[s2 * S3 + s3] + cscale * cur[s2 * S3 + s3];
+      if (!isFlash) {
+        float nmax = std::max(cmax[s2], omax[s2]);
+        float oexp = exp(omax[s2] - nmax);
+        float cexp = exp(cmax[s2] - nmax);
+        float nsum = cexp * csum[s2] + oexp * osum[s2];
+        float rsum = 1.0 / nsum;
+        float oscale = osum[s2] * oexp * rsum;
+        float cscale = csum[s2] * cexp * rsum;
+        for (int s3 = 0; s3 < S3; s3++) {
+          out[s2 * S3 + s3] =
+              oscale * out[s2 * S3 + s3] + cscale * cur[s2 * S3 + s3];
+        }
+        omax[s2] = nmax;
+        osum[s2] = nsum;
+      } else {
+        float nmax = std::max(cmax[s2], omax[s2]);
+        TPP_ASSERT(nmax == cmax[s2], "Flash attention nmax must equal cmax\n");
+        float oexp = exp(omax[s2] - nmax);
+        // float cexp = exp(cmax[s2] - nmax); // must be 1.0
+        float nsum = csum[s2] + oexp * osum[s2];
+        for (int s3 = 0; s3 < S3; s3++) {
+          out[s2 * S3 + s3] = oexp * out[s2 * S3 + s3] + cur[s2 * S3 + s3];
+        }
+        omax[s2] = nmax;
+        osum[s2] = nsum;
       }
-      omax[s2] = nmax;
-      osum[s2] = nsum;
     }
   }
 
   class Eqn : BaseTPP {
    public:
     Eqn() {}
-    Eqn(int S3) : S3(S3) {
+    Eqn(int S3, bool isFlash) : S3(S3), isFlash(isFlash) {
       kernel = (libxsmm_meqn_function)get_kernel();
       initialized = true;
     }
@@ -4366,7 +4436,13 @@ class SoftMaxFixUpTPP {
    protected:
     std::string hash_str() override {
       char hash[200];
-      snprintf(hash, 200, "softmax_fixup_eqn_t1%d_S3%d", XsmmDtype<T>(), S3);
+      snprintf(
+          hash,
+          200,
+          "softmax_fixup_eqn_t1%d_S3%d_F%d",
+          XsmmDtype<T>(),
+          S3,
+          isFlash ? 1 : 0);
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -4375,35 +4451,95 @@ class SoftMaxFixUpTPP {
       libxsmm_blasint tmp_ld = 1;
       libxsmm_blasint ld = S3;
       libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
-      meqn_push_binary_op(
-          my_eqn0,
-          LIBXSMM_MELTW_TYPE_BINARY_ADD,
-          LIBXSMM_MELTW_FLAG_BINARY_NONE);
-      meqn_push_binary_op(
-          my_eqn0,
-          LIBXSMM_MELTW_TYPE_BINARY_MUL,
-          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
-      meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
-      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
-      meqn_push_binary_op(
-          my_eqn0,
-          LIBXSMM_MELTW_TYPE_BINARY_MUL,
-          LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
-      meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
-      meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 3, 0, LIBXSMM_DATATYPE_F32);
-      debug_print_eqn_tree(my_eqn0); // printf
-      return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
+      if (!isFlash) {
+        meqn_push_binary_op(
+            my_eqn0,
+            LIBXSMM_MELTW_TYPE_BINARY_ADD,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE);
+        meqn_push_binary_op(
+            my_eqn0,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+        meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
+        meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+        meqn_push_binary_op(
+            my_eqn0,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
+        meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
+        meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 3, 0, LIBXSMM_DATATYPE_F32);
+        debug_print_eqn_tree(my_eqn0); // printf
+        return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
+      } else {
+        meqn_push_ternary_op(
+            my_eqn0,
+            LIBXSMM_MELTW_TYPE_TERNARY_MULADD,
+            LIBXSMM_MELTW_FLAG_TERNARY_REUSE_IN_2_AS_OUT |
+                LIBXSMM_MELTW_FLAG_TERNARY_BCAST_SCALAR_IN_1);
+        meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
+        meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
+        meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
+        debug_print_eqn_tree(my_eqn0); // printf
+        return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
+      }
     }
 
    private:
     int S3;
+    bool isFlash;
     libxsmm_meqn_function kernel = NULL;
   };
 
  protected:
   int S2 = 0;
   int S3 = 0;
+  bool isFlash;
   Eqn eqn;
+};
+
+template <typename T>
+class SoftMaxFlashScaleTPP {
+ public:
+  SoftMaxFlashScaleTPP() {}
+  SoftMaxFlashScaleTPP(int S2, int S3, bool isFlash)
+      : S2(S2),
+        S3(S3),
+        isFlash(isFlash),
+        div_kernel(
+            S2,
+            S3,
+            S3,
+            1,
+            S3,
+            XsmmDtype<T>(),
+            XsmmDtype<float>(),
+            XsmmDtype<T>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
+            LIBXSMM_MELTW_TYPE_BINARY_DIV) {}
+
+  void operator()(T* buf, float* osum) {
+    if (!isFlash)
+      return;
+    div_kernel(buf, osum, buf);
+  }
+
+  void ref(T* buf, float* osum) {
+    if (!isFlash)
+      return;
+    for (int s2 = 0; s2 < S2; s2++) {
+      float isum = 1.0f / osum[s2];
+      for (int s3 = 0; s3 < S3; s3++) {
+        buf[s2 * S3 + s3] *= isum;
+      }
+    }
+  }
+
+ protected:
+  int S2 = 0;
+  int S3 = 0;
+  bool isFlash;
+  BinaryTPP div_kernel;
 };
 
 template <typename T, typename LT = T>
