@@ -23,6 +23,7 @@
 
 using namespace tpp;
 
+extern int TPP_VERBOSE;
 static int CK_BLOCK_SIZE = env2int("CK_BLOCK_SIZE", 64);
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
@@ -274,7 +275,9 @@ class TppFlatLinearBase {
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias, _Hc, _Hk);
       gemm_cache[hash] = gemm;
-      printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
+      if (TPP_VERBOSE > 0) {
+        printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
+      }
     }
     return *gemm;
   }
@@ -768,7 +771,9 @@ class TppBlockedLinearWBase {
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias);
       gemm_cache[hash] = gemm;
-      printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
+      if (TPP_VERBOSE > 0) {
+        printf("%s:\nHash: %s\n", get_class_name<GemmT>().c_str(), hash);
+      }
     }
     return *gemm;
   }

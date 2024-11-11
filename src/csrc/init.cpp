@@ -17,6 +17,7 @@
 #endif
 
 double ifreq = 1.0 / getFreq();
+int TPP_VERBOSE = env2int("TPP_VERBOSE", 0);
 static int TPP_DEBUG_TIMER_TIDS_UPTO = env2int("TPP_DEBUG_TIMER_TIDS_UPTO", 0);
 static int TPP_DEBUG_TIMER_RANK = env2int("TPP_DEBUG_TIMER_RANK", 0);
 static int TPP_DEBUG_TIMER_DETAILED = env2int("TPP_DEBUG_TIMER_DETAILED", 0);
