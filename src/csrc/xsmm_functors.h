@@ -4091,6 +4091,14 @@ class VarSoftMaxFwdTPP {
                 &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
                 _mm512_loadu_ps(&tmp[s1][s3]));
           }
+          if (s3 < S3) {
+            int rem = S3 - s3;
+            __mmask16 mask = (1 << rem) - 1;
+            _mm512_mask_storeu_ps_auto(
+                &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
+                mask,
+                _mm512_maskz_loadu_ps(mask, &tmp[s1][s3]));
+          }
         }
       }
     }
