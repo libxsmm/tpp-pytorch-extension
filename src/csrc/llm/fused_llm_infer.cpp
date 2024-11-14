@@ -590,12 +590,15 @@ struct AttnKernels {
   AttnKernels(
       long Sqb,
       long Skb,
+      long Sk_pad,
       long H,
       int pad,
       int kl_in_vnni,
       int vl_in_vnni) {
     // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb,
     // Skb, H, pad, kl_in_vnni, vl_in_vnni);
+    if (Sk_pad < Skb)
+      Sk_pad = Skb;
     if (Sqb == 0)
       Sqb = 1; // hack for unused kernels to not generate 0 size kernels
     if (Skb == 0)
@@ -606,7 +609,8 @@ struct AttnKernels {
     // [Sqb, Skb]
     scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
     add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
-    add_2dmask_tpp = SCOPEIT((AddTPP<T, float, float>(Sqb, Skb)), EW_ADD);
+    add_2dmask_tpp =
+        SCOPEIT((AddTPP<T, float, float>(Sqb, Skb, Sk_pad, Skb, Skb)), EW_ADD);
     softmax_fwd_tpp =
         SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
     softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
@@ -1294,7 +1298,8 @@ inline at::Tensor attn(
     at::Tensor t_QL,
     at::Tensor t_KL,
     at::Tensor t_AM,
-    at::Tensor t_VL) {
+    at::Tensor t_VL,
+    bool isCausal = true) {
   RECORD_SCOPE(ac_gemm1, {t_QL, t_KL});
   auto t_CL = at::empty_like(t_QL);
   auto sizes = t_QL.sizes();
@@ -1362,10 +1367,12 @@ inline at::Tensor attn(
   }
 
   AttnKernels<T, Tv> attn_kern[4] = {
-      AttnKernels<T, Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(Sqb, krem + pad, H, pad, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(qrem, krem + pad, H, pad, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(Sqb, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(
+          Sqb, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(qrem, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(
+          qrem, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
   };
 
   if (!inline_trans) {
@@ -1408,10 +1415,12 @@ inline at::Tensor attn(
                 k_ptr = k_tmp;
               }
               ak.a_gemm_tpp(QL[b][nq][sq], k_ptr, AS[0], 1);
-              for (int sq1 = 0; sq1 < qbs; sq1++) {
-                auto qval = sq + sq1 + offset;
-                for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
-                  AS[sq1][sk1 - sk] = -1e9f;
+              if (!am_valid && isCausal) {
+                for (int sq1 = 0; sq1 < qbs; sq1++) {
+                  auto qval = sq + sq1 + offset;
+                  for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
+                    AS[sq1][sk1 - sk] = -1e9f;
+                  }
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
