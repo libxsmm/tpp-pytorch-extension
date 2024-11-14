@@ -1415,7 +1415,7 @@ inline at::Tensor attn(
                 k_ptr = k_tmp;
               }
               ak.a_gemm_tpp(QL[b][nq][sq], k_ptr, AS[0], 1);
-              if (!am_valid && isCausal) {
+              if (!am_is_2d && isCausal) {
                 for (int sq1 = 0; sq1 < qbs; sq1++) {
                   auto qval = sq + sq1 + offset;
                   for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
