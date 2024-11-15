@@ -133,7 +133,7 @@ REGISTER_SUBMODULE(_alpha_attention, m) {
       &fused_traingle_multiplication_fwd,
       "Traingle Multiplication forward");
   m.def(
-    "fusedtrianglemulti_forward",
-    &fused2_traingle_multiplication_fwd,
-    "Fused Traingle Multiplication forward");
+      "fusedtrianglemulti_forward",
+      &fused2_traingle_multiplication_fwd,
+      "Fused Traingle Multiplication forward");
 }

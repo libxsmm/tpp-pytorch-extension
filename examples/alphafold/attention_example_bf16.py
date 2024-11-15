@@ -188,12 +188,16 @@ r = Y1.max().to(torch.float32) - Y1.min().to(torch.float32)
 
 print(
     "    Foward pass check: ",
-    ((torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum() == B * S * HS).item(),
+    (
+        (torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum()
+        == B * S * HS
+    ).item(),
 )
 # print("diff: ", r)
 print(
     " Number of errors: ",
-    B * S * HS - (torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum(),
+    B * S * HS
+    - (torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.25).sum(),
 )
 
 
