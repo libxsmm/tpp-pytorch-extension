@@ -51,6 +51,10 @@ extern int tpp_debug_trace;
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
 extern long long hsh_key, hsh_ret;
+static const int MAX_SUB_DTYPE = env2int("MAX_SUB_DTYPE", -1);
+static const int EXP_DTYPE = env2int("EXP_DTYPE", -1);
+static const int ACC_DTYPE = env2int("ACC_DTYPE", -1);
+
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -269,6 +273,104 @@ inline void _mm512_mask_storeu_ps_auto(
   _mm_mask_storeu_epi8((__m128i*)mem_addr, k, _mm_convert_ps_hf8(a));
 }
 #endif // PYTORCH_SUPPORTS_FLOAT8
+
+inline __m512 _mm512_convert_ps_bf8(__m512 a, int mode) {
+
+  const __m256i vnaninf    = _mm256_set1_epi16 (0x7c00);
+  const __m256i vfixup     = _mm256_set1_epi16 (0x0001);
+  const __m256i vfixupmask = _mm256_set1_epi16 (0x0100);
+  const __m256i vrneadd    = _mm256_set1_epi16 (0x007f);
+  const __m256i vdenorm    = _mm256_set1_epi16 (0x03ff);
+  const __m256i vexmant    = _mm256_set1_epi16 (0x7fff);
+
+  __m128i rnbits;
+  if(mode == 1) {
+    uint16_t rnd;
+    _rdrand16_step(&rnd);
+    __m256i vrnd = _mm256_set1_epi16(rnd);
+    rnbits = _mm256_extracti32x4_epi32(vrnd, 0);
+  }
+
+  __m256i ah = _mm512_cvtps_ph(a, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+  const __mmask16 maska1 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vnaninf), vnaninf, _MM_CMPINT_NE);
+  const __mmask16 maska2 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vfixupmask), vfixupmask, _MM_CMPINT_EQ);
+  if(mode == 1) {
+    const __mmask16 maska4 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vexmant), vdenorm, _MM_CMPINT_LE);
+    ah = _mm256_mask_add_epi16 (ah, (maska1 & ~maska4), ah, _mm256_cvtepu8_epi16 (rnbits));
+    ah = _mm256_mask_add_epi16 (ah, maska4, ah, _mm256_mask_add_epi16 (vrneadd, maska2, vrneadd, vfixup));
+  }
+  else if(mode == 0) {
+    ah = _mm256_mask_add_epi16 (ah, maska1, ah, _mm256_mask_add_epi16 (vrneadd, maska2, vrneadd, vfixup));
+  }
+  ah = _mm256_slli_epi16 (_mm256_srli_epi16 (ah, 8), 8);
+  a = _mm512_cvtph_ps (ah);
+  return a;
+}
+
+inline __m512 _mm512_convert_ps_hf8(__m512 a, int mode) {
+  
+  const __m256i vnaninf    = _mm256_set1_epi16 (0x7c00);
+  const __m256i vfixup     = _mm256_set1_epi16 (0x0001);
+  const __m256i vfixupmask = _mm256_set1_epi16 (0x0080);
+  const __m256i vrneadd    = _mm256_set1_epi16 (0x003f);
+  const __m256i vdenorm    = _mm256_set1_epi16 (0x2400);
+  const __m256i vzero      = _mm256_set1_epi16 (0x0000);
+  const __m256i vsign      = _mm256_set1_epi16 (0x8000);
+  const __m256i vsatuval   = _mm256_set1_epi16 (0x5F00);/* 2^8*1.110 a.k.a 448.0, largest value */
+  const __m256i vflush     = _mm256_set1_epi16 (0x1800);/* 2^-9, smallest denormal */
+
+  __m128i rnbits;
+  if(mode == 1) {
+    uint16_t rnd;
+    _rdrand16_step(&rnd);
+    __m256i vrnd = _mm256_set1_epi16(rnd);
+    rnbits = _mm256_extracti32x4_epi32(vrnd, 0);
+  }
+
+  __m256i ah = _mm512_cvtps_ph(a, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+  const __mmask16 maska1 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vnaninf), vnaninf, _MM_CMPINT_NE);
+  const __mmask16 maska2 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vfixupmask), vfixupmask, _MM_CMPINT_EQ);
+  const __mmask16 maska3 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, _mm256_set1_epi16(0x7FFF)), vsatuval, _MM_CMPINT_NLT);
+  const __mmask16 maska4 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vnaninf), vflush, _MM_CMPINT_LT);
+  const __mmask16 maska5 = _mm256_cmp_epi16_mask(_mm256_and_si256(ah, vnaninf), vdenorm, _MM_CMPINT_LT);
+  __m256i v_shft = _mm256_sub_epi16 ( _mm256_srli_epi16 (vdenorm, 10), _mm256_srli_epi16 (_mm256_and_si256 (ah, vnaninf), 10));
+  v_shft = _mm256_mask_mov_epi16 (vzero, maska5, v_shft);
+  ah = _mm256_mask_srlv_epi16 (ah, maska5, ah, v_shft);
+  ah = _mm256_mask_sllv_epi16 (ah, maska5, ah, v_shft);
+
+  if(mode == 1) {
+    ah = _mm256_mask_add_epi16 (ah, (maska1 & ~maska5), ah, _mm256_srli_epi16(_mm256_cvtepu8_epi16 (rnbits),1));
+    ah = _mm256_mask_add_epi16 (ah, maska5, ah, _mm256_mask_add_epi16 (vrneadd, maska2, vrneadd, vfixup));
+  }
+  else if(mode == 0) {
+    ah = _mm256_mask_add_epi16 (ah, maska1, ah, _mm256_mask_add_epi16 (vrneadd, maska2, vrneadd, vfixup));
+  }
+  ah = _mm256_mask_mov_epi16 (ah, maska3, _mm256_or_si256(_mm256_and_si256(ah, vsign), vsatuval));
+  ah = _mm256_mask_mov_epi16 (ah, maska4, _mm256_and_si256(ah, vsign));
+  ah = _mm256_slli_epi16 (_mm256_srli_epi16 (ah, 7), 7);
+  a = _mm512_cvtph_ps (ah);
+  return a;
+}
+
+inline __m512 _mm512_updown_convert(__m512 a, int type, int mode=0) {
+  if(type == -1) return a;
+  else if(type == 0) {
+    return _mm512_convert_bf_ps(_mm256_convert_ps_bf(a));
+  }
+  else if(type == 1) {
+    return _mm512_cvtxph_ps(_mm512_cvtx_roundps_ph(a, 
+          (_MM_FROUND_TO_NEAREST_INT |_MM_FROUND_NO_EXC)));
+  }
+  else if(type == 2) {
+    return _mm512_convert_ps_bf8(a, mode);
+    //return _mm512_convert_bf8_ps(_mm_convert_ps_bf8(a));
+  }
+  else if(type == 3) {
+    return _mm512_convert_ps_hf8(a, mode);
+    //return _mm512_convert_hf8_ps(_mm_convert_ps_hf8(a));
+  }
+}
+
 #endif
 
 inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
@@ -3454,6 +3556,7 @@ class SoftMaxFwdTPP {
     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
 #if defined(__AVX512F__)
+    TPP_ASSERT(0, "Should not come here");
     for (s2 = 0; s2 < S2; s2++) {
       float tmp[S1][S3];
       float max =
@@ -3480,31 +3583,46 @@ class SoftMaxFwdTPP {
               vmax);
         }
       }
-      max = _mm512_reduce_max_ps(vmax);
+      max = _mm512_reduce_max_ps(_mm512_updown_convert(vmax, MAX_SUB_DTYPE, 0));
       vmax = _mm512_set1_ps(max);
+      __attribute__((aligned(64))) float expm[16];
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-          __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-              // __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS (_mm512_sub_ps(
-              _mm512_loadu_ps_auto(
-                  &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-              vmax));
+          //(0,0)=bf16,rne; (1,0)=fp16,rne; (2,0)=bf8,rne, (3,0)=hf8,rne
+          __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_loadu_ps_auto(
+                &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)), MAX_SUB_DTYPE, 0),vmax);
+
+          _mm512_store_ps(expm, vs);
+
+          for(int e=0; e<16; e++)
+            expm[e] = expf(expm[e]);
+
+          __m512 vz = _mm512_load_ps(expm);
+          
+          vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
           _mm512_storeu_ps(&tmp[s1][s3], vz);
-          vsum = _mm512_add_ps(vsum, vz);
+          vsum = _mm512_updown_convert(_mm512_add_ps(vsum, vz), ACC_DTYPE, 0);
         }
         if (s3 < S3) {
           int rem = S3 - s3;
           __mmask16 mask = (1 << rem) - 1;
-          __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-              // __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS (_mm512_sub_ps(
-              _mm512_maskz_loadu_ps_auto(
-                  mask, &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-              vmax));
+          __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_maskz_loadu_ps_auto(mask, 
+                &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)), MAX_SUB_DTYPE, 0), vmax);
+
+          _mm512_store_ps(expm, vs);
+
+          for(int e=0; e<16; e++)
+            expm[e] = expf(expm[e]);
+          __m512 vz = _mm512_load_ps(expm);
+
+          vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
           _mm512_mask_storeu_ps(&tmp[s1][s3], mask, vz);
-          vsum = _mm512_mask_add_ps(vsum, mask, vsum, vz);
+          vsum = _mm512_updown_convert(_mm512_mask_add_ps(vsum, mask, vsum, vz), ACC_DTYPE, 0);
         }
       }
-      sum = _mm512_reduce_add_ps(vsum);
+      sum = _mm512_reduce_add_ps(_mm512_updown_convert(vsum, ACC_DTYPE, 0));
       sum = 1.0 / sum;
       vsum = _mm512_set1_ps(sum);
       for (s1 = 0; s1 < S1; s1++) {
@@ -4039,29 +4157,46 @@ class VarSoftMaxFwdTPP {
               vmax);
         }
       }
-      max = _mm512_reduce_max_ps(vmax);
+      max = _mm512_reduce_max_ps(_mm512_updown_convert(vmax, MAX_SUB_DTYPE, 0));
       vmax = _mm512_set1_ps(max);
+      __attribute__((aligned(64))) float expm[16];
       for (s1 = 0; s1 < S1; s1++) {
         for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-          __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-              _mm512_loadu_ps_auto(
-                  &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-              vmax));
+          __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_loadu_ps_auto(
+                  &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)), MAX_SUB_DTYPE, 0),
+                  vmax);
+          
+          _mm512_store_ps(expm, vs);
+
+          for(int e=0; e<16; e++)
+            expm[e] = expf(expm[e]);
+          __m512 vz = _mm512_load_ps(expm);
+
+          vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
           _mm512_storeu_ps(&tmp[s1][s3], vz);
-          vsum = _mm512_add_ps(vsum, vz);
+          vsum = _mm512_updown_convert(_mm512_add_ps(vsum, vz), ACC_DTYPE, 0);
         }
         if (s3 < S3) {
           int rem = S3 - s3;
           __mmask16 mask = (1 << rem) - 1;
-          __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-              _mm512_maskz_loadu_ps_auto(
-                  mask, &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-              vmax));
+          __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_maskz_loadu_ps_auto(
+                  mask, &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)), MAX_SUB_DTYPE, 0),
+                  vmax);
+
+          _mm512_store_ps(expm, vs);
+
+          for(int e=0; e<16; e++)
+            expm[e] = expf(expm[e]);
+          __m512 vz = _mm512_load_ps(expm);
+
+          vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
           _mm512_mask_storeu_ps(&tmp[s1][s3], mask, vz);
-          vsum = _mm512_mask_add_ps(vsum, mask, vsum, vz);
+          vsum = _mm512_updown_convert(_mm512_mask_add_ps(vsum, mask, vsum, vz), ACC_DTYPE, 0);
         }
       }
-      sum = _mm512_reduce_add_ps(vsum);
+      sum = _mm512_reduce_add_ps(_mm512_updown_convert(vsum, ACC_DTYPE, 0));
       if (max_buf)
         max_buf[s2] = max;
       if (sum_buf)
@@ -4383,7 +4518,7 @@ class SoftMaxFixUpTPP {
       } else {
         float nmax = std::max(cmax[s2], omax[s2]);
         TPP_ASSERT(nmax == cmax[s2], "Flash attention nmax must equal cmax\n");
-        float oexp = exp(omax[s2] - nmax);
+        float oexp = expf(omax[s2] - nmax);
         // float cexp = exp(cmax[s2] - nmax); // must be 1.0
         float nsum = csum[s2] + oexp * osum[s2];
         arg_array[0].primary = &out[s2 * S3];

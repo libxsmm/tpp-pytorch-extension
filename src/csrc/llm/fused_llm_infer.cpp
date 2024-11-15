@@ -579,7 +579,7 @@ struct AttnKernels {
   SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
   SCOPEIT_DECL(AddBiasTPP<T>) add_mask_tpp;
   SCOPEIT_DECL(AddTPP<T, float, float>) add_2dmask_tpp;
-  SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
+  SCOPEIT_REF_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
   SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
   SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
   SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
@@ -612,7 +612,7 @@ struct AttnKernels {
     add_2dmask_tpp =
         SCOPEIT((AddTPP<T, float, float>(Sqb, Skb, Sk_pad, Skb, Skb)), EW_ADD);
     softmax_fwd_tpp =
-        SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
+        SCOPEIT_REF((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
     softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
     softmax_scale =
         SCOPEIT((SoftMaxFlashScaleTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
@@ -774,19 +774,28 @@ inline at::Tensor attn(
             vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
           }
         }
-        float max = _mm512_reduce_max_ps(vmax);
+        float max = _mm512_reduce_max_ps(_mm512_updown_convert(vmax, MAX_SUB_DTYPE, 0));
         vmax = _mm512_set1_ps(max);
         __m512 vsum = _mm512_setzero_ps();
+        __attribute__((aligned(64))) float expm[16];
         for (int sk1 = 0; sk1 < nbFSk; sk1++) {
           float* ASP = AS[sk1][b][nq];
           for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
+            __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_loadu_ps_auto(ASP + sk2), MAX_SUB_DTYPE, 0), vmax);
+
+            _mm512_store_ps(expm, vs);
+
+            for(int e=0; e<16; e++)
+              expm[e] = expf(expm[e]);
+            __m512 vz = _mm512_load_ps(expm);
+
+            vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
             _mm512_storeu_ps(ASP + sk2, vz);
-            vsum = _mm512_add_ps(vsum, vz);
+            vsum = _mm512_updown_convert(_mm512_add_ps(vsum, vz), ACC_DTYPE, 0);
           }
         }
-        float sum = _mm512_reduce_add_ps(vsum);
+        float sum = _mm512_reduce_add_ps(_mm512_updown_convert(vsum, ACC_DTYPE, 0));
         sum = 1.0 / sum;
         vsum = _mm512_set1_ps(sum);
         for (int sk1 = 0; sk1 < nbFSk; sk1++) {
@@ -938,19 +947,28 @@ inline at::Tensor attn(
             vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
           }
         }
-        float max = _mm512_reduce_max_ps(vmax);
+        float max = _mm512_reduce_max_ps(_mm512_updown_convert(vmax, MAX_SUB_DTYPE, 0));
         vmax = _mm512_set1_ps(max);
         __m512 vsum = _mm512_setzero_ps();
+        __attribute__((aligned(64))) float expm[16];
         for (int sk1 = 0; sk1 < nbFSk; sk1++) {
           float* ASP = AS[b][nq][sk1];
           for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
+            __m512 vs = _mm512_sub_ps(_mm512_updown_convert(_mm512_loadu_ps_auto(ASP + sk2), MAX_SUB_DTYPE, 0), vmax);
+
+            _mm512_store_ps(expm, vs);
+
+            for(int e=0; e<16; e++)
+              expm[e] = expf(expm[e]);
+            __m512 vz = _mm512_load_ps(expm);
+
+            vz = _mm512_updown_convert(vz, EXP_DTYPE, 0);
+
             _mm512_storeu_ps(ASP + sk2, vz);
-            vsum = _mm512_add_ps(vsum, vz);
+            vsum = _mm512_updown_convert(_mm512_add_ps(vsum, vz), ACC_DTYPE, 0);
           }
         }
-        float sum = _mm512_reduce_add_ps(vsum);
+        float sum = _mm512_reduce_add_ps(_mm512_updown_convert(vsum, ACC_DTYPE, 0));
         sum = 1.0 / sum;
         vsum = _mm512_set1_ps(sum);
         for (int sk1 = 0; sk1 < nbFSk; sk1++) {
