@@ -99,6 +99,32 @@ at::Tensor fused_traingle_multiplication_fwd(
   }
 }
 
+at::Tensor fused2_traingle_multiplication_fwd(
+    at::Tensor& act,
+    at::Tensor& mask,
+    int equation_flag,
+    at::Tensor& left_norm_input_weight,
+    at::Tensor& left_norm_input_bias,
+    at::Tensor& projection_weight,
+    at::Tensor& projection_bias,
+    at::Tensor& gate_weight,
+    at::Tensor& gate_bias,
+    at::Tensor& center_norm_weight,
+    at::Tensor& center_norm_bias,
+    at::Tensor& output_projection_weight,
+    at::Tensor& output_projection_bias,
+    at::Tensor& gating_linear_weight,
+    at::Tensor& gating_linear_bias) {
+  GlobalPass _gp(FWD);
+  if (act.dtype() == at::kFloat) {
+    typedef float T;
+#include "fused2_triangle_multiplication_fwd_tmpl.h"
+  } else {
+    typedef bfloat16 T;
+#include "fused2_triangle_multiplication_fwd_tmpl_bf16.h"
+  }
+}
+
 // PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 REGISTER_SUBMODULE(_alpha_attention, m) {
   m.def("forward", &fused_gating_attention_fwd, "Gating attention forward");
@@ -106,4 +132,8 @@ REGISTER_SUBMODULE(_alpha_attention, m) {
       "trianglemulti_forward",
       &fused_traingle_multiplication_fwd,
       "Traingle Multiplication forward");
+  m.def(
+    "fusedtrianglemulti_forward",
+    &fused2_traingle_multiplication_fwd,
+    "Fused Traingle Multiplication forward");
 }
