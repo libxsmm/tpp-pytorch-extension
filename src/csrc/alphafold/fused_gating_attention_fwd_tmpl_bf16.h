@@ -107,8 +107,8 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
   {
     qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// #pragma omp parallel for collapse(2)
-  #pragma omp parallel
+
+    #pragma omp parallel
     {
       q_brgemm_tpp.config();
       #pragma omp for collapse(2)
@@ -160,8 +160,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
   {
     qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// #pragma omp parallel for collapse(2)
-  #pragma omp parallel
+    #pragma omp parallel
     {
       kv_brgemm_tpp.config();
       #pragma omp for collapse(2)
@@ -170,7 +169,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
           T tmp[QKV_BLOCKSIZE*N_t*H_t];
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
-          k_trans_tpp(&tmp[0], &k_a[i][2*j]);    // B, S, N, H ----> B, N, H, S (FP32)  ---> B, N, H/2, S, 2
+          k_trans_tpp(&tmp[0], &k_a[i][2*j]);
         }
       }
       kv_brgemm_tpp.release();
@@ -186,15 +185,13 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
   {
     qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// #pragma omp parallel for collapse(2)
+
     #pragma omp parallel
     {
       kv_brgemm_tpp.config();
       #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          // kv_brgemm_tpp(
-          //     &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &v_a[i][j][0][0], 1);
           T tmp[QKV_BLOCKSIZE*N_t*H_t];
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
@@ -267,14 +264,12 @@ auto a_addbias2_tpp =
 auto a_add_nbbias2_tpp =
     SCOPEIT((AddTPP<float, float>(A_BLOCKSIZE, S_t, S_t, S_t)), BIAS);
 
-// auto a_scale_tpp =
-//     SCOPEIT((ScaleTPP<float, float>(A_BLOCKSIZE * S_t)), EW_SCL);
-
 {
   RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(3)
+
+    #pragma omp parallel for collapse(3)
     for (int i = 0; i < B_t; i++) {
       for (int n = 0; n < N_t; n++) {
         for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
@@ -364,8 +359,8 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
     qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// #pragma omp parallel for collapse(2)
-  #pragma omp parallel
+
+    #pragma omp parallel
     {
       c_brgemm_tpp.config();
       #pragma omp for collapse(2)
@@ -398,49 +393,3 @@ if (S_t != Sp_t) {
 }
 
 return output;
-
-// int64_t b_t = q_data.size(0);                    /* Batch (512) */
-// int64_t q_t = q_data.size(1);                    /* Query (764) */
-// int64_t k_t = m_data.size(1);                    /* Key (764) */
-// int64_t a_t = q_data.size(2);                  /* Channels (256) */
-
-// int64_t h_t = query_w.size(1);                  /* number of heads (8) */
-// int64_t c_t = query_w.size(2);                  /* head channels (32) */
-
-// auto output = q_data.new_empty({b_t,q_t,a_t});
-
-// auto q = q_data.new_empty({b_t,q_t,h_t,c_t});
-// auto k = q_data.new_empty({b_t,k_t,h_t,c_t});
-// auto v = q_data.new_empty({b_t,k_t,h_t,c_t});
-
-// auto logits = q_data.new_empty({b_t,h_t,q_t,k_t});
-// auto weights = q_data.new_empty({b_t,h_t,q_t,k_t});
-// auto weighted_avg = q_data.new_empty({b_t,q_t,h_t,c_t});
-
-// auto gate_values = q_data.new_empty({b_t,q_t,h_t,value_dim});
-
-// q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
-// (1.0/sqrt(key_dim))) ; q = at::einsum("bqa,ahc->bqhc", {q_data, query_w}) ;
-// k = at::einsum("bka,ahc->bkhc", {m_data, key_w});
-// v = at::einsum("bka,ahc->bkhc", {m_data, value_w});
-
-// logits = at::add(at::einsum("bqhc,bkhc->bhqk", {q, k}), bias);
-// // logits = at::mul(at::add(at::einsum("bqhc,bkhc->bhqk", {q, k}), bias),
-// (1.0/sqrt(key_dim)));
-
-// if (nonbatched_bias.size(0) > 0)
-//     logits = at::add(logits, at::unsqueeze(nonbatched_bias, 0));
-
-// weights = at::_softmax(logits, -1, false);
-
-// weighted_avg = at::einsum("bhqk,bkhc->bqhc", {weights, v});
-
-// gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
-// gating_w}), gating_b));
-
-// weighted_avg = at::mul(weighted_avg, gate_values);
-
-// output = at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}),
-// output_b);
-
-// return output;
