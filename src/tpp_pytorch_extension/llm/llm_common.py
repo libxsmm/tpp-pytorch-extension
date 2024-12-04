@@ -42,7 +42,7 @@ BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
 
 tensor_parallel_enabled = True
 
-use_discrete_kv = int(os.environ.get("USE_DISCRETE_KV_CACHE", 0))
+use_discrete_kv = int(os.environ.get("USE_DISCRETE_KV_CACHE", 1))
 
 
 def compare(ref, opt, name=""):
