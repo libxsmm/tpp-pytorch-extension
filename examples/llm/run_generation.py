@@ -253,9 +253,18 @@ model = model.eval().to(device)
 # for n, p in model.named_parameters():
 #    print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 
-
 # input prompt
 current_path = pathlib.Path(__file__).parent.resolve()
+with open(str(current_path) + "/prompt.txt") as f:
+    prompt = f.read()
+    tokens_to_use = int(args.input_tokens)
+    input_ids = (
+        tokenizer(prompt, return_tensors="pt").input_ids[:, :tokens_to_use].contiguous()
+    )
+    prompt = tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0]
+
+"""
+tokens_to_use = 0
 with open(str(current_path) + "/prompt.json") as f:
     prompt_pool = json.load(f)
 if args.prompt is not None:
@@ -268,10 +277,31 @@ elif model_type == "auto":
 elif args.input_tokens in prompt_pool[model_type]:
     prompt = prompt_pool[model_type][args.input_tokens]
 else:
-    raise SystemExit("[ERROR] Plese use --prompt if want to use custom input.")
+    tokens_to_use = int(args.input_tokens)
+    prompt = None
+    for key in prompt_pool[model_type].keys():
+        if int(key) >= tokens_to_use:
+            prompt = prompt_pool[model_type][key]
+            break
+    if not prompt:
+        raise SystemExit("[ERROR] Plese use --prompt if want to use custom input.")
+
+if tokens_to_use > 0:
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids[:,:tokens_to_use].contiguous()
+    prompt = tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0]
+'''
+for k in prompt_pool[model_type].keys():
+    v = prompt_pool[model_type][k]
+    sz = tokenizer(v, return_tensors="pt").input_ids.size(dim=1)
+    print(f"Prompt: {k}  sz = {sz}")
+
+exit()
+'''
+"""
 
 input_size = tokenizer(prompt, return_tensors="pt").input_ids.size(dim=1)
 print("---- Prompt size:", input_size)
+print("---- Prompt text:", prompt)
 
 # generate args
 generate_kwargs = dict(
