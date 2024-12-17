@@ -152,10 +152,19 @@ float alpha = (1.0 / sqrt(key_dim));
   }
 }
 
-// auto flag = nonbatched_bias.size(0) > 0;
 lda = H_t;
 ldb = A_BLOCKSIZE;
 ldc = S_t;
+
+// logits = at::add(at::einsum("bqhc,bkhc->bhqk", {q, k}), bias); /* [512, 8,
+// 764, 764]  = [512, 764, 8, 32] * [512, 764, 8, 32] + [512, 1, 1, 764] */ if
+// (nonbatched_bias.size(0) > 0)
+//     logits = at::add(logits, at::unsqueeze(nonbatched_bias, 0)); /* [512, 8,
+//     764, 764]  = [512, 8, 764, 764] + [1, 8, 764, 764] */
+// weights = at::_softmax(logits, -1, false); /* [512, 8, 764, 764] = [512, 8,
+// 764, 764] */ auto weighted_avg = at::einsum("bhqk,bkhc->bqhc", {weights,
+// v}).contiguous();          /* [512, 764, 8, 32]  = [512, 8, 764, 764] * [512,
+// 764, 8, 32] */
 
 auto a_zero_tpp = SCOPEIT(SetZeroTPP<T>(A_BLOCKSIZE * H_t), EW_ZERO);
 auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, N_t* H_t, H_t), EW_COPY);
@@ -269,7 +278,6 @@ else {
 
   // if (S_t % Ak_BLOCKSIZE != 0){
     int lastBlockSize = S_t - (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE;
-    // std::cout << "lastBlockSize: " << lastBlockSize << std::endl;
     auto a_brgemm_edge_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
@@ -370,17 +378,6 @@ else {
     }
   }
 }
-
-
-// logits = at::add(at::einsum("bqhc,bkhc->bhqk", {q, k}), bias); /* [512, 8,
-// 764, 764]  = [512, 764, 8, 32] * [512, 764, 8, 32] + [512, 1, 1, 764] */ if
-// (nonbatched_bias.size(0) > 0)
-//     logits = at::add(logits, at::unsqueeze(nonbatched_bias, 0)); /* [512, 8,
-//     764, 764]  = [512, 8, 764, 764] + [1, 8, 764, 764] */
-// weights = at::_softmax(logits, -1, false); /* [512, 8, 764, 764] = [512, 8,
-// 764, 764] */ auto weighted_avg = at::einsum("bhqk,bkhc->bqhc", {weights,
-// v}).contiguous();          /* [512, 764, 8, 32]  = [512, 8, 764, 764] * [512,
-// 764, 8, 32] */
 
 lda = HS_t;
 ldb = N_t * H_t;
