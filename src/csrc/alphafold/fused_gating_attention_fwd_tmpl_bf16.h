@@ -224,7 +224,7 @@ auto a_zero_tpp = SCOPEIT(SetZeroTPP<T>(A_BLOCKSIZE * H_t), EW_ZERO);
 auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, N_t* H_t, H_t), EW_COPY);
 auto a_cpy2_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t), EW_COPY);
 
-if (S_t < 3072){
+if (S_t < 2560){
 
   auto a_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
@@ -307,7 +307,7 @@ if (S_t < 3072){
   }
 }
 else {
-
+  // Flash attention implementation
   auto a_cpy3_tpp = SCOPEIT(CpyTPP<float>(A_BLOCKSIZE, H_t), EW_COPY);
 
   auto a_brgemm_tpp = SCOPEITGEMM(
@@ -346,17 +346,18 @@ else {
 
   // if (S_t % Ak_BLOCKSIZE != 0){
       int lastBlockSize = S_t - (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE;
+      if (lastBlockSize == 0) lastBlockSize = Ak_BLOCKSIZE;   // handling the zero case
       auto a_brgemm_edge_tpp = SCOPEITGEMM(
       (BrgemmTPP<
           T,
-          float>(A_BLOCKSIZE, lastBlockSize, H_t, 0, 0, H_t, S_t, lastBlockSize, 0.0, 0, 1)));
+          float>(A_BLOCKSIZE, lastBlockSize, H_t, 1, 1, H_t, S_t, lastBlockSize, 0.0, 0, 1)));
 
       auto c_brgemm_edge_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
         A_BLOCKSIZE,
         H_t,
         lastBlockSize,
-        0,
-        0,
+        1,
+        1,
         lastBlockSize,
         N_t* H_t,
         H_t,
@@ -436,10 +437,12 @@ else {
                   &tmp_qv[0], &k_a[i][n * H_t * S_t + 2 * j2], tmp_S_edge, 1);
               
               a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
-              a_add_nbbias_online_edge_tpp(
-                  &nonbatched_bias_a[0][n][j1][j2],
-                  tmp_S_edge,
-                  tmp_S_edge);
+              if (flag){
+                a_add_nbbias_online_edge_tpp(
+                    &nonbatched_bias_a[0][n][j1][j2],
+                    tmp_S_edge,
+                    tmp_S_edge);
+              }
 
               a_add_sfmask_online_tpp(&sfmask_a[0][0], &tmp_S_edge[Sp_t - j2]);
               a_softmax_online_edge_tpp(1, tmp_S_edge, tmp_S_bf16_edge, cmax, csum, omax);
