@@ -87,6 +87,8 @@ parser.add_argument(
 parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
+parser.add_argument("--tpp-linear-only", action="store_true")
+parser.add_argument("--tpp-no-opt", action="store_true")
 parser.add_argument("--jit", action="store_true")
 parser.add_argument("--num-iter", default=10, type=int, help="num iter")
 parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
@@ -134,6 +136,11 @@ def dist_init():
                         "MPI backend requested but not available try installing torch_mpi module"
                     )
                     raise
+        elif args.dist_backend == "gloo":
+            if not torch.distributed.is_gloo_available():
+                raise ValueError(
+                    f"{args.dist_backend} backend requested but not supported"
+                )
         else:
             raise ValueError(f"{args.dist_backend} backend requested but not supported")
 
@@ -211,7 +218,15 @@ if args.ipex:
 if args.use_tpp:
     dist_init()
     weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
-    if model.config.architectures[0] == "GPTJForCausalLM":
+    if args.tpp_no_opt:
+        # use tpp only to print first and 2nd token latencies
+        pass
+    elif args.tpp_linear_only:
+        from tpp_pytorch_extension.nn import OptimizeForLinear
+
+        OptimizeForLinear(model)
+
+    elif model.config.architectures[0] == "GPTJForCausalLM":
         from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
 
         OptimizeModelForGPTJ(
@@ -324,6 +339,7 @@ if args.use_tpp:
             generate_kwargs["num_beams"],
             enable_profile=cpp_profile,
             only_last_logit=True,
+            default_kv=(args.tpp_no_opt or args.tpp_linear_only),
         )
 
     # generate_kwargs["jit"] = True

@@ -219,11 +219,14 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
 class _ModelFallbackWrapper(GenerationMixin):
     __slots__ = ("_optimized", "_default")
 
-    def __init__(self, optimized, default, num_beams, enable_profile=False):
+    def __init__(
+        self, optimized, default, num_beams, enable_profile=False, default_kv=False
+    ):
         self._optimized = optimized
         self._default = default
         self.num_beams = num_beams
         self.enable_profile = enable_profile
+        self.default_kv = default_kv
         self.token_latency = None
         self.output_past_key_values = None
         self.saved_input_ids = None
@@ -236,7 +239,11 @@ class _ModelFallbackWrapper(GenerationMixin):
             kwargs["input_ids"] = args[0]
             assert len(args) == 1, "More than 1 positional arguments not supported"
         first_token = True if kwargs["past_key_values"] is None else False
-        if kwargs["past_key_values"] is None and self._default.config.use_cache:
+        if (
+            kwargs["past_key_values"] is None
+            and self._default.config.use_cache
+            and not self.default_kv
+        ):
             kwargs["past_key_values"] = generate_past_key_values(
                 self._default,
                 kwargs["input_ids"].shape[0],
@@ -384,11 +391,11 @@ def jit_trace_model(
 
 
 def optimize_for_first_token(
-    model, num_beams, enable_profile=False, only_last_logit=False
+    model, num_beams, enable_profile=False, only_last_logit=False, default_kv=False
 ):
     model.config.only_last_logit = only_last_logit
     model = _ModelFallbackWrapper(
-        model, model, num_beams, enable_profile=enable_profile
+        model, model, num_beams, enable_profile=enable_profile, default_kv=default_kv
     )
     return model
 
