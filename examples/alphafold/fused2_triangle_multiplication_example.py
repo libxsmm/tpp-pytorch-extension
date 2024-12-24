@@ -218,7 +218,7 @@ print(" Number of errors: ", B * S * HS - (torch.abs(Y1 - Y2) / r < 0.0001).sum(
 forward1 = 0  # variables to store time values
 forward2 = 0
 
-N = 5  # Number of iterations
+N = 10  # Number of iterations
 
 # with torch.profiler.profile(
 #         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),

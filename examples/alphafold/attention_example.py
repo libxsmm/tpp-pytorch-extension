@@ -100,25 +100,25 @@ class GatingAttention(nn.Module):
 
 
 set = 1
-
+length = 764
 if set == 1:
-    B, S, HS = 512, 764, 256
+    B, S, HS = 512, length, 256
     N, H = 8, 32
 
 if set == 2:
-    B, S, HS = 764, 764, 64
+    B, S, HS = length, length, 64
     N, H = 4, 16
 
 if set == 3:
-    B, S, HS = 320, 764, 64
+    B, S, HS = 320, length, 64
     N, H = 8, 8
 
 if set == 4:
-    B, S, HS = 764, 764, 128
+    B, S, HS = length, length, 128
     N, H = 4, 32
 
 if set == 5:
-    B, S, HS = 764, 512, 256
+    B, S, HS = length, 512, 256
     N, H = 8, 32
 
 
@@ -155,6 +155,7 @@ q_data = torch.randn(B, S, HS, requires_grad=False)
 m_data = torch.randn(B, S, HS, requires_grad=False)
 bias = torch.randn(B, 1, 1, S, requires_grad=False)
 nonbatched_bias = torch.randn(N, S, S, requires_grad=False)
+# nonbatched_bias = torch.Tensor()
 
 query_w = torch.randn(HS, N, H)
 key_w = torch.randn(HS, N, H)
@@ -196,7 +197,7 @@ print(" Number of errors: ", B * S * HS - (torch.abs(Y1 - Y2) / r < 0.0001).sum(
 forward1 = 0  # variables to store time values
 forward2 = 0
 
-N = 5  # Number of iterations
+N = 10  # Number of iterations
 
 # with torch.profiler.profile(
 #         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
