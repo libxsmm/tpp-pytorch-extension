@@ -87,6 +87,8 @@ parser.add_argument(
 parser.add_argument("--greedy", action="store_true")
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
+parser.add_argument("--tpp-linear-only", action="store_true")
+parser.add_argument("--tpp-no-opt", action="store_true")
 parser.add_argument("--jit", action="store_true")
 parser.add_argument("--num-iter", default=10, type=int, help="num iter")
 parser.add_argument("--num-warmup", default=3, type=int, help="num warmup")
@@ -113,7 +115,10 @@ def dist_init():
 
     global my_rank
     global my_size
-    if int(os.environ.get("PMI_SIZE", "0")) > 1:
+    if (
+        int(os.environ.get("PMI_SIZE", "0")) > 1
+        and int(os.environ.get("MULTI_INSTANCE", "0")) == 0
+    ):
         if args.dist_backend == "ccl":
             try:
                 import oneccl_bindings_for_pytorch
@@ -131,6 +136,11 @@ def dist_init():
                         "MPI backend requested but not available try installing torch_mpi module"
                     )
                     raise
+        elif args.dist_backend == "gloo":
+            if not torch.distributed.is_gloo_available():
+                raise ValueError(
+                    f"{args.dist_backend} backend requested but not supported"
+                )
         else:
             raise ValueError(f"{args.dist_backend} backend requested but not supported")
 
@@ -208,7 +218,15 @@ if args.ipex:
 if args.use_tpp:
     dist_init()
     weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
-    if model.config.architectures[0] == "GPTJForCausalLM":
+    if args.tpp_no_opt:
+        # use tpp only to print first and 2nd token latencies
+        pass
+    elif args.tpp_linear_only:
+        from tpp_pytorch_extension.nn import OptimizeForLinear
+
+        OptimizeForLinear(model)
+
+    elif model.config.architectures[0] == "GPTJForCausalLM":
         from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
 
         OptimizeModelForGPTJ(
@@ -250,9 +268,18 @@ model = model.eval().to(device)
 # for n, p in model.named_parameters():
 #    print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 
-
 # input prompt
 current_path = pathlib.Path(__file__).parent.resolve()
+with open(str(current_path) + "/prompt.txt") as f:
+    prompt = f.read()
+    tokens_to_use = int(args.input_tokens)
+    input_ids = (
+        tokenizer(prompt, return_tensors="pt").input_ids[:, :tokens_to_use].contiguous()
+    )
+    prompt = tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0]
+
+"""
+tokens_to_use = 0
 with open(str(current_path) + "/prompt.json") as f:
     prompt_pool = json.load(f)
 if args.prompt is not None:
@@ -265,10 +292,31 @@ elif model_type == "auto":
 elif args.input_tokens in prompt_pool[model_type]:
     prompt = prompt_pool[model_type][args.input_tokens]
 else:
-    raise SystemExit("[ERROR] Plese use --prompt if want to use custom input.")
+    tokens_to_use = int(args.input_tokens)
+    prompt = None
+    for key in prompt_pool[model_type].keys():
+        if int(key) >= tokens_to_use:
+            prompt = prompt_pool[model_type][key]
+            break
+    if not prompt:
+        raise SystemExit("[ERROR] Plese use --prompt if want to use custom input.")
+
+if tokens_to_use > 0:
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids[:,:tokens_to_use].contiguous()
+    prompt = tokenizer.batch_decode(input_ids, skip_special_tokens=True)[0]
+'''
+for k in prompt_pool[model_type].keys():
+    v = prompt_pool[model_type][k]
+    sz = tokenizer(v, return_tensors="pt").input_ids.size(dim=1)
+    print(f"Prompt: {k}  sz = {sz}")
+
+exit()
+'''
+"""
 
 input_size = tokenizer(prompt, return_tensors="pt").input_ids.size(dim=1)
 print("---- Prompt size:", input_size)
+print("---- Prompt text:", prompt)
 
 # generate args
 generate_kwargs = dict(
@@ -291,6 +339,7 @@ if args.use_tpp:
             generate_kwargs["num_beams"],
             enable_profile=cpp_profile,
             only_last_logit=True,
+            default_kv=(args.tpp_no_opt or args.tpp_linear_only),
         )
 
     # generate_kwargs["jit"] = True

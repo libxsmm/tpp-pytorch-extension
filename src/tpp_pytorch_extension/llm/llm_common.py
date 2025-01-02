@@ -40,6 +40,10 @@ global_layer_dtype = torch.float32
 
 BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
 
+tensor_parallel_enabled = True
+
+use_discrete_kv = int(os.environ.get("USE_DISCRETE_KV_CACHE", 1))
+
 
 def compare(ref, opt, name=""):
     ref = ref.detach()
@@ -193,8 +197,11 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
     dummy_input = tokenizer.batch_encode_plus(inputs, return_tensors="pt")
     dummy_input = dummy_input.to(model.device)
     if model.config.use_cache:
+        assert (
+            use_discrete_kv == 1
+        ), "Using TorchScript JIT requires use_discrete_kv = 1"
         dummy_input["past_key_values"] = generate_past_key_values(
-            model, batch_size, 1, num_beams=num_beams
+            model, batch_size, 1, num_beams=num_beams, indirect_kv=use_discrete_kv
         )
     if len(dummy_input["past_key_values"][0]) < 4:
         dummy_input["attention_mask"] = torch.cat(
@@ -212,21 +219,37 @@ def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
 class _ModelFallbackWrapper(GenerationMixin):
     __slots__ = ("_optimized", "_default")
 
-    def __init__(self, optimized, default, num_beams, enable_profile=False):
+    def __init__(
+        self, optimized, default, num_beams, enable_profile=False, default_kv=False
+    ):
         self._optimized = optimized
         self._default = default
         self.num_beams = num_beams
         self.enable_profile = enable_profile
+        self.default_kv = default_kv
         self.token_latency = None
         self.output_past_key_values = None
         self.saved_input_ids = None
         self.saved_past_key_values = None
 
     def __call__(self, *args, **kwargs):
+        if not "past_key_values" in kwargs:
+            kwargs["past_key_values"] = None
+        if len(args) > 0:
+            kwargs["input_ids"] = args[0]
+            assert len(args) == 1, "More than 1 positional arguments not supported"
         first_token = True if kwargs["past_key_values"] is None else False
-        if kwargs["past_key_values"] is None and self._default.config.use_cache:
+        if (
+            kwargs["past_key_values"] is None
+            and self._default.config.use_cache
+            and not self.default_kv
+        ):
             kwargs["past_key_values"] = generate_past_key_values(
-                self._default, kwargs["input_ids"].shape[0], 0, num_beams=self.num_beams
+                self._default,
+                kwargs["input_ids"].shape[0],
+                0,
+                num_beams=self.num_beams,
+                indirect_kv=use_discrete_kv,
             )
         # kwargs.pop("position_ids", None)
         if first_token == True and self.num_beams > 1:
@@ -272,6 +295,7 @@ class _ModelFallbackWrapper(GenerationMixin):
         if self.token_latency == True:
             self.token_latencies = []
 
+        # print("inp=",kwargs["input_ids"].shape)
         output = super().generate(*args, **kwargs)
         if self.token_latency == True:
             self.token_latencies.append(time.time())
@@ -367,13 +391,17 @@ def jit_trace_model(
 
 
 def optimize_for_first_token(
-    model, num_beams, enable_profile=False, only_last_logit=False
+    model, num_beams, enable_profile=False, only_last_logit=False, default_kv=False
 ):
     model.config.only_last_logit = only_last_logit
     model = _ModelFallbackWrapper(
-        model, model, num_beams, enable_profile=enable_profile
+        model, model, num_beams, enable_profile=enable_profile, default_kv=default_kv
     )
     return model
+
+
+def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]):
+    return torch.ops.tpp_llm.fc_plain(input, weight, bias, parallel_dim, split_sizes)
 
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
@@ -394,7 +422,7 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
     def forward(self, input):
         # if self.model_parallel == True and self.parallel_dim == 1:
         #    input = input.chunk(self.parallel_size, dim=-1)[self.parallel_rank].contiguous()
-        # self.maybe_block_params()
+        self.maybe_block_params()
         bias = (
             self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
         )
@@ -402,9 +430,7 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         input = input.to(self.weight.dtype)
         parallel_dim = self.parallel_dim if self.model_parallel == True else -1
         split_sizes = self.split_sizes if hasattr(self, "split_sizes") else []
-        ret = torch.ops.tpp_llm.fc_plain(
-            input, self.weight, bias, parallel_dim, split_sizes
-        )
+        ret = fc_plain(input, self.weight, bias, parallel_dim, split_sizes)
         # if self.model_parallel == True:
         #     with torch.inference_mode(False):
         #         if self.parallel_dim == 0:
@@ -505,6 +531,8 @@ def ShardLinear(m, dim, rank, size, block_size=1):
 
 
 def get_rank():
+    if not tensor_parallel_enabled:
+        return 0
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         rank = torch.distributed.get_rank()
     else:
@@ -513,6 +541,8 @@ def get_rank():
 
 
 def get_size():
+    if not tensor_parallel_enabled:
+        return 1
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         size = torch.distributed.get_world_size()
     else:
@@ -526,6 +556,8 @@ def all_reduce(t):
 
 
 def set_pg():
+    if not tensor_parallel_enabled:
+        return
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
 
@@ -538,7 +570,7 @@ def get_layer_past_and_offset(
     n = len(layer_past)
     B_DIM = BATCH_DIM_IN_KV_CACHE
     if n < 4:  # cache with beam_idx
-        if discrete_kv == True:
+        if discrete_kv == True and use_discrete_kv == 1:
             B1, N, S, H = layer_past[0].shape
             if n == 3:
                 B2 = layer_past[2].shape[0]

@@ -20,6 +20,7 @@
 #include "threaded_loops.h"
 #endif
 #include <torch/csrc/distributed/c10d/comm.hpp>
+#include "fused_gemm.h"
 #include "qtypes.h"
 #include "timing.h"
 #include "xsmm_functors.h"
@@ -41,25 +42,20 @@ static long get_batch_dim_in_kv_cache() {
 
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
-// static int large_cache_opt = false;
 static int TPP_CACHE_REMAPPED_WEIGHTS =
     env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
-static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
-static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 64);
+static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 128);
 static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
-static const char* GEMM_LOOP_SCHEME_REUSE =
-    getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
-static const char* GEMM_LOOP_SCHEME_STREAMING =
-    getenv("GEMM_LOOP_SCHEME_STREAMING") ? getenv("GEMM_LOOP_SCHEME_STREAMING")
-                                         : "aCb";
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
+static const int USE_MXFP4_FT = env2int("USE_MXFP4_FT", 0);
+static const int USE_QINT8 = env2int("USE_QINT8", 0);
+static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
+static const bool USE_FLASH = env2int("USE_FLASH", 1);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
-REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
-REGISTER_LOCAL_SCOPE(gemm, "gemm");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(fqkv_gemm, "fqkv_gemm");
 REGISTER_LOCAL_SCOPE(proj_gemm, "proj_gemm");
@@ -338,9 +334,8 @@ inline void lyr_norm(
     at::Tensor t_out,
     float eps) {
   RECORD_SCOPE(lnorm, {t_in, t_gamma, t_beta});
-  auto in_sizes = t_in.sizes();
-  auto BS = in_sizes[0] * in_sizes[1];
-  auto K = in_sizes[2];
+  auto K = t_in.size(-1);
+  auto BS = t_in.numel() / K;
 
   auto in = GetVLAPtr<T>(t_in, {K});
   auto gamma = GetVLAPtr<LT>(t_gamma);
@@ -441,683 +436,19 @@ inline at::Tensor llama_rms_norm(at::Tensor t_in, at::Tensor t_wt, float eps) {
   return t_out;
 }
 
-template <typename T, typename TOUT>
-class TppBlockedLinearWBase {
- public:
-  using Tin = T;
-  using Tout = TOUT;
-
- protected:
-  static constexpr int nOutputShapes = 2;
-  long Nc, Hc, Nk, Hk, Ncb, BSb, rem;
-  bool weight_reuse;
-  long C, K;
-  SCOPEIT_DECL(CpyBiasTPP<T, Tout>) copy_bias_tpp, copy_bias_tpp_rem;
-  SCOPEIT_DECL(SetZeroTPP<Tout>) zero_tpp, zero_tpp_rem;
-
-  std::string loop_scheme;
-  std::function<void(const VLAPtr<T, 2, long>&, long, long)>
-      postOpCBs[nOutputShapes];
-
- public:
-  TppBlockedLinearWBase(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias) {
-    std::tie(Nc, Hc, Nk, Hk, Ncb, BSb, rem, weight_reuse) =
-        getBlockingParams(t_in, t_wt, t_bias);
-    C = Nc * Hc;
-    K = Nk * Hk;
-
-    copy_bias_tpp = SCOPEIT((CpyBiasTPP<T, Tout>(BSb, Hk, K)), BIAS);
-    copy_bias_tpp_rem = SCOPEIT((CpyBiasTPP<T, Tout>(rem, Hk, K)), BIAS);
-    zero_tpp = SCOPEIT(SetZeroTPP<Tout>(BSb, Hk, K), EW_ZERO);
-    zero_tpp_rem = SCOPEIT(SetZeroTPP<Tout>(rem, Hk, K), EW_ZERO);
-  }
-  template <typename T1 = Tout>
-  VLAPtr<T1, 2, long> getOutputVLAPtr(at::Tensor t) {
-    return GetVLAPtr<T1>(t, {Nk, Hk});
-  }
-  int numOutputShapes() {
-    return nOutputShapes;
-  }
-  std::tuple<long, long, long> getOutputShape(int i) {
-    if (i == 0)
-      return std::make_tuple(BSb, Hk, K);
-    else if (i == 1)
-      return std::make_tuple(rem, Hk, K);
-    else
-      TPP_ASSERT(false, "Invalid Index");
-  }
-
-  void setPostOpCB(
-      int i,
-      const std::function<void(const VLAPtr<Tout, 2, long>&, long, long)>& f) {
-    TPP_ASSERT(i < nOutputShapes, "Invalid Index");
-    postOpCBs[i] = f;
-  }
-
-  at::Tensor new_empty(at::Tensor t_in) {
-    auto sizes = t_in.sizes().vec();
-    auto dim = t_in.dim();
-    sizes[dim - 1] = K;
-    return t_in.new_empty(sizes, c10::CppTypeToScalarType<Tout>::value);
-  }
-
-  static std::tuple<long, long, long, long, long, long, long, bool>
-  getBlockingParams(at::Tensor& t_in, at::Tensor& t_wt, at::Tensor& t_bias) {
-    long Nc, Nk, Hc, Hk, Ncb, BSb, rem;
-    auto in_sizes = t_in.sizes();
-    auto wt_sizes = t_wt.sizes();
-    auto in_dim = t_in.dim();
-    auto C = in_sizes[in_dim - 1];
-    auto BS = t_in.numel() / C;
-
-    Nc = wt_sizes[1];
-    Hc = C / Nc;
-    Nk = wt_sizes[0];
-    Hk = wt_sizes[3];
-
-    Ncb = Nc;
-    BSb = 64L;
-    rem = BS % 64;
-    auto nBS = BS / BSb;
-    bool weight_reuse = nBS > 4;
-    if (weight_reuse)
-      Ncb = NCB_BLOCK_SIZE;
-    return std::make_tuple(Nc, Hc, Nk, Hk, Ncb, BSb, rem, weight_reuse);
-  }
-  void operator()(
-      at::Tensor t_in,
-      at::Tensor t_wt_V,
-      at::Tensor t_bias,
-      at::Tensor t_out) {
-    TPP_ASSERT(false, "Should not come here\n");
-  }
-
-  static TppBlockedLinearWBase<Tin, Tout> get(
-      at::Tensor& t_in,
-      at::Tensor& t_wt,
-      at::Tensor& t_bias) {
-    TPP_ASSERT(false, "Should not come here\n");
-    return TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias);
-  }
-
- protected:
-  template <typename GemmT>
-  static GemmT _get(at::Tensor& t_in, at::Tensor& t_wt, at::Tensor& t_bias) {
-    static ska::flat_hash_map<std::string, GemmT*> gemm_cache;
-    long Nc, Hc, Nk, Hk, Ncb, BSb, rem;
-    bool weight_reuse;
-    std::tie(Nc, Hc, Nk, Hk, Ncb, BSb, rem, weight_reuse) =
-        getBlockingParams(t_in, t_wt, t_bias);
-    char hash[200] = "";
-    snprintf(
-        hash,
-        199,
-        "gemm_Nc%ld_Hc%ld_Nk%ld_Hk%ld_Bsb%ld_rem%ld_Ncb%ld_wr%d",
-        Nc,
-        Hc,
-        Nk,
-        Hk,
-        BSb,
-        rem,
-        Ncb,
-        weight_reuse ? 1 : 0);
-    auto search = gemm_cache.find(hash);
-    GemmT* gemm = NULL;
-    if (search != gemm_cache.end())
-      gemm = search->second;
-    if (gemm == NULL) {
-      gemm = new GemmT(t_in, t_wt, t_bias);
-      gemm_cache[hash] = gemm;
-      // printf("Hash: %s\n", hash);
-    }
-    return *gemm;
-  }
-};
-
-template <typename T, typename TW, typename TOUT = T>
-class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
- public:
-  using Tin = T;
-  using Tout = TOUT;
-  using Tw = TW;
-  using Base = TppBlockedLinearWBase<Tin, Tout>;
-  using Base::BSb;
-  using Base::C;
-  using Base::Hc;
-  using Base::Hk;
-  using Base::K;
-  using Base::Nc;
-  using Base::Ncb;
-  using Base::Nk;
-  using Base::loop_scheme;
-  using Base::postOpCBs;
-  using Base::rem;
-  using Base::weight_reuse;
-
- protected:
-  SCOPEIT_DECL(BrgemmTPP<T, Tout, Tw>) brgemm_tpp, brgemm_tpp_rem;
-
- public:
-  TppBlockedLinearW(at::Tensor t_in, at::Tensor t_wt, at::Tensor t_bias)
-      : TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias) {
-    int b_vnni = 1;
-    if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockMxFP) {
-      if (t_wt.dtype() == at::kQUInt4x2) {
-        b_vnni = 2;
-      } else {
-        TPP_ASSERT(false, "Unsupported qtype\n");
-      }
-    }
-
-    brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        BSb, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, b_vnni)));
-    brgemm_tpp_rem = SCOPEITGEMM((BrgemmTPP<T, Tout, Tw>(
-        rem, Hk, Hc, Hc, Hk * Hc, C, Hk, K, 1.0, 0, Ncb, b_vnni)));
-
-    loop_scheme =
-        weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
-  }
-  std::function<void(int, int, int)> stepFunc(
-      at::Tensor& t_in,
-      at::Tensor& t_wt_V,
-      at::Tensor& t_bias,
-      at::Tensor& t_out,
-      long BS) {
-    auto in = GetVLAPtr<T>(t_in, {Nc, Hc});
-    auto bias = GetVLAPtr<T>(t_bias, {Hk});
-    auto out = GetVLAPtr<Tout>(t_out, {Nk, Hk});
-    bool with_bias = (t_bias.numel() > 0);
-    if (!t_wt_V.is_quantized()) {
-      auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, Hc * Hk});
-      auto func = [&, in, wt_V, bias, out, BS, with_bias ](
-          int nc, int s1, int nk) __attribute__((always_inline)) {
-        auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-        bool is_rem = (s1 + BSb > BS);
-        if (!is_rem) {
-          if (nc == 0) {
-            if (with_bias) {
-              this->copy_bias_tpp(bias[nk], out[s1][nk]);
-            } else {
-              this->zero_tpp(out[s1][nk]);
-            }
-          }
-          brgemm_tpp(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, true);
-          if (!(nc + Ncb < Nc)) { // last nc iter
-            if (postOpCBs[0])
-              postOpCBs[0](out, s1, nk);
-          }
-        } else {
-          if (nc == 0) {
-            if (with_bias) {
-              this->copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-            } else {
-              this->zero_tpp_rem(out[s1][nk]);
-            }
-          }
-          brgemm_tpp_rem(in[s1][nc], wt_V[nk][nc], out[s1][nk], count, false);
-          if (!(nc + Ncb < Nc)) { // last nc iter
-            if (postOpCBs[1])
-              postOpCBs[1](out, s1, nk);
-          }
-        }
-      };
-      return func;
-    } else {
-      if (t_wt_V.qscheme() == at::kPerBlockMxFP) {
-        // We are using kQUInt4x2 for MXFP4 and uint8_t for scale
-        TPP_ASSERT((std::is_same_v<Tw, uint8_t>), "MXFP use uint8_t\n");
-        auto quantizer = at::get_qtensorimpl(t_wt_V)->quantizer();
-        auto mxfp_quantizer =
-            static_cast<at::PerBlockMxFPQuantizer*>(quantizer.get());
-        auto pack_size = mxfp_quantizer->pack_size();
-        auto block_size = mxfp_quantizer->block_size();
-        auto wt_V = GetVLAPtr<Tw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
-        auto t_scl = mxfp_quantizer->scales();
-        auto scl = GetVLAPtr<Tw>(t_scl, {Nc, (Hc * Hk) / block_size});
-        auto func = [&, in, wt_V, scl, bias, out, BS, with_bias ](
-            int nc, int s1, int nk) __attribute__((always_inline)) {
-          auto count = nc + Ncb < Nc ? Ncb : Nc - nc;
-          bool is_rem = (s1 + BSb > BS);
-          if (!is_rem) {
-            if (nc == 0) {
-              if (with_bias) {
-                this->copy_bias_tpp(bias[nk], out[s1][nk]);
-              } else {
-                this->zero_tpp(out[s1][nk]);
-              }
-            }
-            brgemm_tpp(
-                in[s1][nc],
-                wt_V[nk][nc],
-                scl[nk][nc],
-                out[s1][nk],
-                count,
-                true);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              if (postOpCBs[0])
-                postOpCBs[0](out, s1, nk);
-            }
-          } else {
-            if (nc == 0) {
-              if (with_bias) {
-                this->copy_bias_tpp_rem(bias[nk], out[s1][nk]);
-              } else {
-                this->zero_tpp_rem(out[s1][nk]);
-              }
-            }
-            brgemm_tpp_rem(
-                in[s1][nc],
-                wt_V[nk][nc],
-                scl[nk][nc],
-                out[s1][nk],
-                count,
-                false);
-            if (!(nc + Ncb < Nc)) { // last nc iter
-              if (postOpCBs[1])
-                postOpCBs[1](out, s1, nk);
-            }
-          }
-        };
-        return func;
-      } else {
-        TPP_ASSERT(false, "Unsupported qscheme\n");
-      }
-    }
-  }
-
-  void operator()(
-      at::Tensor t_in,
-      at::Tensor t_wt_V,
-      at::Tensor t_bias,
-      at::Tensor t_out) {
-    t_in = t_in.contiguous();
-    auto BS = t_in.numel() / this->C;
-    auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
-    {
-      RECORD_OMP_TIME();
-      auto gemm_loop = ThreadedLoop<3>(
-          {LoopSpecs{0, Nc, Ncb, false}, LoopSpecs{0L, BS, BSb}, LoopSpecs{Nk}},
-          loop_scheme);
-      gemm_loop(
-          [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            func(nc, s1, nk);
-          },
-          [&]() {
-            TimerStart();
-            brgemm_tpp.config();
-          },
-          [&]() {
-            brgemm_tpp.release();
-            TimerEnd();
-          });
-    }
-  }
-
-  static void fused_gemm(
-      std::vector<TppBlockedLinearW<T, Tw, Tout>>& gemms,
-      at::Tensor& t_in,
-      std::vector<at::Tensor>& t_wt_V,
-      std::vector<at::Tensor>& t_bias,
-      std::vector<at::Tensor>& t_out) {
-    int n_gemms = gemms.size();
-    long totalN = 0;
-    auto BS = t_in.numel() / gemms[0].C;
-    long Nc = gemms[0].Nc;
-    long Ncb = gemms[0].Ncb;
-    long BSb = gemms[0].BSb;
-    auto loop_scheme = gemms[0].loop_scheme;
-    std::vector<std::function<void(int, int, int)>> funcs;
-    for (int i = 0; i < n_gemms; i++) {
-      auto& g = gemms[i];
-      funcs.push_back(g.stepFunc(t_in, t_wt_V[i], t_bias[i], t_out[i], BS));
-      totalN += g.Nk;
-      TPP_ASSERT(
-          g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
-          "Fused QKV weight block mismatch\n");
-    }
-    {
-      RECORD_OMP_TIME();
-      auto gemm_loop = ThreadedLoop<3>(
-          {LoopSpecs{0, Nc, Ncb, false},
-           LoopSpecs{0L, BS, BSb},
-           LoopSpecs{totalN}},
-          loop_scheme);
-      gemm_loop(
-          [&](int* ind) {
-            int nc = ind[0], s1 = ind[1], nk = ind[2];
-            int i = 0;
-            while (nk >= gemms[i].Nk) {
-              nk -= gemms[i].Nk;
-              i++;
-            }
-            funcs[i](nc, s1, nk);
-          },
-          [&]() {
-            TimerStart();
-            gemms[0].brgemm_tpp.config();
-          },
-          [&]() {
-            gemms[0].brgemm_tpp.release();
-            TimerEnd();
-          });
-    }
-  }
-
-  static TppBlockedLinearW<T, Tw, Tout> get(
-      at::Tensor& t_in,
-      at::Tensor& t_wt,
-      at::Tensor& t_bias) {
-    return Base::template _get<TppBlockedLinearW<T, Tw, Tout>>(
-        t_in, t_wt, t_bias);
-  }
-};
-
-class NullPostOp {
- public:
-  template <typename GemmT>
-  constexpr void operator()(GemmT& gemm) {}
-};
-
-class GeluPostOp {
- public:
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto gelu_tpp = SCOPEIT(GeluFwdTPP<T>(M, N, LD, LD), ACT);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            gelu_tpp(out[x][y], out[x][y]);
-          });
-    }
-  }
-};
-
-class SiluPostOp {
- public:
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto silu_tpp = SCOPEIT(SiLUFwdTPP<T>(M, N, LD, LD), ACT);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            silu_tpp(out[x][y], out[x][y]);
-          });
-    }
-  }
-};
-
-class ReluPostOp {
- public:
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto relu_tpp = SCOPEIT(ReLUFwdTPP<T>(M, N, LD, LD, false), ACT);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            relu_tpp(out[x][y], out[x][y]);
-          });
-    }
-  }
-};
-
-class MulPostOp {
- public:
-  MulPostOp(at::Tensor t_in) : t_in(t_in) {}
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto in = gemm.getOutputVLAPtr(t_in);
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto mul_tpp = SCOPEIT((MulTPP<T, T>(M, N, LD, LD)), EW_MUL);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            mul_tpp(in[x][y], out[x][y], out[x][y]);
-          });
-    }
-  }
-
- private:
-  at::Tensor t_in;
-};
-
-class AddScalePostOp {
- public:
-  AddScalePostOp(at::Tensor t_in, float scale) : t_in(t_in), scale(scale) {}
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto in = gemm.getOutputVLAPtr(t_in);
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(M, N, LD, LD)), EW_ADD);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            sadd_tpp(in[x][y], out[x][y], scale);
-          });
-    }
-  }
-
- private:
-  at::Tensor t_in;
-  float scale;
-};
-
-class Add2ScalePostOp {
- public:
-  Add2ScalePostOp(at::Tensor t_in1, at::Tensor t_in2, float scale)
-      : t_in1(t_in1), t_in2(t_in2), scale(scale) {}
-  template <typename GemmT>
-  void operator()(GemmT& gemm) {
-    using T = typename GemmT::Tout;
-    auto in1 = gemm.getOutputVLAPtr(t_in1);
-    auto in2 = gemm.getOutputVLAPtr(t_in2);
-    auto num_shapes = gemm.numOutputShapes();
-    for (int i = 0; i < num_shapes; i++) {
-      long M, N, LD;
-      std::tie(M, N, LD) = gemm.getOutputShape(i);
-      auto add_tpp = SCOPEIT((AddTPP<T, T>(M, N, LD, LD)), EW_ADD);
-      auto sadd_tpp = SCOPEIT((ScaleAddTPP<T, T>(M, N, LD, LD)), EW_ADD);
-      gemm.setPostOpCB(
-          i, [=](const VLAPtr<T, 2, long>& out, long x, long y) mutable {
-            add_tpp(out[x][y], in1[x][y], out[x][y]);
-            sadd_tpp(in2[x][y], out[x][y], scale);
-          });
-    }
-  }
-
- private:
-  at::Tensor t_in1, t_in2;
-  float scale;
-};
-
-template <typename GemmT, typename CB>
-inline at::Tensor dispatch_gemm(
-    CB& cb,
-    at::Tensor& t_in,
-    at::Tensor& t_wt,
-    at::Tensor& t_bias,
-    c10::optional<at::Tensor> t_out_ = {}) {
-  auto gemm = GemmT::get(t_in, t_wt, t_bias);
-  cb(gemm);
-  at::Tensor t_out;
-  if (t_out_) {
-    t_out = t_out_.value();
-  } else {
-    t_out = gemm.new_empty(t_in);
-  }
-  gemm(t_in, t_wt, t_bias, t_out);
-  return t_out;
-}
-
-template <typename Tin, typename Tout, typename CB>
-inline at::Tensor call_gemm_with_post_op(
-    CB cb,
-    at::Tensor& t_in,
-    at::Tensor& t_wt,
-    at::Tensor& t_bias,
-    c10::optional<at::Tensor> t_out_ = {}) {
-  // Check and redispatch with specialized type
-  if (t_wt.is_quantized()) {
-    if (t_wt.qscheme() == at::kPerBlockMxFP) {
-      if (t_wt.dtype() == at::kQUInt4x2) {
-        return dispatch_gemm<TppBlockedLinearW<Tin, uint8_t, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        // return dispatch_gemm<
-        // TppBlockedLinearMxFPW<Tin, at::kQUInt4x2, Tout>,
-        // TppBlockedLinearW<Tin, uint8_t, Tout>,
-        // CB>(cb, t_in, t_wt, t_bias);
-      } else {
-        TPP_ASSERT(false, "Unsupported qdtype\n");
-      }
-    } else {
-      TPP_ASSERT(false, "Unsupported qscheme\n");
-    }
-  } else if (t_wt.is_sparse_csr()) {
-  } else {
-    auto dtype = t_wt.scalar_type();
-    switch (dtype) {
-      case at::kFloat:
-        return dispatch_gemm<TppBlockedLinearW<Tin, float, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kBFloat16:
-        return dispatch_gemm<TppBlockedLinearW<Tin, bfloat16, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kHalf:
-        return dispatch_gemm<TppBlockedLinearW<Tin, half, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kHFloat8:
-        return dispatch_gemm<TppBlockedLinearW<Tin, hfloat8, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      case at::kBFloat8:
-        return dispatch_gemm<TppBlockedLinearW<Tin, bfloat8, Tout>, CB>(
-            cb, t_in, t_wt, t_bias);
-        break;
-      default:
-        TPP_ASSERT(false, "Unsupported dtype\n");
-    }
-  }
-  return at::Tensor();
-}
-
-template <typename Tin, typename Tout = Tin>
-inline at::Tensor call_gemm(
-    at::Tensor& t_in,
-    at::Tensor& t_wt,
-    at::Tensor& t_bias,
-    c10::optional<at::Tensor> t_out_ = {}) {
-  return call_gemm_with_post_op<Tin, Tout>(
-      NullPostOp(), t_in, t_wt, t_bias, t_out_);
-}
-
-template <typename Tin, typename Tout = Tin>
-struct GemmCaller {
-  GemmCaller() : GemmCaller(SCOPE_ARG(gemm)) {}
-  GemmCaller(int scopeId, const char* scopeName)
-      : scopeId(scopeId), scopeName(scopeName) {}
-
-  at::Tensor operator()(
-      at::Tensor in,
-      at::Tensor wt,
-      at::Tensor bias,
-      c10::optional<at::Tensor> out = c10::nullopt) {
-    GlobalScope gs_(scopeId);
-    RECORD_FUNCTION(scopeName, std::vector<c10::IValue>({in, wt}));
-    return call_gemm_with_post_op<Tin, Tout>(NullPostOp(), in, wt, bias, out);
-  }
-
-  template <typename CB>
-  at::Tensor operator()(
-      CB cb,
-      at::Tensor in,
-      at::Tensor wt,
-      at::Tensor bias,
-      c10::optional<at::Tensor> out = c10::nullopt) {
-    GlobalScope gs_(scopeId);
-    RECORD_FUNCTION(scopeName, std::vector<c10::IValue>({in, wt}));
-    return call_gemm_with_post_op<Tin, Tout>(cb, in, wt, bias, out);
-  }
-
- protected:
-  const int scopeId;
-  const char* scopeName;
-};
-
-template <typename T>
-inline at::Tensor fc_plain(
-    at::Tensor t_in,
-    at::Tensor t_wt,
-    at::Tensor t_bias,
-    c10::optional<at::Tensor> t_out = {}) {
-  auto pln_gemm = GemmCaller<T>(SCOPE_ARG(pln_gemm));
-  return pln_gemm(t_in, t_wt, t_bias, t_out);
-}
-
-inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t) {
-  RECORD_SCOPE(fftkn, {t});
-  auto dim = t.dim();
-  if (dim == 5) {
-    auto sizes = t.sizes();
-    auto K1 = sizes[0];
-    auto C1 = sizes[1];
-    auto C2 = sizes[2];
-    auto K2 = sizes[3];
-    auto C3 = sizes[4];
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
-      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
-      t = t.view({K1 / RBS, RBS, C1, C2, K2, C3})
-              .permute({0, 2, 3, 1, 4, 5})
-              .contiguous()
-              .view({K1 / RBS, C1, C2, RBS * K2, C3});
-    }
-  } else if (dim == 4) {
-    auto sizes = t.sizes();
-    auto K1 = sizes[0];
-    auto C1 = sizes[1];
-    auto C2 = sizes[2];
-    auto K2 = sizes[3];
-    TPP_ASSERT(C2 % 2 == 0, "Shape not compatible for VNNI2\n");
-    if (K2 < 32 && 32 % K2 == 0) {
-      int RBS = 32 / K2;
-      TPP_ASSERT(K1 % RBS == 0, "Shape not compatible for MXFP4\n");
-      t = t.view({K1 / RBS, RBS, C1, C2 / 2, 2L, K2})
-              .permute({0, 2, 3, 1, 5, 4})
-              .contiguous()
-              .view({K1 / RBS, C1, C2 / 2, RBS * K2, 2});
-    }
-  }
-  auto ret = quantize_mxfp4(t, 32, 2, true);
-  return ret;
-}
-
 template <typename T>
 inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
   RECORD_SCOPE(fftkn, {t});
   auto dim = t.dim();
-  if (dim < 5)
-    return t;
+
+  if (dim < 5) {
+    if (USE_QINT8_FT == 1)
+      return remap_and_quantize_qint8(t);
+    else if (USE_MXFP4_FT == 1)
+      return remap_and_quantize_mxfp4(t);
+    else
+      return t;
+  }
   auto sizes = t.sizes();
   auto K1 = sizes[0];
   auto C1 = sizes[1];
@@ -1150,7 +481,12 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
     }
   }
 #endif
-  return t_new;
+  if (USE_QINT8_FT == 1)
+    return remap_and_quantize_qint8(t_new);
+  else if (USE_MXFP4_FT == 1)
+    return remap_and_quantize_mxfp4(t_new);
+  else
+    return t_new;
 }
 
 template <typename GemmT>
@@ -1185,13 +521,25 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
   if (t_wt.is_quantized()) {
     if (t_wt.qscheme() == at::kPerBlockMxFP) {
       if (t_wt.dtype() == at::kQUInt4x2) {
-        return fused_qkv_gemm_spl<TppBlockedLinearW<Tin, uint8_t, Tout>>(
+        if (t_wt.size(-1) == 2) {
+          return fused_qkv_gemm_spl<TppBlockedLinearW<Tin, uint8_t, Tout>>(
+              t_in, t_wts, t_bias);
+        } else {
+          return fused_qkv_gemm_spl<TppBlockedLinearW<int8_t, uint8_t, Tout>>(
+              t_in, t_wts, t_bias);
+        }
+      } else {
+        TPP_ASSERT(false, "Unsupported qdtype\n");
+      }
+    } else if (t_wt.qscheme() == at::kPerBlockAffine) {
+      if (t_wt.dtype() == at::kQInt8) {
+        return fused_qkv_gemm_spl<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>>(
             t_in, t_wts, t_bias);
       } else {
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
     } else {
-      TPP_ASSERT(false, "Unsupported qscheme\n");
+      TPP_ASSERT(false, "Unsupported qscheme 3\n");
     }
   } else if (t_wt.is_sparse_csr()) {
     TPP_ASSERT(false, "Sparse Tensor Types not supported yet\n");
@@ -1237,16 +585,20 @@ struct AttnKernels {
   SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
   SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
   SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
+  SCOPEIT_DECL(SoftMaxFlashScaleTPP<T>) softmax_scale;
 
   AttnKernels(
       long Sqb,
       long Skb,
+      long Sk_pad,
       long H,
       int pad,
       int kl_in_vnni,
       int vl_in_vnni) {
-    // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb, Skb,
-    // H, pad, kl_in_vnni, vl_in_vnni);
+    // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb,
+    // Skb, H, pad, kl_in_vnni, vl_in_vnni);
+    if (Sk_pad < Skb)
+      Sk_pad = Skb;
     if (Sqb == 0)
       Sqb = 1; // hack for unused kernels to not generate 0 size kernels
     if (Skb == 0)
@@ -1257,9 +609,13 @@ struct AttnKernels {
     // [Sqb, Skb]
     scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
     add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
-    add_2dmask_tpp = SCOPEIT((AddTPP<T, float, float>(Sqb, Skb)), EW_ADD);
-    softmax_fwd_tpp = SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb)), SOFTMAX);
-    softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H)), EW_RCP);
+    add_2dmask_tpp =
+        SCOPEIT((AddTPP<T, float, float>(Sqb, Skb, Sk_pad, Skb, Skb)), EW_ADD);
+    softmax_fwd_tpp =
+        SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
+    softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
+    softmax_scale =
+        SCOPEIT((SoftMaxFlashScaleTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
     // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
     c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
         Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
@@ -1942,7 +1298,8 @@ inline at::Tensor attn(
     at::Tensor t_QL,
     at::Tensor t_KL,
     at::Tensor t_AM,
-    at::Tensor t_VL) {
+    at::Tensor t_VL,
+    bool isCausal = true) {
   RECORD_SCOPE(ac_gemm1, {t_QL, t_KL});
   auto t_CL = at::empty_like(t_QL);
   auto sizes = t_QL.sizes();
@@ -1967,7 +1324,8 @@ inline at::Tensor attn(
   int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
   const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
   long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
+  // const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
+  const long Skb = SK_BLOCK_SIZE;
   long krem = Sk % Skb;
   int pad = Sk_pad - Sk;
 
@@ -1997,12 +1355,24 @@ inline at::Tensor attn(
   auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
   auto AM2 = GetVLAPtr<T>(t_AM, {Sq, Sk_pad});
   int kl_in_vnni = 1;
+  static bool print_flag = true;
+  if (print_flag) {
+    if (my_rank == 0)
+      printf(
+          "Attn: Sqb = %ld Skb = %ld use_flash = %s\n",
+          Sqb,
+          Skb,
+          USE_FLASH ? "True" : "False");
+    print_flag = false;
+  }
 
   AttnKernels<T, Tv> attn_kern[4] = {
-      AttnKernels<T, Tv>(Sqb, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(Sqb, krem + pad, H, pad, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(qrem, Skb, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(qrem, krem + pad, H, pad, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(Sqb, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(
+          Sqb, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(qrem, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
+      AttnKernels<T, Tv>(
+          qrem, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
   };
 
   if (!inline_trans) {
@@ -2045,10 +1415,12 @@ inline at::Tensor attn(
                 k_ptr = k_tmp;
               }
               ak.a_gemm_tpp(QL[b][nq][sq], k_ptr, AS[0], 1);
-              for (int sq1 = 0; sq1 < qbs; sq1++) {
-                auto qval = sq + sq1 + offset;
-                for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
-                  AS[sq1][sk1 - sk] = -1e9f;
+              if (!am_is_2d && isCausal) {
+                for (int sq1 = 0; sq1 < qbs; sq1++) {
+                  auto qval = sq + sq1 + offset;
+                  for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
+                    AS[sq1][sk1 - sk] = -1e9f;
+                  }
                 }
               }
               ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
@@ -2058,15 +1430,11 @@ inline at::Tensor attn(
                 else
                   ak.add_mask_tpp(&AM[b][sk], AS[0]);
               }
-              float *pmax, *psum;
               if (sk == 0) {
-                pmax = omax;
-                psum = osum;
+                ak.softmax_fwd_tpp(1, AS[0], AST[0], omax, osum, nullptr);
               } else {
-                pmax = cmax;
-                psum = csum;
+                ak.softmax_fwd_tpp(1, AS[0], AST[0], cmax, csum, omax);
               }
-              ak.softmax_fwd_tpp(1, AS[0], AST[0], pmax, psum);
               // for (int xx=0;xx<kbs;xx++)
               // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n",
               // sk+xx, (float)AST[0][xx]);
@@ -2085,6 +1453,7 @@ inline at::Tensor attn(
                 ak.softmax_fixup(tmp, CL[b][nq][sq], cmax, csum, omax, osum);
               }
             }
+            attn_kern[qid * 2].softmax_scale(CL[b][nq][sq], osum);
           }
         }
       }
@@ -2345,6 +1714,24 @@ struct __attribute__((visibility("hidden"))) LLMBlock
   }
 };
 
+void print_diff(const std::string& tag, at::Tensor a, at::Tensor b) {
+  a = a.flatten().to(at::kFloat);
+  b = b.flatten().to(at::kFloat);
+  long N = a.numel();
+  auto ap = a.data_ptr<float>();
+  auto bp = b.data_ptr<float>();
+  float max_diff = 0;
+  std::cout << tag << "  sz: " << N << std::endl;
+  for (long i = 0; i < N; i++) {
+    auto diff = fabsf(ap[i] - bp[i]);
+    if (diff > max_diff) {
+      printf("%5ld: r: %12.8g  q: %12.8g  d: %12.8g\n", i, ap[i], bp[i], diff);
+      max_diff = diff;
+    }
+  }
+  std::cout << tag << "  end " << std::endl;
+}
+
 struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
  public:
   at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
@@ -2400,13 +1787,26 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
       t_Wp = remap_and_quantize_mxfp4(t_Wp);
       t_Wi = remap_and_quantize_mxfp4(t_Wi);
       t_Wo = remap_and_quantize_mxfp4(t_Wo);
+    } else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wi = remap_and_quantize_qint8(t_Wi);
+      t_Wo = remap_and_quantize_qint8(t_Wo);
     }
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     auto dt = t_Wq.dtype();
     if (my_rank == 0) {
       std::cout << "my_size=" << my_size << " N=" << N << " H=" << H
-                << " wt dt=" << dt << std::endl;
+                << " wt dt=" << dt << " 1st wt dt=" << t_Wq_1.dtype()
+                << std::endl;
     }
   }
 
@@ -2612,6 +2012,20 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
       t_Wo = remap_and_quantize_mxfp4(t_Wo);
     }
 
+    else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wi = remap_and_quantize_qint8(t_Wi);
+      t_Wo = remap_and_quantize_qint8(t_Wo);
+    }
+
     N = t_Wq.size(0) * t_Wq.size(3) / H;
     auto dt = t_Wq.dtype();
     if (my_rank == 0) {
@@ -2793,6 +2207,21 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
       t_Wd = remap_and_quantize_mxfp4(t_Wd);
     }
 
+    else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wg = remap_and_quantize_qint8(t_Wg);
+      t_Wu = remap_and_quantize_qint8(t_Wu);
+      t_Wd = remap_and_quantize_qint8(t_Wd);
+    }
+
     Nq = t_Wq.size(0) * t_Wq.size(3) / H;
     Nkv = t_Wk.size(0) * t_Wk.size(3) / H;
     auto dt = t_Wq.dtype();
@@ -2933,6 +2362,14 @@ static at::Tensor fc_plain_wrap(
   at::Tensor t_out;
 
   auto dt_in = t_in.dtype();
+  if (dt_in == at::kQInt8) {
+    if (t_bias.dtype().itemsize() > 0) {
+      dt_in = t_bias.dtype();
+    } else {
+      dt_in = c10::scalarTypeToTypeMeta(at::kFloat);
+    }
+  }
+
   if (dt_in == at::kFloat) {
     typedef float T;
     t_out = fc_plain<T>(t_in, t_wt, t_bias);

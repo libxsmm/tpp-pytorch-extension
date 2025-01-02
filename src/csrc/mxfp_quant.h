@@ -75,6 +75,13 @@ int get_sign(const u_float_int input) {
   return sign;
 }
 
+float get_fp_scale(const int exp) {
+  u_float_int out;
+  // Shift up to exp bits
+  out.i = exp << FLOAT32_EXP_OFFSET;
+  return out.f;
+}
+
 int get_biased_exponent(const u_float_int input) {
   // Mask only exponent bits
   int exp = input.i & FLOAT32_EXP_MASK;

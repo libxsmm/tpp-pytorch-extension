@@ -46,7 +46,10 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
       scale_sizes_.pop_back();
     } else {
       // Make sure axis is last dim
-      TPP_ASSERT(axis == (int64_t)scale_sizes_.size() - 1, "Invalid axis\n");
+      TPP_ASSERT(
+          axis == (int64_t)scale_sizes_.size() - 1,
+          "Invalid axis %d\n",
+          (int)axis);
       TPP_ASSERT(scale_sizes_[axis] % pack_size_ == 0, "Invalid dim size\n");
       vnni_pack_size_ = pack_size_;
       scale_sizes_[axis] /= pack_size_;
@@ -136,6 +139,7 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
     using Ts = typename QCls::Ts;
 
     auto bs = this->block_size_internal_;
+    auto qtpp = QCls::GetQuantizeTPP(bs);
     auto vnni = vnni_pack_size_;
     auto packed_vnni = vnni_pack_size_ / pack_size_;
     auto in = GetVLAPtr<Tin>(t_in, {bs, post_, vnni});
@@ -173,10 +177,63 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
             }
           }
         } else {
+          if (vnni == 1 && post_ == 1) {
+            qt.quantize(in[i][0][0], out[i][0][0], qtpp);
+          } else {
+            for (int k = 0; k < bs; k++) {
+              for (int v = 0; v < vnni; v++) {
+                auto qval = qt.quantize(in[i][k][j][v]);
+                out[i][k][j][v] = qval;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  template <typename QCls>
+  void dequantize_symetric(
+      const at::Tensor& t_in,
+      at::Tensor& t_scales,
+      at::Tensor& t_out) {
+    using Tin = typename QCls::Tin;
+    using Tout = typename QCls::Tout;
+    using Ts = typename QCls::Ts;
+
+    auto bs = this->block_size_internal_;
+    auto vnni = vnni_pack_size_;
+    auto packed_vnni = vnni_pack_size_ / pack_size_;
+    auto in = GetVLAPtr<Tout>(t_in, {bs, post_, packed_vnni});
+    auto scales = GetVLAPtr<Ts>(t_scales, {post_});
+    auto out = GetVLAPtr<Tin>(t_out, {bs, post_, vnni});
+    // std::cout << "tin: " << t_in.sizes() << std::endl;
+    // std::cout << "bs: " << bs << " vnni: " << vnni << " pre_: " << pre_
+    //           << " post_: " << post_ << " packed_vnni: " << packed_vnni
+    //           << std::endl;
+
+#pragma omp parallel for collapse(2)
+    for (int i = 0; i < pre_; i++) {
+      for (int j = 0; j < post_; j++) {
+        auto qt = QCls();
+        qt.set_scale(scales[i][j]);
+
+        if (pack_size_ == 2) {
+          for (int k = 0; k < bs; k++) {
+            for (int v1 = 0; v1 < packed_vnni; v1++) {
+              unsigned int packed_qval = in[i][k][j][v1];
+              for (int v2 = 0; v2 < pack_size_; v2++) {
+                int v = v1 * pack_size_ + v2;
+                unsigned int qval = (packed_qval >> (v2 * 4)) & 0xF;
+                out[i][k][j][v] = qt.dequantize(qval);
+              }
+            }
+          }
+        } else {
           for (int k = 0; k < bs; k++) {
             for (int v = 0; v < vnni; v++) {
-              auto qval = qt.quantize(in[i][k][j][v]);
-              out[i][k][j][v] = qval;
+              auto val = qt.dequantize(in[i][k][j][v]);
+              out[i][k][j][v] = val;
             }
           }
         }
@@ -270,10 +327,84 @@ struct TORCH_API PerBlockMxFPQuantizer : public at::PerBlockQuantizer {
   const bool is_vnni_;
 };
 
+struct TORCH_API PerBlockAffineQuantizer : public at::PerBlockQuantizer {
+  explicit PerBlockAffineQuantizer(
+      ScalarType scalar_type,
+      Tensor t_in,
+      int64_t block_size,
+      int64_t axis,
+      bool is_vnni,
+      bool use_zp)
+      : PerBlockQuantizer(scalar_type, t_in.sizes(), block_size, axis, is_vnni),
+        has_zp_(use_zp) {
+    scales_ = t_in.new_empty(this->scale_sizes(), kFloat);
+    if (has_zp_) {
+      zero_points_ = t_in.new_empty(this->scale_sizes(), kFloat);
+    }
+  }
+
+  QScheme qscheme() const override {
+    return kPerBlockAffine;
+  }
+
+  Tensor scales() const {
+    return scales_;
+  }
+
+  void set_scales(Tensor& scales) {
+    scales_ = scales;
+  }
+
+  Tensor zero_points() const {
+    return zero_points_;
+  }
+  bool has_zp() const {
+    return has_zp_;
+  }
+
+  Tensor quantize(const Tensor& tensor) override;
+  Tensor dequantize(const Tensor& qtensor) override;
+  Tensor& dequantize_out(Tensor& rtensor, const Tensor& qtensor) override;
+
+  bool equalTo(QuantizerPtr other) const override {
+    if (!other.get() || other->qscheme() != kPerBlockAffine) {
+      return false;
+    }
+    auto* other_per_block_affine =
+        static_cast<PerBlockAffineQuantizer*>(other.get());
+    return scalar_type() == other_per_block_affine->scalar_type() &&
+        scales().equal(other_per_block_affine->scales()) &&
+        has_zp() == other_per_block_affine->has_zp() &&
+        (has_zp() == false ||
+         zero_points().equal(other_per_block_affine->zero_points())) &&
+        block_size() == other_per_block_affine->block_size() &&
+        axis() == other_per_block_affine->axis() &&
+        is_vnni() == other_per_block_affine->is_vnni();
+  }
+
+ protected:
+  Tensor scales_;
+  Tensor zero_points_;
+  bool has_zp_;
+};
+
 } // namespace at
+
+int64_t q_per_block_block_size(const at::Tensor& self);
+
+at::Tensor q_per_block_scales(const at::Tensor& self);
 
 at::Tensor quantize_mxfp4(
     const at::Tensor& self,
     int64_t block_size,
     int64_t axis,
     bool is_vnni);
+
+at::Tensor quantize_int8sym(
+    const at::Tensor& self,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni);
+
+at::Tensor remap_and_quantize_mxfp4(at::Tensor t);
+at::Tensor remap_and_quantize_qint8(at::Tensor t);

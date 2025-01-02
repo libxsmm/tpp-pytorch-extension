@@ -250,6 +250,7 @@ class ScopedTPP {
 #define SCOPEIT(f, ...) ScopedTPP<decltype(f), 0>(f, ##__VA_ARGS__)
 #define SCOPEIT_REF(f, ...) ScopedTPP<decltype(f), 1>(f, ##__VA_ARGS__)
 #define SCOPEIT_DECL(t, ...) ScopedTPP<t, ##__VA_ARGS__, 0>
+#define SCOPEIT_REF_DECL(t, ...) ScopedTPP<t, ##__VA_ARGS__, 1>
 #else
 #define SCOPEIT(f, ...) f
 #define SCOPEIT_DECL(t, ...) t, ##__VA_ARGS__

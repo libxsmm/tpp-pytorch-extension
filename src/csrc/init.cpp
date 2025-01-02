@@ -17,7 +17,10 @@
 #endif
 
 double ifreq = 1.0 / getFreq();
+int TPP_VERBOSE = env2int("TPP_VERBOSE", 0);
+static int TPP_DEBUG_TIMER_TIDS_UPTO = env2int("TPP_DEBUG_TIMER_TIDS_UPTO", 0);
 static int TPP_DEBUG_TIMER_RANK = env2int("TPP_DEBUG_TIMER_RANK", 0);
+static int TPP_DEBUG_TIMER_DETAILED = env2int("TPP_DEBUG_TIMER_DETAILED", 0);
 
 #ifdef DEBUG_TRACE_TPP
 int tpp_debug_trace = env2int("TPP_DEBUG_TRACE", 0);
@@ -76,6 +79,7 @@ void reset_debug_timers() {
 }
 
 void print_debug_timers(int tid, bool detailed) {
+  detailed = detailed || (TPP_DEBUG_TIMER_DETAILED != 0);
   int my_rank = guess_mpi_rank();
   if (my_rank != TPP_DEBUG_TIMER_RANK && TPP_DEBUG_TIMER_RANK != -1)
     return;
@@ -99,7 +103,7 @@ void print_debug_timers(int tid, bool detailed) {
       "IMBL",
       "TF/s");
   for (int i = 0; i < max_threads; i++) {
-    if (tid == -1 || tid == i) {
+    if (tid == -1 || tid == i || TPP_DEBUG_TIMER_TIDS_UPTO > i) {
       auto print_scope = [&](const Scope& scope) {
         if (scope.master_timer == 0.0)
           return;

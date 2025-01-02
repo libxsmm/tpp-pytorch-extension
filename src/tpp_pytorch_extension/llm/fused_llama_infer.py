@@ -341,6 +341,11 @@ def LlamaModel_forward(
     causal_mask = self._update_causal_mask(
         attention_mask, inputs_embeds, cache_position, past_seen_tokens
     )
+    Sk = past_seen_tokens + inputs_embeds.size(1)
+    if causal_mask is not None and Sk != causal_mask.shape[-1]:
+        # print("causal_mask before: ", causal_mask.shape)
+        causal_mask = causal_mask[..., :Sk].contiguous()
+        # print("causal_mask After: ", causal_mask.shape)
 
     # embed positions
     hidden_states = inputs_embeds

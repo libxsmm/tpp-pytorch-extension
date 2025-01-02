@@ -24,6 +24,10 @@ fi
 
 # branch=$(echo $pt_version | tr "." " " | awk '{print "ccl_torch" $1 "." $2}')
 case $pt_version in
+  2.5.*)
+    branch="v2.5.0+cpu" ;;
+  2.4.*)
+    branch="v2.4.0+cpu+rc0" ;;
   2.3.*)
     branch="v2.3.0+cpu" ;;
   2.2.*)

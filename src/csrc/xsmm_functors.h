@@ -102,6 +102,10 @@ template <>
 inline libxsmm_datatype XsmmDtype<uint8_t>() {
   return LIBXSMM_DATATYPE_I8;
 }
+template <>
+inline libxsmm_datatype XsmmDtype<int8_t>() {
+  return LIBXSMM_DATATYPE_I8;
+}
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 template <>
 inline libxsmm_datatype XsmmDtype<bfloat8>() {
@@ -222,6 +226,13 @@ inline __m128i _mm_convert_ps_hf8(__m512 a) {
       _mm512_cvtps_ph(a, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), 8));
 }
 
+inline __m512 _mm512_loadu_ps_auto(int const* mem_addr) {
+  return _mm512_cvtepi32_ps(_mm512_loadu_epi32(mem_addr));
+}
+inline __m512 _mm512_maskz_loadu_ps_auto(__mmask16 k, int const* mem_addr) {
+  return _mm512_cvtepi32_ps(_mm512_maskz_loadu_epi32(k, mem_addr));
+}
+
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 inline __m512 _mm512_loadu_ps_auto(bfloat8 const* mem_addr) {
   return _mm512_convert_bf8_ps(_mm_loadu_si128((__m128i const*)mem_addr));
@@ -247,6 +258,7 @@ inline __m512 _mm512_maskz_loadu_ps_auto(__mmask16 k, hfloat8 const* mem_addr) {
   return _mm512_convert_hf8_ps(
       _mm_maskz_loadu_epi8(k, (__m128i const*)mem_addr));
 }
+
 inline void _mm512_storeu_ps_auto(hfloat8* mem_addr, __m512 a) {
   _mm_storeu_si128((__m128i*)mem_addr, _mm_convert_ps_hf8(a));
 }
@@ -863,6 +875,213 @@ class ConvertTPP {
   int ldo = 0;
   UnaryTPP kernel;
   bool init_done = false;
+};
+
+template <typename Tin, typename Tout, typename Tscale = float>
+class QuantTPP {
+ public:
+  QuantTPP() {}
+  QuantTPP(int N) : QuantTPP(1, N) {}
+  QuantTPP(int rows, int cols) : QuantTPP(rows, cols, cols, cols) {}
+  QuantTPP(int rows, int cols, int ldi, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi(ldi),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_UNARY_NONE,
+            LIBXSMM_MELTW_TYPE_UNARY_QUANT) {}
+  void operator()(Tin* in, Tout* out, Tscale scale) {
+    if constexpr (true || std::is_same_v<Tin, float>) {
+      float fscale = (float)scale;
+      kernel((void*)in, &fscale, nullptr, (void*)out, nullptr);
+    } else {
+      ref(in, out, scale);
+    }
+  }
+  void ref(Tin* in, Tout* out, Tscale scale) {
+    constexpr int max = std::is_signed<Tout>::value
+        ? (1 << (8 * sizeof(Tout) - 1)) - 1
+        : (1 << (8 * sizeof(Tout))) - 1;
+    constexpr int min = std::is_signed<Tout>::value ? -max : 0;
+    float fscale = (float)scale;
+#ifdef __AVX512F__
+    auto vfscale = _mm512_set1_ps(fscale);
+    auto vmax = _mm512_set1_epi32(max);
+    auto vmin = _mm512_set1_epi32(min);
+    for (int j = 0; j < rows; j++) {
+      int i = 0;
+      for (i = 0; i < ALIGNDOWN(cols, 16); i += 16) {
+        auto vin = _mm512_loadu_ps_auto(&in[j * ldi + i]);
+        auto vq = _mm512_mul_ps(vin, vfscale);
+        auto v_i32 = _mm512_cvt_roundps_epi32(
+            vq, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        v_i32 = _mm512_max_epi32(_mm512_min_epi32(v_i32, vmax), vmin);
+        if constexpr (sizeof(Tout) == 1) {
+          auto res = _mm512_cvtepi32_epi8(v_i32);
+          _mm_storeu_epi8(&out[j * ldo + i], res);
+        } else if constexpr (sizeof(Tout) == 2) {
+          auto res = _mm512_cvtepi32_epi16(v_i32);
+          _mm256_storeu_epi16(&out[j * ldo + i], res);
+        } else {
+          _mm512_storeu_epi32(&out[j * ldo + i], v_i32);
+        }
+      }
+      if (i < cols) {
+        int rem = cols - i;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[j * ldi + i]);
+        auto vq = _mm512_mul_ps(vin, vfscale);
+        auto v_i32 = _mm512_cvt_roundps_epi32(
+            vq, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
+        v_i32 = _mm512_max_epi32(_mm512_min_epi32(v_i32, vmax), vmin);
+        if constexpr (sizeof(Tout) == 1) {
+          auto res = _mm512_cvtepi32_epi8(v_i32);
+          _mm_mask_storeu_epi8(&out[j * ldo + i], mask, res);
+        } else if constexpr (sizeof(Tout) == 2) {
+          auto res = _mm512_cvtepi32_epi16(v_i32);
+          _mm256_mask_storeu_epi16(&out[j * ldo + i], mask, res);
+        } else {
+          _mm512_mask_storeu_epi32(&out[j * ldo + i], mask, v_i32);
+        }
+      }
+    }
+#else
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        int qval = nearbyintf((float)in[i * ldi + j] * fscale);
+        qval = std::clamp(qval, min, max);
+        out[i * ldo + j] = (Tout)qval;
+      }
+    }
+#endif
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi = 0;
+  int ldo = 0;
+  UnaryTPP kernel;
+};
+
+template <typename Tin, typename Tout, typename Tscale>
+class DequantTPP : public BaseTPP {
+ public:
+  DequantTPP() {}
+  DequantTPP(int N) : DequantTPP(1, N) {}
+  DequantTPP(int rows, int cols) : DequantTPP(rows, cols, cols, cols) {}
+  DequantTPP(int rows, int cols, int ldi, int ldo)
+      : DequantTPP(rows, cols, ldi, ldo, 1) {}
+  DequantTPP(int rows, int cols, int ldi, int ldo, int ldis)
+      : rows(rows), cols(cols), ldi(ldi), ldo(ldo), ldis(ldis) {
+    kernel = (libxsmm_meqn_function)get_kernel();
+  }
+  void operator()(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+    libxsmm_meqn_param eqn_param;
+    libxsmm_matrix_arg arg_array[4];
+    arg_array[0].primary = (void*)w_scl;
+    arg_array[1].primary = (void*)i_scl;
+    arg_array[2].primary = (void*)in;
+    arg_array[3].primary = (void*)out;
+    eqn_param.inputs = arg_array;
+    eqn_param.output.primary = (void*)out;
+    kernel(&eqn_param);
+  }
+  void ref(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+#ifdef __AVX512F__
+    for (int i = 0; i < rows; i++) {
+      int j;
+      float fi_scl = (float)i_scl[i * ldis];
+      auto vfi_scl = _mm512_set1_ps(fi_scl);
+      for (j = 0; j < ALIGNDOWN(cols, 16); j += 16) {
+        auto vfw_scl = _mm512_loadu_ps_auto(&w_scl[j]);
+        auto vfscl = _mm512_mul_ps(vfi_scl, vfw_scl);
+        auto vin = _mm512_loadu_ps_auto(&in[i * ldi + j]);
+        auto vout = _mm512_loadu_ps_auto(&out[i * ldo + j]);
+        vout = _mm512_fmadd_ps(vfscl, vin, vout);
+        _mm512_storeu_ps_auto(&out[i * ldo + j], vout);
+      }
+      if (j < cols) {
+        int rem = cols - j;
+        __mmask16 mask = (1 << rem) - 1;
+        auto vfw_scl = _mm512_maskz_loadu_ps_auto(mask, &w_scl[j]);
+        auto vfscl = _mm512_mul_ps(vfi_scl, vfw_scl);
+        auto vin = _mm512_maskz_loadu_ps_auto(mask, &in[i * ldi + j]);
+        auto vout = _mm512_maskz_loadu_ps_auto(mask, &out[i * ldo + j]);
+        vout = _mm512_fmadd_ps(vfscl, vin, vout);
+        _mm512_mask_storeu_ps_auto(&out[i * ldo + j], mask, vout);
+      }
+    }
+#else
+    for (int i = 0; i < rows; i++) {
+      float fi_scl = (float)i_scl[i * ldis];
+      for (int j = 0; j < cols; j++) {
+        float fscl = fi_scl * (float)w_scl[j];
+        out[i * ldo + j] += (Tout)in[i * ldi + j] * fscl;
+      }
+    }
+#endif
+  }
+
+ protected:
+  std::string hash_str() override {
+    char hash[200];
+    snprintf(
+        hash,
+        200,
+        "dequant_eqn_t%d_%d_%d_r%d_c%d_ldi%d_ldo%d_ldsi%d",
+        XsmmDtype<Tin>(),
+        XsmmDtype<Tout>(),
+        XsmmDtype<Tscale>(),
+        rows,
+        cols,
+        ldi,
+        ldo,
+        ldis);
+    return std::string(hash);
+  }
+  void* build_kernel() override {
+    auto dt_in = XsmmDtype<Tin>();
+    auto dt_out = XsmmDtype<Tout>();
+    auto dt_scale = XsmmDtype<Tscale>();
+    libxsmm_blasint ld = ldo;
+    libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
+    meqn_push_ternary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_TERNARY_MULADD,
+        LIBXSMM_MELTW_FLAG_TERNARY_REUSE_IN_2_AS_OUT,
+        LIBXSMM_DATATYPE_F32);
+    meqn_push_binary_op(
+        my_eqn0,
+        LIBXSMM_MELTW_TYPE_BINARY_MUL,
+        LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0 |
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
+        LIBXSMM_DATATYPE_F32);
+    // TODO: FIX below eqn
+    meqn_push_arg(my_eqn0, cols, 1, cols, 0, 0, dt_scale);
+    meqn_push_arg(my_eqn0, 1, rows, ldis, 1, 0, dt_scale);
+    meqn_push_arg(my_eqn0, cols, rows, ldi, 2, 0, dt_in);
+    meqn_push_arg(my_eqn0, cols, rows, ldo, 3, 0, dt_out);
+    debug_print_eqn_tree(my_eqn0);
+    return (void*)meqn_dispatch(cols, rows, &ld, dt_out, my_eqn0);
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi = 0;
+  int ldo = 0;
+  int ldis = 1;
+  // int ldws = 1; must be 1
+  libxsmm_meqn_function kernel = NULL;
 };
 
 template <typename T>
@@ -2200,7 +2419,10 @@ template <
     typename Tin,
     typename Tout,
     typename Tw = Tin,
-    typename Tcomp = float>
+    typename Tcomp = typename std::conditional<
+        std::is_same_v<Tout, int> || std::is_same_v<Tin, int8_t>,
+        int,
+        float>::type>
 class BrgemmTPP {
  public:
   BrgemmTPP() {}
@@ -2237,7 +2459,9 @@ class BrgemmTPP {
       float beta,
       int a_trans,
       int unroll_hint,
-      int b_vnni = 1)
+      int b_vnni = 1,
+      int b_trans = 0,
+      int a_vnni = 1)
       : M(M),
         N(N),
         K(K),
@@ -2248,7 +2472,9 @@ class BrgemmTPP {
         ldc(ldc),
         beta(beta),
         a_trans(a_trans),
+        b_trans(b_trans),
         unroll_hint(unroll_hint),
+        a_vnni(a_vnni),
         b_vnni(b_vnni),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
@@ -2298,6 +2524,28 @@ class BrgemmTPP {
     gemm_param.a.primary = (void*)B;
     gemm_param.a.tertiary = (void*)B_scales;
     gemm_param.b.primary = (void*)A;
+    if (!no_tile_cfg) {
+      k_gemm_with_tc(&gemm_param);
+    } else {
+      k_gemm_no_tc(&gemm_param);
+    }
+  }
+  void operator()(
+      Tin* A,
+      float* A_scales,
+      Tw* B,
+      Tw* B_scales,
+      Tout* C,
+      unsigned long long count,
+      bool no_tile_cfg = false) {
+    libxsmm_gemm_param gemm_param;
+    memset(&gemm_param, 0, sizeof(libxsmm_gemm_param));
+    gemm_param.op.tertiary = &count;
+    gemm_param.c.primary = (void*)C;
+    gemm_param.a.primary = (void*)B;
+    gemm_param.a.tertiary = (void*)B_scales;
+    gemm_param.b.primary = (void*)A;
+    gemm_param.b.tertiary = (void*)A_scales;
     if (!no_tile_cfg) {
       k_gemm_with_tc(&gemm_param);
     } else {
@@ -2434,18 +2682,25 @@ class BrgemmTPP {
       if (brgemm_type != 0) {
         if (p->b_vnni)
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
-        if (p->b_vnni == 2) {
-          l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
+        if (p->b_vnni >= 2) {
+          if (p->b_vnni == 2)
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
+          else if (p->b_vnni == 8)
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI8_INTLV;
+          else
+            TPP_ASSERT(0, "Invalid B VNNI type\n");
           TPP_ASSERT(
               (std::is_same<Tw, uint8_t>::value),
               "MXFP4 must use uint8_t for weights\n");
         }
-        if (p->a_trans == 1) {
+        if (p->a_trans == 1 && p->a_vnni == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
         }
       }
       if (p->beta == 0)
         l_flags |= LIBXSMM_GEMM_FLAG_BETA_0;
+      if (p->b_trans == 1)
+        l_flags |= LIBXSMM_GEMM_FLAG_TRANS_A;
 
       // config = 0 - normal
       // config = 1 - no tile release
@@ -2474,7 +2729,7 @@ class BrgemmTPP {
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = (p->b_vnni == 2)
+      l_brconfig.br_stride_a_hint = (p->b_vnni == 2 || p->b_vnni == 8)
           ? (p->str_b * sizeof(Tw)) / 2
           : p->str_b * sizeof(Tw);
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
@@ -2504,8 +2759,10 @@ class BrgemmTPP {
   libxsmm_blasint ldc;
   float beta;
   int a_trans;
+  int b_trans;
   long brgemm_type = -1;
   int unroll_hint;
+  int a_vnni;
   int b_vnni;
   libxsmm_tilecfg_state l_tilestate;
   BrgemmKernel k_gemm_with_tc;
@@ -3948,230 +4205,6 @@ class VarSoftMaxFwdTPP {
   UnaryTPP kcpy;
 };
 
-// template <typename Tin, typename Tout>
-// class VarSoftMaxFwdTPP {
-//  public:
-//   VarSoftMaxFwdTPP() {}
-//   VarSoftMaxFwdTPP(int S2, int S3)
-//       : S2(S2),
-//         S3(S3),
-//         kmax(
-//             1,
-//             S3,
-//             S3,
-//             S3,
-//             XsmmDtype<Tin>(),
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_MELTW_FLAG_UNARY_REDUCE_ROWS,
-//             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_MAX),
-//         ksub(
-//             1,
-//             S3,
-//             S3,
-//             1,
-//             S3,
-//             XsmmDtype<Tin>(),
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
-//             LIBXSMM_MELTW_TYPE_BINARY_SUB),
-//         kexp(
-//             1,
-//             S3,
-//             S3,
-//             S3,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_MELTW_FLAG_UNARY_NONE,
-//             LIBXSMM_MELTW_TYPE_UNARY_EXP),
-//         ksum(
-//             1,
-//             S3,
-//             S3,
-//             S3,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_MELTW_FLAG_UNARY_REDUCE_ROWS,
-//             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_X_OP_ADD),
-//         kmul(
-//             1,
-//             S3,
-//             S3,
-//             S3,
-//             LIBXSMM_DATATYPE_F32,
-//             XsmmDtype<Tout>(),
-//             LIBXSMM_DATATYPE_F32,
-//             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
-//             LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
-//   void operator()(
-//       int S1,
-//       Tin* in,
-//       Tout* out,
-//       float* max_buf = nullptr,
-//       float* sum_buf = nullptr) {
-//     LIBXSMM_ALIGNED(float tmp[S1 * S3], 64);
-//     for (int s2 = 0; s2 < S2; s2++) {
-//       float max = (float)in[s2 * S3];
-//       float sum = 0.0f;
-//       for (int s1 = 0; s1 < S1; s1++) {
-//         float rmax = 0;
-//         kmax(&in[s1 * S2 * S3 + s2 * S3], &rmax);
-//         if (max < rmax)
-//           max = rmax;
-//       }
-//       for (int s1 = 0; s1 < S1; s1++) {
-//         LIBXSMM_ALIGNED(float tmp2[S3], 64);
-//         ksub(&in[s1 * S2 * S3 + s2 * S3], &max, tmp2);
-//         kexp(tmp2, &tmp[s1 * S3]);
-//         float lsum;
-//         ksum(&tmp[s1 * S3], &lsum);
-//         sum += lsum;
-//       }
-//       if (max_buf)
-//         max_buf[s2] = max;
-//       if (sum_buf)
-//         sum_buf[s2] = sum;
-//       sum = 1.0 / sum;
-//       for (int s1 = 0; s1 < S1; s1++) {
-//         kmul(&tmp[s1 * S3], &sum, &out[s1 * S2 * S3 + s2 * S3]);
-//       }
-//     }
-//   }
-//   void ref(
-//       int S1,
-//       Tin* pinp,
-//       Tout* pout,
-//       float* max_buf = nullptr,
-//       float* sum_buf = nullptr) {
-//     int s1, s2, s3;
-//     LIBXSMM_VLA_DECL(3, Tin, inp, pinp, S2, S3);
-//     LIBXSMM_VLA_DECL(3, Tout, out, pout, S2, S3);
-// #if defined(__AVX512F__)
-//     for (s2 = 0; s2 < S2; s2++) {
-//       float tmp[S1][S3];
-//       float max =
-//           upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
-//       float sum = 0.0;
-//       __m512 vmax = _mm512_set1_ps(max);
-//       __m512 vsum = _mm512_setzero_ps();
-
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-//           vmax = _mm512_max_ps(
-//               _mm512_loadu_ps_auto(
-//                   &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-//               vmax);
-//         }
-//         if (s3 < S3) {
-//           int rem = S3 - s3;
-//           __mmask16 mask = (1 << rem) - 1;
-//           vmax = _mm512_mask_max_ps(
-//               vmax,
-//               mask,
-//               _mm512_maskz_loadu_ps_auto(
-//                   mask, &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-//               vmax);
-//         }
-//       }
-//       max = _mm512_reduce_max_ps(vmax);
-//       vmax = _mm512_set1_ps(max);
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-//           __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-//               _mm512_loadu_ps_auto(
-//                   &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-//               vmax));
-//           _mm512_storeu_ps(&tmp[s1][s3], vz);
-//           vsum = _mm512_add_ps(vsum, vz);
-//         }
-//         if (s3 < S3) {
-//           int rem = S3 - s3;
-//           __mmask16 mask = (1 << rem) - 1;
-//           __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(_mm512_sub_ps(
-//               _mm512_maskz_loadu_ps_auto(
-//                   mask, &LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3)),
-//               vmax));
-//           _mm512_mask_storeu_ps(&tmp[s1][s3], mask, vz);
-//           vsum = _mm512_mask_add_ps(vsum, mask, vsum, vz);
-//         }
-//       }
-//       sum = _mm512_reduce_add_ps(vsum);
-//       if (max_buf)
-//         max_buf[s2] = max;
-//       if (sum_buf)
-//         sum_buf[s2] = sum;
-//       sum = 1.0 / sum;
-//       vsum = _mm512_set1_ps(sum);
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < ALIGNDOWN(S3, 16); s3 += 16) {
-//           _mm512_storeu_ps_auto(
-//               &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
-//               _mm512_mul_ps(vsum, _mm512_loadu_ps(&tmp[s1][s3])));
-//         }
-//         if (s3 < S3) {
-//           int rem = S3 - s3;
-//           __mmask16 mask = (1 << rem) - 1;
-//           _mm512_mask_storeu_ps_auto(
-//               &LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3),
-//               mask,
-//               _mm512_mul_ps(vsum, _mm512_maskz_loadu_ps(mask, &tmp[s1][s3])));
-//         }
-//       }
-//     }
-// #else
-//     // #warning "Not using AVX512 path for VarSoftMax"
-//     for (s2 = 0; s2 < S2; s2++) {
-//       float tmp[S1][S3];
-//       float max =
-//           upconvert_to_float(LIBXSMM_VLA_ACCESS(3, inp, 0, s2, 0, S2, S3));
-//       float sum = 0.0;
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < S3; s3++) {
-//           float cur = upconvert_to_float(
-//               LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3));
-//           if (max < cur)
-//             max = cur;
-//         }
-//       }
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < S3; s3++) {
-//           float cur = upconvert_to_float(
-//               LIBXSMM_VLA_ACCESS(3, inp, s1, s2, s3, S2, S3));
-//           float z = expf(cur - max);
-//           tmp[s1][s3] = z;
-//           sum += z;
-//         }
-//       }
-//       if (max_buf)
-//         max_buf[s2] = max;
-//       if (sum_buf)
-//         sum_buf[s2] = sum;
-//       sum = 1.0 / sum;
-//       for (s1 = 0; s1 < S1; s1++) {
-//         for (s3 = 0; s3 < S3; s3++) {
-//           float cur = tmp[s1][s3] * sum;
-//           // libxsmm_rne_convert_fp32_bf16( &cur, &LIBXSMM_VLA_ACCESS(3, out,
-//           // s1, s2, s3, S2, S3), 1 );
-//           LIBXSMM_VLA_ACCESS(3, out, s1, s2, s3, S2, S3) = cur;
-//         }
-//       }
-//     }
-// #endif
-//   }
-
-//  private:
-//   int S2, S3;
-//   UnaryTPP kmax;
-//   BinaryTPP ksub;
-//   UnaryTPP kexp;
-//   UnaryTPP ksum;
-//   BinaryTPP kmul;
-// };
-
 template <typename T1, typename T2, typename T3>
 class VarSoftMaxBwdTPP {
  public:
@@ -4404,7 +4437,7 @@ template <typename T>
 class SoftMaxFixUpTPP {
  public:
   SoftMaxFixUpTPP() {}
-  SoftMaxFixUpTPP(int S2, int S3, bool isFlash = false)
+  SoftMaxFixUpTPP(int S2, int S3, bool isFlash)
       : S2(S2), S3(S3), isFlash(isFlash), eqn(S3, isFlash) {}
   void operator()(
       T* cur,
@@ -4559,114 +4592,50 @@ class SoftMaxFixUpTPP {
   Eqn eqn;
 };
 
-// template <typename T>
-// class SoftMaxFixUpTPP {
-//  public:
-//   SoftMaxFixUpTPP() {}
-//   SoftMaxFixUpTPP(int S2, int S3) : S2(S2), S3(S3), eqn(S3) {}
-//   void operator()(
-//       T* cur,
-//       T* out,
-//       float* cmax,
-//       float* csum,
-//       float* omax,
-//       float* osum) {
-//     libxsmm_meqn_param eqn_param;
-//     libxsmm_matrix_arg arg_array[4];
-//     eqn_param.inputs = arg_array;
+template <typename T>
+class SoftMaxFlashScaleTPP {
+ public:
+  SoftMaxFlashScaleTPP() {}
+  SoftMaxFlashScaleTPP(int S2, int S3, bool isFlash)
+      : S2(S2),
+        S3(S3),
+        isFlash(isFlash),
+        div_kernel(
+            S2,
+            S3,
+            S3,
+            1,
+            S3,
+            XsmmDtype<T>(),
+            XsmmDtype<float>(),
+            XsmmDtype<T>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
+            LIBXSMM_MELTW_TYPE_BINARY_DIV) {}
 
-//     for (int s2 = 0; s2 < S2; s2++) {
-//       float nmax = std::max(cmax[s2], omax[s2]);
-//       float oexp = expf(omax[s2] - nmax);
-//       float cexp = expf(cmax[s2] - nmax);
-//       float nsum = cexp * csum[s2] + oexp * osum[s2];
-//       float rsum = 1.0 / nsum;
-//       float oscale = osum[s2] * oexp * rsum;
-//       float cscale = csum[s2] * cexp * rsum;
-//       arg_array[0].primary = &out[s2 * S3];
-//       arg_array[1].primary = &oscale;
-//       arg_array[2].primary = &cur[s2 * S3];
-//       arg_array[3].primary = &cscale;
-//       eqn_param.output.primary = (void*)&out[s2 * S3];
-//       eqn(&eqn_param);
-//       omax[s2] = nmax;
-//       osum[s2] = nsum;
-//     }
-//   }
+  void operator()(T* buf, float* osum) {
+    if (!isFlash)
+      return;
+    div_kernel(buf, osum, buf);
+  }
 
-//   void ref(T* cur, T* out, float* cmax, float* csum, float* omax, float* osum) {
-//     for (int s2 = 0; s2 < S2; s2++) {
-//       float nmax = std::max(cmax[s2], omax[s2]);
-//       float oexp = exp(omax[s2] - nmax);
-//       float cexp = exp(cmax[s2] - nmax);
-//       float nsum = cexp * csum[s2] + oexp * osum[s2];
-//       float rsum = 1.0 / nsum;
-//       float oscale = osum[s2] * oexp * rsum;
-//       float cscale = csum[s2] * cexp * rsum;
-//       for (int s3 = 0; s3 < S3; s3++) {
-//         out[s2 * S3 + s3] =
-//             oscale * out[s2 * S3 + s3] + cscale * cur[s2 * S3 + s3];
-//       }
-//       omax[s2] = nmax;
-//       osum[s2] = nsum;
-//     }
-//   }
+  void ref(T* buf, float* osum) {
+    if (!isFlash)
+      return;
+    for (int s2 = 0; s2 < S2; s2++) {
+      float isum = 1.0f / osum[s2];
+      for (int s3 = 0; s3 < S3; s3++) {
+        buf[s2 * S3 + s3] *= isum;
+      }
+    }
+  }
 
-//   class Eqn : BaseTPP {
-//    public:
-//     Eqn() {}
-//     Eqn(int S3) : S3(S3) {
-//       kernel = (libxsmm_meqn_function)get_kernel();
-//       initialized = true;
-//     }
-//     void operator()(libxsmm_meqn_param* eqn_param) {
-//       if (!initialized)
-//         return;
-//       kernel(eqn_param);
-//     }
-
-//    protected:
-//     std::string hash_str() override {
-//       char hash[200];
-//       snprintf(hash, 200, "softmax_fixup_eqn_t1%d_S3%d", XsmmDtype<T>(), S3);
-//       return std::string(hash);
-//     }
-//     void* build_kernel() override {
-//       auto in_dt = XsmmDtype<T>();
-//       auto out_dt = XsmmDtype<T>();
-//       libxsmm_blasint tmp_ld = 1;
-//       libxsmm_blasint ld = S3;
-//       libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
-//       meqn_push_binary_op(
-//           my_eqn0,
-//           LIBXSMM_MELTW_TYPE_BINARY_ADD,
-//           LIBXSMM_MELTW_FLAG_BINARY_NONE);
-//       meqn_push_binary_op(
-//           my_eqn0,
-//           LIBXSMM_MELTW_TYPE_BINARY_MUL,
-//           LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
-//       meqn_push_arg(my_eqn0, S3, 1, ld, 0, 0, in_dt);
-//       meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 1, 0, LIBXSMM_DATATYPE_F32);
-//       meqn_push_binary_op(
-//           my_eqn0,
-//           LIBXSMM_MELTW_TYPE_BINARY_MUL,
-//           LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1);
-//       meqn_push_arg(my_eqn0, S3, 1, ld, 2, 0, in_dt);
-//       meqn_push_arg(my_eqn0, 1, 1, tmp_ld, 3, 0, LIBXSMM_DATATYPE_F32);
-//       debug_print_eqn_tree(my_eqn0); // printf
-//       return (void*)meqn_dispatch(S3, 1, &ld, out_dt, my_eqn0);
-//     }
-
-//    private:
-//     int S3;
-//     libxsmm_meqn_function kernel = NULL;
-//   };
-
-//  protected:
-//   int S2 = 0;
-//   int S3 = 0;
-//   Eqn eqn;
-// };
+ protected:
+  int S2 = 0;
+  int S3 = 0;
+  bool isFlash;
+  BinaryTPP div_kernel;
+};
 
 template <typename T, typename LT = T>
 class RMSNormFwdTPP {
@@ -4899,8 +4868,10 @@ class LayerNormFwdTPP {
       v = v * c;
       v = LIBXSMM_MAX(v - m * m, 0.0f);
       v = 1.0f / ((float)sqrt(v + eps));
-      mean[s2] = m;
-      var[s2] = v;
+      if (mean)
+        mean[s2] = m;
+      if (var)
+        var[s2] = v;
       float s = v;
       float b = -1.0 * v * m;
       for (s1 = 0; s1 < S1; s1++) {
