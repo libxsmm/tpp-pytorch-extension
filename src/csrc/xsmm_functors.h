@@ -4389,51 +4389,6 @@ class VarSoftMaxBwdTPP {
 };
 
 template <typename T>
-class SoftMaxFlashScaleTPP {
- public:
-  SoftMaxFlashScaleTPP() {}
-  SoftMaxFlashScaleTPP(int S2, int S3, bool isFlash = false)
-      : S2(S2),
-        S3(S3),
-        isFlash(isFlash),
-        div_kernel(
-            S2,
-            S3,
-            S3,
-            1,
-            S3,
-            XsmmDtype<T>(),
-            XsmmDtype<float>(),
-            XsmmDtype<T>(),
-            LIBXSMM_DATATYPE_F32,
-            LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
-            LIBXSMM_MELTW_TYPE_BINARY_DIV) {}
-
-  void operator()(T* buf, float* osum) {
-    if (!isFlash)
-      return;
-    div_kernel(buf, osum, buf);
-  }
-
-  void ref(T* buf, float* osum) {
-    if (!isFlash)
-      return;
-    for (int s2 = 0; s2 < S2; s2++) {
-      float isum = 1.0f / osum[s2];
-      for (int s3 = 0; s3 < S3; s3++) {
-        buf[s2 * S3 + s3] *= isum;
-      }
-    }
-  }
-
- protected:
-  int S2 = 0;
-  int S3 = 0;
-  bool isFlash;
-  BinaryTPP div_kernel;
-};
-
-template <typename T>
 class SoftMaxFixUpTPP {
  public:
   SoftMaxFixUpTPP() {}
