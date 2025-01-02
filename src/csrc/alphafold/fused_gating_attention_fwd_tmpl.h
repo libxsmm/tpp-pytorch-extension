@@ -354,21 +354,22 @@ else {
 
             if (S_t % Ak_BLOCKSIZE != 0){
               T* tmp_S_edge = new T[A_BLOCKSIZE * lastBlockSize];
+              int j2 = (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE;
               a_brgemm_edge_tpp(
-                  &tmp_qv[0], &k_a[i][n * H_t * S_t + (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE], tmp_S_edge, 1);
+                  &tmp_qv[0], &k_a[i][n * H_t * S_t + j2], tmp_S_edge, 1);
               
-              a_addbias_online_edge_tpp(&bias_a[i][(S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE], tmp_S_edge);
+              a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
               if (flag){
                 a_add_nbbias_online_edge_tpp(
-                    &nonbatched_bias_a[0][n][j1][(S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE],
+                    &nonbatched_bias_a[0][n][j1][j2],
                     tmp_S_edge,
                     tmp_S_edge);
               }
 
-              a_add_sfmask_online_tpp(&sfmask_a[0][0], &tmp_S_edge[Sp_t - (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE]);
+              a_add_sfmask_online_tpp(&sfmask_a[0][0], &tmp_S_edge[Sp_t - j2]);
               a_softmax_online_edge_tpp(1, tmp_S_edge, tmp_S_edge, cmax, csum, omax);
 
-              c_brgemm_edge_tpp(tmp_S_edge, &v_a[i][(S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE][n][0], tmp_o1, 1);
+              c_brgemm_edge_tpp(tmp_S_edge, &v_a[i][j2][n][0], tmp_o1, 1);
               a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               delete[] tmp_S_edge;
             }
