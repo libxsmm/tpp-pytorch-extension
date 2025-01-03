@@ -90,19 +90,21 @@ if (equation_flag != 0) {
 
 //  Generate intermediate tensors in a blocked formet example
 //  [num_intermediate_channel][B_t/TRI_BLOCKSIZE][S_t/TRI_BLOCKSIZE][TRI_BLOCKSIZE][TRI_BLOCKSIZE]
-auto left_proj_act = act.new_empty({num_intermediate_channel,
-                                    first_block_dim,
-                                    second_block_dim,
-                                    TRI_BLOCKSIZE,
-                                    TRI_BLOCKSIZE});
+auto left_proj_act = act.new_empty(
+    {num_intermediate_channel,
+     first_block_dim,
+     second_block_dim,
+     TRI_BLOCKSIZE,
+     TRI_BLOCKSIZE});
 auto left_proj_act_a = GetVLAPtr<T>(
     left_proj_act,
     {first_block_dim, second_block_dim, TRI_BLOCKSIZE, TRI_BLOCKSIZE});
-auto right_proj_act = act.new_empty({num_intermediate_channel,
-                                     first_block_dim,
-                                     second_block_dim,
-                                     TRI_BLOCKSIZE,
-                                     TRI_BLOCKSIZE});
+auto right_proj_act = act.new_empty(
+    {num_intermediate_channel,
+     first_block_dim,
+     second_block_dim,
+     TRI_BLOCKSIZE,
+     TRI_BLOCKSIZE});
 auto right_proj_act_a = GetVLAPtr<T>(
     right_proj_act,
     {first_block_dim, second_block_dim, TRI_BLOCKSIZE, TRI_BLOCKSIZE});
@@ -330,11 +332,12 @@ if (equation_flag == 0) { // "Outgoing" edges equation = 'ikc,jkc->ijc'
       XformExtTPP<T>(TRI_BLOCKSIZE, TRI_BLOCKSIZE, XformTPP::XFORM_XPOSE_TPP),
       XPOSE);
 
-  act = act.new_empty({num_intermediate_channel,
-                       B_t / TRI_BLOCKSIZE,
-                       B_t / TRI_BLOCKSIZE,
-                       TRI_BLOCKSIZE,
-                       TRI_BLOCKSIZE});
+  act = act.new_empty(
+      {num_intermediate_channel,
+       B_t / TRI_BLOCKSIZE,
+       B_t / TRI_BLOCKSIZE,
+       TRI_BLOCKSIZE,
+       TRI_BLOCKSIZE});
   auto act_an = GetVLAPtr<T>(
       act,
       {B_t / TRI_BLOCKSIZE, B_t / TRI_BLOCKSIZE, TRI_BLOCKSIZE, TRI_BLOCKSIZE});
@@ -402,11 +405,12 @@ if (equation_flag == 0) { // "Outgoing" edges equation = 'ikc,jkc->ijc'
   // T>(TRI_BLOCKSIZE, TRI_BLOCKSIZE, TRI_BLOCKSIZE, 0, 0, lda, ldb, ldc, 1.0,
   // 1, 1)));
 
-  act = act.new_empty({num_intermediate_channel,
-                       S_t / TRI_BLOCKSIZE,
-                       S_t / TRI_BLOCKSIZE,
-                       TRI_BLOCKSIZE,
-                       TRI_BLOCKSIZE});
+  act = act.new_empty(
+      {num_intermediate_channel,
+       S_t / TRI_BLOCKSIZE,
+       S_t / TRI_BLOCKSIZE,
+       TRI_BLOCKSIZE,
+       TRI_BLOCKSIZE});
   auto act_an = GetVLAPtr<T>(
       act,
       {S_t / TRI_BLOCKSIZE, S_t / TRI_BLOCKSIZE, TRI_BLOCKSIZE, TRI_BLOCKSIZE});

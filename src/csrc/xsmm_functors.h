@@ -1286,48 +1286,6 @@ class AddBiasTPP {
   BinaryTPP kernel;
 };
 
-
-template <typename T>
-class AddBias2TPP {
- public:
-  AddBias2TPP() {}
-  AddBias2TPP(int rows, int cols) : AddBias2TPP(rows, cols, cols) {}
-  AddBias2TPP(int rows, int cols, int ldi, int ldo)
-      : rows(rows),
-        cols(cols),
-        ldi(ldi),
-        ldo(ldo),
-        kernel(
-            rows,
-            cols,
-            ldi,
-            ldo,
-            ldo,
-            XsmmDtype<T>(),
-            LIBXSMM_DATATYPE_F32,
-            LIBXSMM_DATATYPE_F32,
-            LIBXSMM_DATATYPE_F32,
-            LIBXSMM_MELTW_FLAG_BINARY_BCAST_COL_IN_0,
-            LIBXSMM_MELTW_TYPE_BINARY_ADD) {}
-  void operator()(T* in, float* out) {
-    kernel((void*)in, (void*)out, (void*)out);
-  }
-  void ref(T* in, float* out) {
-    for (int r = 0; r < rows; r++) {
-      for (int c = 0; c < cols; c++) {
-        out[r * ldo + c] += (float)in[r * ldi + c];
-      }
-    }
-  }
-
- private:
-  int rows = 0;
-  int cols = 0;
-  int ldi;
-  int ldo;
-  BinaryTPP kernel;
-};
-
 template <typename Tin, typename Tout = Tin, typename Tin2 = Tin>
 class AddTPP {
  public:
@@ -1977,9 +1935,9 @@ class EmbeddingBwdTPP {
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
-            (libxsmm_meltw_unary_flags)(
-                sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
-                                  : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
+            (libxsmm_meltw_unary_flags)(sizeof(Tind) == 8
+                                            ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
+                                            : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_COLS_IDX_OP_ADD) {}
   void operator()(Tin* in0, Tind* in1, Tout* out, int N) {
     unsigned long long _N = N;
@@ -5643,9 +5601,9 @@ class EmbBagFwdTPP {
             XsmmDtype<Tin>(),
             XsmmDtype<Tout>(),
             LIBXSMM_DATATYPE_F32,
-            (libxsmm_meltw_unary_flags)(
-                sizeof(Tind) == 8 ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
-                                  : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
+            (libxsmm_meltw_unary_flags)(sizeof(Tind) == 8
+                                            ? LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_8BYTES
+                                            : LIBXSMM_MELTW_FLAG_UNARY_IDX_SIZE_4BYTES),
             LIBXSMM_MELTW_TYPE_UNARY_REDUCE_COLS_IDX_OP_ADD) {}
   void operator()(Tout* output, Tin* weight, Tind* input, int N) {
     unsigned long long _N = N;

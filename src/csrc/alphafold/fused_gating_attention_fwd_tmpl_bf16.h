@@ -221,28 +221,24 @@ ldc = S_t;
 // 764, 8, 32]  = [512, 8, 764, 764] * [512, 764, 8, 32] */
 
 auto a_zero_tpp = SCOPEIT(SetZeroTPP<T>(A_BLOCKSIZE * H_t), EW_ZERO);
-auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, N_t* H_t, H_t), EW_COPY);
-auto a_cpy2_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t), EW_COPY);
+auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t), EW_COPY);
 
-if (S_t < 2560){
+if (S_t < 2560) {
+  auto a_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+      A_BLOCKSIZE, A_BLOCKSIZE, H_t, 1, 1, N_t * H_t, S_t, S_t, 0.0, 0, 1)));
 
-  auto a_brgemm_tpp = SCOPEITGEMM(
-    (BrgemmTPP<
-        T,
-        float>(A_BLOCKSIZE, A_BLOCKSIZE, H_t, 1, 1, H_t, S_t, S_t, 0.0, 0, 1)));
-  
   auto c_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
-    A_BLOCKSIZE,
-    H_t,
-    A_BLOCKSIZE,
-    A_BLOCKSIZE,
-    A_BLOCKSIZE* N_t* H_t,
-    S_t,
-    N_t* H_t,
-    H_t,
-    1.0,
-    0,
-    1)));
+      A_BLOCKSIZE,
+      H_t,
+      A_BLOCKSIZE,
+      A_BLOCKSIZE,
+      A_BLOCKSIZE * N_t * H_t,
+      S_t,
+      N_t * H_t,
+      H_t,
+      0.0,
+      0,
+      1)));
 
   auto a_addbias_tpp = SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t, S_t), BIAS);
   auto a_add_nbbias_tpp =
@@ -252,26 +248,24 @@ if (S_t < 2560){
       SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t - Sp_t, ldc), BIAS);
   auto a_softmax_tpp =
       SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, S_t)), SOFTMAX);
-  
+
   {
     RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
-  #pragma omp parallel for collapse(3)
+#pragma omp parallel for collapse(3)
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            T tmp_qv[A_BLOCKSIZE * H_t];
+            T tmp_o[A_BLOCKSIZE * H_t];
             T tmp_logits_bf16[A_BLOCKSIZE][S_t];
             float tmp_logits[A_BLOCKSIZE][S_t];
-
-            a_cpy_tpp(&q_a[i][j1][n][0], &tmp_qv[0]);
 
             a_brgemm_tpp.config();
             for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
               a_brgemm_tpp(
-                  &tmp_qv[0],
+                  &q_a[i][j1][n][0],
                   &k_a[i][n * H_t * S_t + 2 * j2],
                   &tmp_logits[0][j2],
                   1,
@@ -292,114 +286,130 @@ if (S_t < 2560){
               a_softmax_tpp(1, &tmp_logits[0][0], &tmp_logits_bf16[0][0]);
             }
 
-            a_zero_tpp(&tmp_qv[0]);
             c_brgemm_tpp(
                 &tmp_logits_bf16[0][0],
                 &v_a[i][n * H_t * 2],
-                &tmp_qv[0],
+                &tmp_o[0],
                 S_t / A_BLOCKSIZE,
                 false);
-            a_cpy2_tpp(&tmp_qv[0], &weighted_avg_a[i][j1][n][0]);
+            a_cpy_tpp(&tmp_o[0], &weighted_avg_a[i][j1][n][0]);
           }
         }
       }
     }
   }
-}
-else {
+} else {
   // Flash attention implementation
-  auto a_cpy3_tpp = SCOPEIT(CpyTPP<float>(A_BLOCKSIZE, H_t), EW_COPY);
+  auto a_cpy2_tpp = SCOPEIT(CpyTPP<float>(A_BLOCKSIZE, H_t), EW_COPY);
 
-  auto a_brgemm_tpp = SCOPEITGEMM(
-    (BrgemmTPP<
-        T,
-        float>(A_BLOCKSIZE, Ak_BLOCKSIZE, H_t, 1, 1, H_t, S_t, Ak_BLOCKSIZE, 0.0, 0, 1)));
+  auto a_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+      A_BLOCKSIZE,
+      Ak_BLOCKSIZE,
+      H_t,
+      1,
+      1,
+      N_t * H_t,
+      S_t,
+      Ak_BLOCKSIZE,
+      0.0,
+      0,
+      1)));
 
-  auto c_brgemm_online_tpp = SCOPEITGEMM(
-      (BrgemmTPP<
-          T,
-          float>(A_BLOCKSIZE, H_t, Ak_BLOCKSIZE, 
-          1, 
-          1, 
-          Ak_BLOCKSIZE, 
-          N_t*H_t, 
-          H_t, 
-          0.0, 
-          0,
-          1)));
-  
+  auto c_brgemm_online_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+      A_BLOCKSIZE,
+      H_t,
+      Ak_BLOCKSIZE,
+      1,
+      1,
+      Ak_BLOCKSIZE,
+      N_t * H_t,
+      H_t,
+      0.0,
+      0,
+      1)));
+
   auto a_addbias_online_tpp =
-    SCOPEIT(AddBias2TPP<float>(A_BLOCKSIZE, Ak_BLOCKSIZE, S_t, Ak_BLOCKSIZE), BIAS);
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, Ak_BLOCKSIZE, Ak_BLOCKSIZE), BIAS);
 
-  auto a_add_nbbias_online_tpp =
-      SCOPEIT((AddTPP<float, float>(A_BLOCKSIZE, Ak_BLOCKSIZE, S_t, Ak_BLOCKSIZE, Ak_BLOCKSIZE)),
+  auto a_add_nbbias_online_tpp = SCOPEIT(
+      (AddTPP<float, float>(
+          A_BLOCKSIZE, Ak_BLOCKSIZE, S_t, Ak_BLOCKSIZE, Ak_BLOCKSIZE)),
       BIAS);
 
-  auto a_softmax_online_tpp =
-      SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, Ak_BLOCKSIZE, true)),
-      SOFTMAX);
-  auto a_softmax_fixup_online = SCOPEIT(SoftMaxFixUpTPP<float>(A_BLOCKSIZE, H_t, true), EW_RCP);
-  auto a_softmax_scale_online = SCOPEIT(SoftMaxFlashScaleTPP<float>(A_BLOCKSIZE, H_t, true), EW_RCP);
+  auto a_softmax_online_tpp = SCOPEIT(
+      (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, Ak_BLOCKSIZE, true)), SOFTMAX);
+  auto a_softmax_fixup_online =
+      SCOPEIT(SoftMaxFixUpTPP<float>(A_BLOCKSIZE, H_t, true), EW_RCP);
+  auto a_softmax_scale_online =
+      SCOPEIT(SoftMaxFlashScaleTPP<float>(A_BLOCKSIZE, H_t, true), EW_RCP);
 
-  auto a_convert_tpp =
-    SCOPEIT((ConvertTPP<float, T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t)), EW_ZERO);
+  auto a_convert_tpp = SCOPEIT(
+      (ConvertTPP<float, T>(A_BLOCKSIZE, H_t, H_t, N_t * H_t)), EW_ZERO);
 
   // if (S_t % Ak_BLOCKSIZE != 0){
-      int lastBlockSize = S_t - (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE;
-      if (lastBlockSize == 0) lastBlockSize = Ak_BLOCKSIZE;   // handling the zero case
-      auto a_brgemm_edge_tpp = SCOPEITGEMM(
-      (BrgemmTPP<
-          T,
-          float>(A_BLOCKSIZE, lastBlockSize, H_t, 1, 1, H_t, S_t, lastBlockSize, 0.0, 0, 1)));
+  int lastBlockSize = S_t - (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
+  if (lastBlockSize == 0)
+    lastBlockSize = Ak_BLOCKSIZE; // handling the zero case
+  auto a_brgemm_edge_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+      A_BLOCKSIZE,
+      lastBlockSize,
+      H_t,
+      1,
+      1,
+      N_t * H_t,
+      S_t,
+      lastBlockSize,
+      0.0,
+      0,
+      1)));
 
-      auto c_brgemm_edge_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-        A_BLOCKSIZE,
-        H_t,
-        lastBlockSize,
-        1,
-        1,
-        lastBlockSize,
-        N_t* H_t,
-        H_t,
-        0.0,
-        0,
-        1)));
-      
-      auto a_addbias_online_edge_tpp =
-        SCOPEIT(AddBias2TPP<float>(A_BLOCKSIZE, lastBlockSize, S_t, lastBlockSize), BIAS);
-      auto a_add_nbbias_online_edge_tpp =
-          SCOPEIT((AddTPP<float, float>(A_BLOCKSIZE, lastBlockSize, S_t, lastBlockSize, lastBlockSize)), BIAS);
+  auto c_brgemm_edge_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
+      A_BLOCKSIZE,
+      H_t,
+      lastBlockSize,
+      1,
+      1,
+      lastBlockSize,
+      N_t * H_t,
+      H_t,
+      0.0,
+      0,
+      1)));
 
-      auto a_add_sfmask_online_tpp =
-        SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t - Sp_t, lastBlockSize), BIAS);
+  auto a_addbias_online_edge_tpp = SCOPEIT(
+      AddBiasTPP<float>(A_BLOCKSIZE, lastBlockSize, lastBlockSize), BIAS);
+  auto a_add_nbbias_online_edge_tpp = SCOPEIT(
+      (AddTPP<float, float>(
+          A_BLOCKSIZE, lastBlockSize, S_t, lastBlockSize, lastBlockSize)),
+      BIAS);
 
-      auto a_softmax_online_edge_tpp =
-        SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)),
-        SOFTMAX);
-    // }
+  auto a_add_sfmask_online_tpp =
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t - Sp_t, lastBlockSize), BIAS);
+
+  auto a_softmax_online_edge_tpp = SCOPEIT(
+      (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
+  // }
 
   {
     RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
     {
       RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
-      #pragma omp parallel for collapse(3)
+#pragma omp parallel for collapse(3)
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            T tmp_qv[A_BLOCKSIZE * H_t];
             float tmp_o1[A_BLOCKSIZE * H_t];
             float tmp_o2[A_BLOCKSIZE * H_t];
             float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE];
             T tmp_S_bf16[A_BLOCKSIZE * Ak_BLOCKSIZE];
             float omax[A_BLOCKSIZE], osum[A_BLOCKSIZE], cmax[A_BLOCKSIZE],
-            csum[A_BLOCKSIZE];
+                csum[A_BLOCKSIZE];
 
-            a_cpy_tpp(&q_a[i][j1][n][0], &tmp_qv[0]);
-
-            for (int j2 = 0; j2 < (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE; j2 += Ak_BLOCKSIZE) {
+            for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
+                 j2 += Ak_BLOCKSIZE) {
               a_brgemm_tpp(
-                  &tmp_qv[0],
+                  &q_a[i][j1][n][0],
                   &k_a[i][n * H_t * S_t + 2 * j2],
                   tmp_S,
                   1,
@@ -408,46 +418,54 @@ else {
               a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
               if (flag) {
                 a_add_nbbias_online_tpp(
-                    &nonbatched_bias_a[0][n][j1][j2],
-                    tmp_S,
-                    tmp_S);
+                    &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
               }
 
-              if (j2 == 0){
+              if (j2 == 0) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, omax, osum, nullptr);
               } else {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, cmax, csum, omax);
               }
 
-              c_brgemm_online_tpp(tmp_S_bf16, &v_a[i][j2*N_t*H_t + n*H_t*2], tmp_o1,
-              1, false);      // O = P*V 
+              c_brgemm_online_tpp(
+                  tmp_S_bf16,
+                  &v_a[i][j2 * N_t * H_t + n * H_t * 2],
+                  tmp_o1,
+                  1,
+                  false); // O = P*V
 
               if (j2 == 0) {
-                a_cpy3_tpp(tmp_o1, tmp_o2);
+                a_cpy2_tpp(tmp_o1, tmp_o2);
               } else {
                 a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               }
             }
 
-            if (S_t % Ak_BLOCKSIZE != 0){
+            if (S_t % Ak_BLOCKSIZE != 0) {
               float* tmp_S_edge = new float[A_BLOCKSIZE * lastBlockSize];
               T* tmp_S_bf16_edge = new T[A_BLOCKSIZE * lastBlockSize];
-              int j2 = (S_t/Ak_BLOCKSIZE)*Ak_BLOCKSIZE;
+              int j2 = (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
               a_brgemm_edge_tpp(
-                  &tmp_qv[0], &k_a[i][n * H_t * S_t + 2 * j2], tmp_S_edge, 1);
-              
+                  &q_a[i][j1][n][0],
+                  &k_a[i][n * H_t * S_t + 2 * j2],
+                  tmp_S_edge,
+                  1);
+
               a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
-              if (flag){
+              if (flag) {
                 a_add_nbbias_online_edge_tpp(
-                    &nonbatched_bias_a[0][n][j1][j2],
-                    tmp_S_edge,
-                    tmp_S_edge);
+                    &nonbatched_bias_a[0][n][j1][j2], tmp_S_edge, tmp_S_edge);
               }
 
               a_add_sfmask_online_tpp(&sfmask_a[0][0], &tmp_S_edge[Sp_t - j2]);
-              a_softmax_online_edge_tpp(1, tmp_S_edge, tmp_S_bf16_edge, cmax, csum, omax);
+              a_softmax_online_edge_tpp(
+                  1, tmp_S_edge, tmp_S_bf16_edge, cmax, csum, omax);
 
-              c_brgemm_edge_tpp(tmp_S_bf16_edge, &v_a[i][j2*N_t*H_t + n*H_t*2], tmp_o1, 1);
+              c_brgemm_edge_tpp(
+                  tmp_S_bf16_edge,
+                  &v_a[i][j2 * N_t * H_t + n * H_t * 2],
+                  tmp_o1,
+                  1);
               a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               delete[] tmp_S_edge;
               delete[] tmp_S_bf16_edge;
