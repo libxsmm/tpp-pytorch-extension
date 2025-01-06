@@ -94,6 +94,12 @@ class VLAPtr {
     for (long i = N - 2; i >= 0; i--)
       strides[i] = strides[i + 1] * sizes[i];
   }
+
+  // uses dummy pointer to distinguish from the constructor with sizes
+  VLAPtr(T* data_, const index_t (&strides_)[N], void* dymmy) : data_(data_) {
+    for (int i = 0; i < N; i++)
+      strides[i] = strides_[i];
+  }
   VLAAccessor<T, N - 1, index_t> operator[](index_t i) {
     return VLAAccessor<T, N - 1, index_t>(data_ + i * strides[0], strides + 1);
   }
@@ -117,6 +123,11 @@ class VLAPtr<T, 1, int64_t> {
   VLAPtr(T* data_, const index_t (&sizes)[1]) : data_(data_) {
     strides[0] = sizes[0];
   }
+
+  // uses dummy pointer to distinguish from the constructor with sizes
+  VLAPtr(T* data_, const index_t (&strides_)[1], void* dymmy) : data_(data_) {
+    strides[0] = strides_[0];
+  }
   T* operator[](index_t i) {
     return data_ + i * strides[0];
   }
@@ -136,6 +147,11 @@ class VLAPtr<T, 1, int64_t> {
 template <typename T, std::size_t N, typename index_t = int64_t>
 VLAPtr<T, N, index_t> GetVLAPtr(T* data_, const index_t (&list)[N]) {
   return VLAPtr<T, N, index_t>(data_, list);
+}
+
+template <typename T, std::size_t N, typename index_t = int64_t>
+VLAPtr<T, N, index_t> GetVLAPtrFromStrides(T* data_, const index_t (&list)[N]) {
+  return VLAPtr<T, N, index_t>(data_, list, nullptr);
 }
 
 #ifdef TORCH_API_INCLUDE_EXTENSION_H
@@ -173,6 +189,12 @@ VLAPtr<T, N, index_t> GetVLAPtr(at::Tensor t, const index_t (&sizes)[N]) {
 template <typename T>
 T* GetVLAPtr(at::Tensor t) {
   return pt_get_data_ptr<T>(t);
+}
+template <typename T, std::size_t N>
+VLAPtr<T, N, index_t> GetVLAPtrFromStrides(
+    at::Tensor t,
+    const index_t (&strides)[N]) {
+  return VLAPtr<T, N, index_t>(pt_get_data_ptr<T>(t), strides, nullptr);
 }
 #endif
 
