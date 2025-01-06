@@ -18,10 +18,14 @@ t_wt = inputs[i++];
 t_attn_3d = inputs[i++];
 if (add_bias)
   t_bias = inputs[i++];
-else
-  t_bias = at::empty(0,at::kBFloat16);
+else {
+  if(use_bf_or_fp16 == 0)
+    t_bias = at::empty(0,at::kBFloat16);
+  else if(use_bf_or_fp16==1)
+    t_bias = at::empty(0,at::kHalf);
+}
 
-at::Tensor t_out_mlp = fc_plain<bfloat16>(t_in, t_wt, t_bias);
+at::Tensor t_out_mlp = fc_plain<Tact>(t_in, t_wt, t_bias);
 
 auto attn_sizes = t_attn_3d.sizes(); // 3D shape [1, H, F] = [1, 4, 128] let
 
@@ -30,14 +34,14 @@ auto H = attn_sizes[1]; // 4
 auto F = attn_sizes[2]; // 128
 
 auto t_out_attn = t_out_mlp.new_empty({N, H});
-auto out_attn = GetVLAPtr<bfloat16>(t_out_attn, {H}); // N, H
+auto out_attn = GetVLAPtr<Tact>(t_out_attn, {H}); // N, H
 
 auto t_attn = t_attn_3d.view({H * F});
-auto attn = GetVLAPtr<bfloat16>(t_attn, {F}); // nk, bk
+auto attn = GetVLAPtr<Tact>(t_attn, {F}); // nk, bk
 
-auto in_attn = GetVLAPtr<bfloat16>(t_out_mlp, {H, F});
+auto in_attn = GetVLAPtr<Tact>(t_out_mlp, {H, F});
 
-auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<bfloat16, bfloat16, bfloat16>(H, F)), EW_MUL);
+auto mul_reduce_tpp = SCOPEIT((MulReduceTPP<Tact, Tact, Tact>(H, F)), EW_MUL);
 {
   RECORD_SCOPE(o_attn, {t_out_attn});
   {

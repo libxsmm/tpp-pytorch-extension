@@ -37,6 +37,7 @@ REGISTER_SCOPE(o_attn, "o_attn");
 std::vector<at::Tensor> mlp_attn(
     long align,
     int add_bias,
+    int use_bf_or_fp16,
     int use_qint8_gemm,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(FWD);
@@ -73,7 +74,18 @@ std::vector<at::Tensor> mlp_attn(
     }
   }
   else {
+    if(use_bf_or_fp16==0) {
+      typedef bfloat16 Tact;
 #include "mlp_attn_qint8.h"
+    }
+    else if(use_bf_or_fp16==1) {
+      typedef half Tact;
+#include "mlp_attn_qint8.h"
+    }
+    else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
+    }
   }
 }
 
@@ -83,12 +95,15 @@ at::Tensor mlp(long align, int add_bias, std::vector<at::Tensor> inputs) {
   auto dact=-1;
   if(inputs[0].dtype() == at::kFloat) dact=0;
   else if(inputs[0].dtype() == at::kBFloat16) dact=1;
+  else if(inputs[0].dtype() == at::kHalf) dact=2;
 
   auto dwt = -1;
   if (inputs[1].dtype() == at::kFloat)
     dwt = 0;
   else if (inputs[1].dtype() == at::kBFloat16)
     dwt = 1;
+  else if (inputs[2].dtype() == at::kHalf)
+    dwt = 2;
 
   if (dact == 0) {
     typedef float Tact;
@@ -107,6 +122,16 @@ at::Tensor mlp(long align, int add_bias, std::vector<at::Tensor> inputs) {
     typedef bfloat16 Tact;
     if (dwt == 1) {
       typedef bfloat16 Tprm;
+#include "mlp.h"
+    } else {
+      TPP_ASSERT(
+          0, "%s:%d Unsupported type for parameters\n", __FILE__, __LINE__);
+    }
+  }
+  else if (dact == 2) {
+    typedef half Tact;
+    if (dwt == 2) {
+      typedef half Tprm;
 #include "mlp.h"
     } else {
       TPP_ASSERT(
