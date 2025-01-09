@@ -4382,7 +4382,11 @@ class SoftMaxFixUpTPP {
         osum[s2] = nsum;
       } else {
         float nmax = std::max(cmax[s2], omax[s2]);
-        TPP_ASSERT(nmax == cmax[s2], "Flash attention nmax must equal cmax\n");
+        TPP_ASSERT(
+            nmax == cmax[s2],
+            "Flash attention nmax (%g) must equal cmax (%g)\n",
+            nmax,
+            cmax[s2]);
         float oexp = exp(omax[s2] - nmax);
         // float cexp = exp(cmax[s2] - nmax); // must be 1.0
         float nsum = csum[s2] + oexp * osum[s2];
