@@ -97,7 +97,7 @@ class VLAPtr {
 
   // uses dummy pointer to distinguish from the constructor with sizes
   VLAPtr(T* data_, const index_t (&strides_)[N], void* dymmy) : data_(data_) {
-    for (int i = 0; i < N; i++)
+    for (int i = 0; i < (int)N; i++)
       strides[i] = strides_[i];
   }
   VLAAccessor<T, N - 1, index_t> operator[](index_t i) {
@@ -194,7 +194,7 @@ template <typename T, std::size_t N>
 VLAPtr<T, N, index_t> GetVLAPtrFromStrides(
     at::Tensor t,
     const index_t (&strides)[N]) {
-  return VLAPtr<T, N, index_t>(pt_get_data_ptr<T>(t), strides, nullptr);
+  return VLAPtr<T, N, index_t>(t.data_ptr<T>(), strides, nullptr);
 }
 #endif
 
