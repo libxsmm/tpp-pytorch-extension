@@ -329,7 +329,6 @@ if args.use_tpp:
             model,
             tokenizer,
             generate_kwargs["num_beams"],
-            indirect_kv=True,
             enable_profile=cpp_profile,
             only_last_logit=True,
         )

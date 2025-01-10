@@ -26,6 +26,7 @@
 #include "xsmm_functors.h"
 
 using namespace tpp;
+#include "attn.h"
 #include "shm_coll.h"
 #include "tensor_helper.h"
 
@@ -46,24 +47,17 @@ static int TPP_CACHE_REMAPPED_WEIGHTS =
     env2int("TPP_CACHE_REMAPPED_WEIGHTS", 1);
 static int FUSED_QKV_GEMM = env2int("FUSED_QKV_GEMM", 2);
 static int FT_OPT_SIZE = env2int("FT_OPT_SIZE", 256);
-static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 128);
-static int KV_CACHE_INC_SIZE = env2int("KV_CACHE_INC_SIZE", 128);
 static int USE_SHM_ALLREDUCE = env2int("USE_SHM_ALLREDUCE", -1);
 static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
 static const int USE_MXFP4_FT = env2int("USE_MXFP4_FT", 0);
 static const int USE_QINT8 = env2int("USE_QINT8", 0);
 static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
-static const bool USE_FLASH = env2int("USE_FLASH", 1);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
 REGISTER_LOCAL_SCOPE(fqkv_gemm, "fqkv_gemm");
 REGISTER_LOCAL_SCOPE(proj_gemm, "proj_gemm");
 REGISTER_LOCAL_SCOPE(mha, "mha");
-REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
-REGISTER_LOCAL_SCOPE(ac_gemm2, "ac_gemm2");
-REGISTER_LOCAL_SCOPE(ac_gemm21, "ac_gemm21");
-REGISTER_LOCAL_SCOPE(ac_gemm22, "ac_gemm22");
 REGISTER_LOCAL_SCOPE(o_gemm, "o_gemm");
 REGISTER_LOCAL_SCOPE(i_gemm, "i_gemm");
 REGISTER_LOCAL_SCOPE(lnorm, "lnorm");
@@ -159,65 +153,6 @@ inline at::Tensor allgather(at::Tensor t_in, std::vector<long>& split_sizes) {
   std::vector<at::Tensor> temp_vec = {t_in};
   process_group->allgather(ag_vec, temp_vec)->wait();
   auto t_out = at::cat(ag_vec[0], -1);
-  return t_out;
-}
-
-template <typename T>
-inline at::Tensor kv_concat(
-    at::Tensor t_in1,
-    at::Tensor t_in2,
-    int dim,
-    at::Tensor t_beam_idx) {
-  RECORD_SCOPE(concat, {t_in1, t_in2});
-  bool indirect = t_beam_idx.numel() > 0;
-  auto ndim = t_in1.dim();
-  dim = dim >= 0 ? dim : dim + ndim;
-
-  auto out_sizes = t_in1.sizes().vec();
-  out_sizes[dim] += t_in2.size(dim);
-  if (indirect)
-    out_sizes[0] = t_beam_idx.size(0);
-  auto t_out = t_in1.new_empty(out_sizes);
-
-  auto B = out_sizes[0];
-  auto N = out_sizes[1];
-  auto S = out_sizes[2];
-  auto F = out_sizes[3];
-  TPP_ASSERT(B == t_in2.size(0), "Batch size mismatch\n");
-  auto BNS = B * N * S;
-  auto S1 = t_in1.size(dim);
-  auto S2 = t_in2.size(dim);
-
-  // auto cpy_tpp = SCOPEIT(CpyTPP<T>(F), EW_COPY);
-  auto cpy_tpp = CpyTPP<T>(F);
-
-  auto in1 = GetVLAPtr<T>(t_in1, {N, S1, F});
-  auto in2 = GetVLAPtr<T>(t_in2, {N, S2, F});
-  auto out = GetVLAPtr<T>(t_out, {F});
-  auto beam_idx = GetVLAPtr<long>(t_beam_idx);
-  // std::cout << "t_beam_idx.dtype: " << t_beam_idx.dtype() << std::endl;
-  // auto beam_idx = (long*)t_beam_idx.data_ptr();
-  T* ptrs[BNS];
-  int p = 0;
-  for (int j = 0; j < B; j++) {
-    int j1 = indirect ? beam_idx[j] : j;
-    for (int k = 0; k < N; k++) {
-      for (int i = 0; i < S1; i++) {
-        ptrs[p++] = in1[j1][k][i];
-      }
-      for (int i = 0; i < S2; i++) {
-        ptrs[p++] = in2[j][k][i];
-      }
-    }
-  }
-  TPP_ASSERT(p == BNS, "Unmatched p=%d and BNS=%ld\n", p, BNS);
-  {
-    RECORD_OMP_TIME();
-#pragma omp parallel for
-    for (int i = 0; i < BNS; i++) {
-      cpy_tpp(ptrs[i], out[i]);
-    }
-  }
   return t_out;
 }
 
@@ -573,919 +508,16 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
   return {at::Tensor()};
 }
 
-template <typename T, typename Tv>
-struct AttnKernels {
-  SCOPEIT_DECL(BrgemmTPP<T, float>) a_gemm_tpp;
-  SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
-  SCOPEIT_DECL(AddBiasTPP<T>) add_mask_tpp;
-  SCOPEIT_DECL(AddTPP<T, float, float>) add_2dmask_tpp;
-  SCOPEIT_DECL(VarSoftMaxFwdTPP<float, Tv>) softmax_fwd_tpp;
-  SCOPEIT_DECL(BrgemmTPP<Tv, Tv>) c_gemm_tpp;
-  SCOPEIT_DECL(ConvertTPP<Tv, T>) cvt_tpp;
-  SCOPEIT_DECL(XformExtTPP<T>) xform_tpp;
-  SCOPEIT_DECL(XformExtTPP<T>) vnni_tpp;
-  SCOPEIT_DECL(SoftMaxFixUpTPP<T>) softmax_fixup;
-  SCOPEIT_DECL(SoftMaxFlashScaleTPP<T>) softmax_scale;
-
-  AttnKernels(
-      long Sqb,
-      long Skb,
-      long Sk_pad,
-      long H,
-      int pad,
-      int kl_in_vnni,
-      int vl_in_vnni) {
-    // printf("Sqb: %ld, Skb: %ld, H: %ld, psd: %d, kl: %d, vl: %d\n", Sqb,
-    // Skb, H, pad, kl_in_vnni, vl_in_vnni);
-    if (Sk_pad < Skb)
-      Sk_pad = Skb;
-    if (Sqb == 0)
-      Sqb = 1; // hack for unused kernels to not generate 0 size kernels
-    if (Skb == 0)
-      Skb = 2; // hack for unused kernels to not generate 0 size kernels
-    // [Sqb, H] * [H, Skb] = [Sqb, Skb]
-    a_gemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-        Sqb, Skb, H, H, H * Skb, H, Skb, Skb, 0.0, 0, 1, kl_in_vnni)));
-    // [Sqb, Skb]
-    scale_tpp = SCOPEIT((ScaleTPP<float, float>(Sqb * Skb)), EW_SCL);
-    add_mask_tpp = SCOPEIT(AddBiasTPP<T>(Sqb, Skb), EW_ADD);
-    add_2dmask_tpp =
-        SCOPEIT((AddTPP<T, float, float>(Sqb, Skb, Sk_pad, Skb, Skb)), EW_ADD);
-    softmax_fwd_tpp =
-        SCOPEIT((VarSoftMaxFwdTPP<float, Tv>(Sqb, Skb, USE_FLASH)), SOFTMAX);
-    softmax_fixup = SCOPEIT((SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
-    softmax_scale =
-        SCOPEIT((SoftMaxFlashScaleTPP<T>(Sqb, H, USE_FLASH)), EW_RCP);
-    // [Sqb, Skb] * [Skb, H] = tmp[Sqb, H]
-    c_gemm_tpp = SCOPEITGEMM((BrgemmTPP<Tv, Tv>(
-        Sqb, H, Skb, Sqb * Skb, Skb * H, Skb, H, H, 0.0, 0, 1, vl_in_vnni)));
-    // [Sqb, H] --> [Sqb, H]
-    cvt_tpp = SCOPEIT((ConvertTPP<Tv, T>(Sqb, H, H, H)), EW_COPY);
-    auto xform = XformTPP::XFORM_XPOSE_TPP;
-    if (!std::is_same<T, float>::value && kl_in_vnni) {
-      xform = XformTPP::XFORM_XPOSE_N2V_TPP;
-    }
-    // [Skb-pad, H] --> [H, Skb]
-    xform_tpp = SCOPEIT(
-        XformExtTPP<T>(Skb - pad, H, H, Skb, H, Skb, xform, true), XPOSE);
-    if (vl_in_vnni != 0)
-      vnni_tpp = SCOPEIT(
-          XformExtTPP<T>(
-              Skb - pad, H, Skb, H, H, H, XformTPP::XFORM_N2V_TPP, true),
-          VNNI);
-  }
-};
-
-template <typename T>
-inline at::Tensor attn(
-    at::Tensor t_QL,
-    at::Tensor t_KL,
-    at::Tensor t_AM,
-    at::Tensor t_VL,
-    at::Tensor t_KL_cache,
-    at::Tensor t_VL_cache,
-    VLAPtr<long, 1, long>& beam_idx,
-    long offset) {
-  RECORD_SCOPE(ac_gemm2, {t_QL, t_KL});
-  auto t_CL = at::empty_like(t_QL);
-  auto sizes = t_QL.sizes();
-  long B = sizes[0];
-  long Nq = sizes[1];
-  long Sq = sizes[2];
-  long H = sizes[3];
-  float one_by_sqrt_H = 1.0 / sqrtf(H);
-  auto ksizes = t_KL.sizes();
-  long Sk = ksizes[2];
-  long Nkv = ksizes[1];
-  long Nq_per_kv = (Nq == Nkv ? 1 : Nq / Nkv);
-  // printf("Sq = %ld, Sk = %ld\n", Sq, Sk);
-  // std::cout << "QL: " << t_QL.sizes() << std::endl;
-  // std::cout << "KL: " << t_KL.sizes() << std::endl;
-  TPP_ASSERT(
-      Sq == 1 && Sk == 1,
-      "Sq (%ld) and Sk (%ld) must be 1, offset (%ld)\n",
-      Sq,
-      Sk,
-      offset);
-  auto FSk = offset + Sk;
-#if defined(__AVX512F__) && defined(S_FIRST_KVC)
-  constexpr long FSk_BS = 16L;
-#else
-  constexpr long FSk_BS = 64L;
-#endif
-  auto FSk_aligned = (FSk + (FSk_BS - 1)) & ~(FSk_BS - 1);
-#ifdef S_FIRST_KVC
-  // auto CSk = t_KL_cache.size(0);
-#else
-  // auto CSk = t_KL_cache.size(2);
-#endif
-  // printf("CSk = %d, FSk = %d\n", (int)CSk, (int)FSk);
-  const bool am_valid = (t_AM.numel() > 0);
-
-  auto QL = GetVLAPtr<T>(t_QL, {Nq, Sq, H});
-  auto KL = GetVLAPtr<T>(t_KL, {Nkv, Sk, H});
-  auto VL = GetVLAPtr<T>(t_VL, {Nkv, Sk, H});
-  auto CL = GetVLAPtr<T>(t_CL, {Nq, Sq, H});
-  auto AM = GetVLAPtr<T>(t_AM, {FSk});
-#ifdef S_FIRST_KVC
-  auto KL_C = GetVLAPtr<T>(t_KL_cache, {B, Nkv, H});
-  auto VL_C = GetVLAPtr<T>(t_VL_cache, {B, Nkv, H});
-#else
-  auto KL_C = GetVLAPtr<T>(t_KL_cache, {Nkv, CSk, H});
-  auto VL_C = GetVLAPtr<T>(t_VL_cache, {Nkv, CSk, H});
-#endif
-
-#ifdef __AVX512F__
-#pragma message "Using AVX512 attn"
-  TPP_ASSERT(H % 16 == 0, "Head size must be multiple of 16\n");
-#if 1
-#ifdef S_FIRST_KVC
-  const int nh = H / 16;
-  const int nbFSk = FSk_aligned / FSk_BS;
-  auto t_AS = t_QL.new_empty({nbFSk, B, Nq, FSk_BS}, at::kFloat);
-  auto AS = GetVLAPtr<float>(t_AS, {B, Nq, FSk_BS});
-#ifndef PER_THREAD_COPY
-  auto t_tmpCL = t_QL.new_empty({nbFSk, B, Nq, H}, at::kFloat);
-  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {B, Nq, H});
-#else
-  const int nThreads = omp_get_max_threads();
-  auto t_tmpCL = t_QL.new_empty({nThreads, B, Nq, H}, at::kFloat);
-  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {B, Nq, H});
-  auto t_accFlags = t_QL.new_zeros({nThreads, B, Nq}, at::kByte);
-  auto accFlags = GetVLAPtr<uint8_t>(t_accFlags, {B, Nq});
-#endif
-  {
-    RECORD_OMP_TIME();
-#pragma omp parallel for collapse(2)
-    for (int b = 0; b < B; b++) {
-      for (int nkv = 0; nkv < Nkv; nkv++) {
-#ifdef S_FIRST_KVC
-        memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
-        memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
-#else
-        memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
-        memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
-#endif
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-      for (int nq = 0; nq < Nq; nq++) {
-        for (int b = 0; b < B; b++) {
-          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-          __m512 vql[nh];
-          for (int h = 0; h < nh; h++) {
-            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
-          }
-          int sk_off = sk1 * FSk_BS;
-          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
-            int sk = sk_off + sk2;
-            if (sk < FSk) {
-              int bid = beam_idx[b][sk];
-              __m512 vas = _mm512_setzero_ps();
-              for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-                auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
-#else
-                auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
-#endif
-                vas = _mm512_fmadd_ps(vql[h], vklc, vas);
-              }
-              float as = _mm512_reduce_add_ps(vas);
-              as *= one_by_sqrt_H;
-              if (am_valid) {
-                as += AM[b][sk];
-              }
-              AS[sk1][b][nq][sk2] = as;
-            } else {
-              AS[sk1][b][nq][sk2] = -1e10;
-            }
-          }
-        }
-      }
-    }
-#pragma omp parallel for collapse(2)
-    for (int b = 0; b < B; b++) {
-      for (int nq = 0; nq < Nq; nq++) {
-        __m512 vmax = _mm512_set1_ps(-1e20);
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[sk1][b][nq];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
-          }
-        }
-        float max = _mm512_reduce_max_ps(vmax);
-        vmax = _mm512_set1_ps(max);
-        __m512 vsum = _mm512_setzero_ps();
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[sk1][b][nq];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
-            _mm512_storeu_ps(ASP + sk2, vz);
-            vsum = _mm512_add_ps(vsum, vz);
-          }
-        }
-        float sum = _mm512_reduce_add_ps(vsum);
-        sum = 1.0 / sum;
-        vsum = _mm512_set1_ps(sum);
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[sk1][b][nq];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            auto vmul = _mm512_mul_ps(_mm512_loadu_ps_auto(ASP + sk2), vsum);
-            _mm512_storeu_ps(ASP + sk2, vmul);
-          }
-        }
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-      for (int nq = 0; nq < Nq; nq++) {
-        for (int b = 0; b < B; b++) {
-#ifdef PER_THREAD_COPY
-          int tid = omp_get_thread_num();
-#endif
-          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-          __m512 vql[nh];
-          for (int h = 0; h < nh; h++) {
-#ifdef PER_THREAD_COPY
-            if (accFlags[tid][b][nq] == 0) {
-              vql[h] = _mm512_setzero_ps();
-            } else {
-              vql[h] = _mm512_loadu_ps_auto(tmpCL[tid][b][nq] + h * 16);
-            }
-#else
-            vql[h] = _mm512_setzero_ps();
-#endif
-          }
-          int sk_off = sk1 * FSk_BS;
-          float* ASP = AS[sk1][b][nq];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
-            int sk = sk_off + sk2;
-            if (sk < FSk) {
-              int bid = beam_idx[b][sk];
-              __m512 vas = _mm512_set1_ps(ASP[sk2]);
-              for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-                auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
-#else
-                auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
-#endif
-                vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
-              }
-            }
-          }
-          for (int h = 0; h < nh; h++) {
-#ifndef PER_THREAD_COPY
-            _mm512_storeu_ps_auto(tmpCL[sk1][b][nq] + h * 16, vql[h]);
-#else
-            _mm512_storeu_ps_auto(tmpCL[tid][b][nq] + h * 16, vql[h]);
-#endif
-          }
-#ifdef PER_THREAD_COPY
-          accFlags[tid][b][nq] = 1;
-#endif
-        }
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int b = 0; b < B; b++) {
-      for (int nq = 0; nq < Nq; nq++) {
-        for (int h = 0; h < nh; h++) {
-          auto vec = _mm512_setzero_ps();
-#ifndef PER_THREAD_COPY
-          for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-            vec = _mm512_add_ps(
-                vec, _mm512_loadu_ps_auto(&tmpCL[sk1][b][nq][h * 16]));
-          }
-#else
-          for (int tid = 0; tid < nThreads; tid++) {
-            if (accFlags[tid][b][nq] == 0)
-              continue;
-            vec = _mm512_add_ps(
-                vec, _mm512_loadu_ps_auto(&tmpCL[tid][b][nq][h * 16]));
-          }
-#endif
-          _mm512_storeu_ps_auto(&CL[b][nq][0][h * 16], vec);
-        }
-      }
-    }
-  }
-#else // S_FIRST_KVC is not define
-  const int nh = H / 16;
-  const int nbFSk = FSk_aligned / FSk_BS;
-  auto t_AS = t_QL.new_empty({B, Nq, nbFSk, FSk_BS}, at::kFloat);
-  auto t_tmpCL = t_QL.new_empty({B, Nq, nbFSk, H}, at::kFloat);
-  auto AS = GetVLAPtr<float>(t_AS, {Nq, nbFSk, FSk_BS});
-  auto tmpCL = GetVLAPtr<float>(t_tmpCL, {Nq, nbFSk, H});
-  {
-    RECORD_OMP_TIME();
-#pragma omp parallel for collapse(2)
-    for (int b = 0; b < B; b++) {
-      for (int nkv = 0; nkv < Nkv; nkv++) {
-#ifdef S_FIRST_KVC
-        memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
-        memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
-#else
-        memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
-        memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
-#endif
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int nq = 0; nq < Nq; nq++) {
-      for (int b = 0; b < B; b++) {
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-          __m512 vql[nh];
-          for (int h = 0; h < nh; h++) {
-            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
-          }
-          int sk_off = sk1 * FSk_BS;
-          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
-            int sk = sk_off + sk2;
-            if (sk < FSk) {
-              int bid = beam_idx[b][sk];
-              __m512 vas = _mm512_setzero_ps();
-              for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-                auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
-#else
-                auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
-#endif
-                vas = _mm512_fmadd_ps(vql[h], vklc, vas);
-              }
-              float as = _mm512_reduce_add_ps(vas);
-              as *= one_by_sqrt_H;
-              if (am_valid) {
-                as += AM[b][sk];
-              }
-              AS[b][nq][sk1][sk2] = as;
-            } else {
-              AS[b][nq][sk1][sk2] = -1e10;
-            }
-          }
-        }
-      }
-    }
-#pragma omp parallel for collapse(2)
-    for (int b = 0; b < B; b++) {
-      for (int nq = 0; nq < Nq; nq++) {
-        __m512 vmax = _mm512_set1_ps(-1e20);
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[b][nq][sk1];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            vmax = _mm512_max_ps(vmax, _mm512_loadu_ps_auto(ASP + sk2));
-          }
-        }
-        float max = _mm512_reduce_max_ps(vmax);
-        vmax = _mm512_set1_ps(max);
-        __m512 vsum = _mm512_setzero_ps();
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[b][nq][sk1];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_loadu_ps_auto(ASP + sk2), vmax));
-            _mm512_storeu_ps(ASP + sk2, vz);
-            vsum = _mm512_add_ps(vsum, vz);
-          }
-        }
-        float sum = _mm512_reduce_add_ps(vsum);
-        sum = 1.0 / sum;
-        vsum = _mm512_set1_ps(sum);
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          float* ASP = AS[b][nq][sk1];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2 += 16) {
-            auto vmul = _mm512_mul_ps(_mm512_loadu_ps_auto(ASP + sk2), vsum);
-            _mm512_storeu_ps(ASP + sk2, vmul);
-          }
-        }
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int nq = 0; nq < Nq; nq++) {
-      for (int b = 0; b < B; b++) {
-        for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-          int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-          __m512 vql[nh];
-          for (int h = 0; h < nh; h++) {
-            vql[h] = _mm512_setzero_ps();
-          }
-          int sk_off = sk1 * FSk_BS;
-          float* ASP = AS[b][nq][sk1];
-          for (int sk2 = 0; sk2 < FSk_BS; sk2++) {
-            int sk = sk_off + sk2;
-            if (sk < FSk) {
-              int bid = beam_idx[b][sk];
-              __m512 vas = _mm512_set1_ps(ASP[sk2]);
-              for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-                auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
-#else
-                auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
-#endif
-                vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
-              }
-            }
-          }
-          for (int h = 0; h < nh; h++) {
-            _mm512_storeu_ps_auto(tmpCL[b][nq][sk1] + h * 16, vql[h]);
-          }
-        }
-      }
-    }
-#pragma omp parallel for collapse(3)
-    for (int nq = 0; nq < Nq; nq++) {
-      for (int b = 0; b < B; b++) {
-        for (int h = 0; h < nh; h++) {
-          auto vec = _mm512_setzero_ps();
-          for (int sk1 = 0; sk1 < nbFSk; sk1++) {
-            vec = _mm512_add_ps(
-                vec, _mm512_loadu_ps_auto(&tmpCL[b][nq][sk1][h * 16]));
-          }
-          _mm512_storeu_ps_auto(&CL[b][nq][0][h * 16], vec);
-        }
-      }
-    }
-  }
-#endif
-#else
-  const int nh = H / 16;
-  RECORD_OMP_TIME();
-#pragma omp parallel
-  {
-    TimerStart();
-#pragma omp for collapse(2) nowait
-    for (int nq = 0; nq < Nq; nq++) {
-      for (int b = 0; b < B; b++) {
-        LIBXSMM_ALIGNED(float AS[FSk_aligned], FSk_BS);
-        int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-        {
-          ScopedTimer t_(BRGEMM, 2 * FSk * H);
-#ifdef S_FIRST_KVC
-          memcpy(KL_C[FSk - 1][b][nkv], KL[b][nkv][0], H * sizeof(T));
-          memcpy(VL_C[FSk - 1][b][nkv], VL[b][nkv][0], H * sizeof(T));
-#else
-          memcpy(KL_C[b][nkv][FSk - 1], KL[b][nkv][0], H * sizeof(T));
-          memcpy(VL_C[b][nkv][FSk - 1], VL[b][nkv][0], H * sizeof(T));
-#endif
-          __m512 vql[nh];
-          for (int h = 0; h < nh; h++) {
-            vql[h] = _mm512_loadu_ps_auto(QL[b][nq][0] + h * 16);
-          }
-          float max = -1e20;
-          int sk;
-          for (sk = 0; sk < FSk; sk++) {
-            int bid = beam_idx[b][sk];
-            __m512 vas = _mm512_setzero_ps();
-            for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-              auto vklc = _mm512_loadu_ps_auto(KL_C[sk][bid][nkv] + h * 16);
-#else
-              auto vklc = _mm512_loadu_ps_auto(KL_C[bid][nkv][sk] + h * 16);
-#endif
-              vas = _mm512_fmadd_ps(vql[h], vklc, vas);
-            }
-            float as = _mm512_reduce_add_ps(vas);
-            as *= one_by_sqrt_H;
-            if (am_valid) {
-              as += AM[b][sk];
-            }
-            max = std::max(max, as);
-            AS[sk] = as;
-          }
-          __m512 vmax = _mm512_set1_ps(max);
-          __m512 vsum = _mm512_setzero_ps();
-          for (sk = 0; sk < ALIGNDOWN(FSk, 16); sk += 16) {
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_loadu_ps_auto(AS + sk), vmax));
-            _mm512_storeu_ps(AS + sk, vz);
-            vsum = _mm512_add_ps(vsum, vz);
-          }
-          if (sk < FSk) {
-            int rem = FSk - sk;
-            __mmask16 mask = (1 << rem) - 1;
-            __m512 vz = LIBXSMM_INTRINSICS_MM512_EXP_PS_3DTS(
-                _mm512_sub_ps(_mm512_maskz_loadu_ps_auto(mask, AS + sk), vmax));
-            _mm512_mask_storeu_ps(AS + sk, mask, vz);
-            vsum = _mm512_mask_add_ps(vsum, mask, vsum, vz);
-          }
-          float sum = _mm512_reduce_add_ps(vsum);
-          sum = 1.0 / sum;
-          for (int h = 0; h < nh; h++) {
-            vql[h] = _mm512_setzero_ps();
-          }
-          for (sk = 0; sk < FSk; sk++) {
-            int bid = beam_idx[b][sk];
-            __m512 vas = _mm512_set1_ps(AS[sk] * sum);
-            for (int h = 0; h < nh; h++) {
-#ifdef S_FIRST_KVC
-              auto vvlc = _mm512_loadu_ps_auto(VL_C[sk][bid][nkv] + h * 16);
-#else
-              auto vvlc = _mm512_loadu_ps_auto(VL_C[bid][nkv][sk] + h * 16);
-#endif
-              vql[h] = _mm512_fmadd_ps(vvlc, vas, vql[h]);
-            }
-          }
-          for (int h = 0; h < nh; h++) {
-            _mm512_storeu_ps_auto(CL[b][nq][0] + h * 16, vql[h]);
-          }
-        }
-      }
-    }
-    TimerEnd();
-  }
-#endif
-#else
-  // Removing SCOPEIT due to very high overhead of timing these
-  // auto dot_tpp = SCOPEIT((MulReduceTPP<T,T,float>(1, H)), EW_MUL);
-  // auto scale_add_tpp = SCOPEIT((ScaleAddTPP<T, T>(H)), EW_ADD);
-  // auto cpy_tpp = SCOPEIT(CpyTPP<T>(H), EW_COPY);
-  // auto zero_tpp = SCOPEIT(SetZeroTPP<T>(H), EW_ZERO);
-  auto dot_tpp = MulReduceTPP<float, T, float>(1, H);
-  auto scale_add_tpp = ScaleAddTPP<T, float>(H);
-  auto cpy_tpp = CpyTPP<T>(H);
-  auto cvt_f2b_tpp = ConvertTPP<float, T>(H);
-  auto cvt_b2f_tpp = ConvertTPP<T, float>(H);
-  auto zero_tpp = SetZeroTPP<float>(H);
-  auto softmax_fwd_tpp =
-      SCOPEIT((SoftMaxFwdTPP<float, float>(1, 1, FSk_aligned)), SOFTMAX);
-  auto nThreads = omp_get_max_threads();
-  float tasks_per_thread = ((float)B * Nq) / nThreads;
-  auto thr_eff = tasks_per_thread / ceilf(tasks_per_thread);
-  if (FSk <= 256 || thr_eff >= 0.75) {
-    RECORD_OMP_TIME();
-    {
-#pragma omp parallel
-      {
-        // int tid = omp_get_thread_num();
-        // auto t00 = getTime();
-        TimerStart();
-#pragma omp for collapse(2) nowait
-        for (int nq = 0; nq < Nq; nq++) {
-          for (int b = 0; b < B; b++) {
-            float AS[FSk_aligned];
-            int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-            // float *AS = GAS[tid]; //FSk];
-            // auto t0 = getTime();
-            {
-              ScopedTimer t_(BRGEMM, 2 * FSk * H);
-              float tmp_QL[H];
-              cvt_b2f_tpp(QL[b][nq][0], tmp_QL);
-              for (int sk = 0; sk < FSk; sk++) {
-                AS[sk] = 0.0f;
-                if (sk < offset) {
-                  int bid = beam_idx[b][sk];
-                  // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-#ifdef S_FIRST_KVC
-                  dot_tpp(tmp_QL, KL_C[sk][bid][nkv], &AS[sk]);
-#else
-                  dot_tpp(tmp_QL, KL_C[bid][nkv][sk], &AS[sk]);
-#endif
-                } else {
-                  // printf("b: %d n: %d sk: %d \n", b, n, sk);
-                  dot_tpp(tmp_QL, KL[b][nkv][0], &AS[sk]);
-#ifdef S_FIRST_KVC
-                  cpy_tpp(KL[b][nkv][0], KL_C[sk][b][nkv]);
-#else
-                  cpy_tpp(KL[b][nkv][0], KL_C[b][nkv][sk]);
-#endif
-                }
-                AS[sk] *= one_by_sqrt_H;
-                if (am_valid) {
-                  AS[sk] += AM[b][sk];
-                }
-              }
-              for (int sk = FSk; sk < FSk_aligned; sk++) {
-                // pad AS to align for softmax
-                AS[sk] = -1e9f;
-              }
-            }
-            // auto t1 = getTime();
-            softmax_fwd_tpp(AS, AS);
-            // auto t2 = getTime();
-            // printf("post softmax b: %d n: %d\n", b, n);
-            {
-              float tmp_CL[H];
-              ScopedTimer t_(BRGEMM, 2 * FSk * H);
-              zero_tpp(tmp_CL);
-              for (int sk = 0; sk < FSk; sk++) {
-                // printf("bmm2: b: %d n: %d sk: %d \n", b, n, sk);
-                // if (b == 0&& n == 0) printf("AS[%d]: %g\n", sk, AS[sk]);
-                if (sk < offset) {
-                  int bid = beam_idx[b][sk];
-#ifdef S_FIRST_KVC
-                  scale_add_tpp(VL_C[sk][bid][nkv], tmp_CL, AS[sk]);
-#else
-                  scale_add_tpp(VL_C[bid][nkv][sk], tmp_CL, AS[sk]);
-#endif
-                } else {
-                  scale_add_tpp(VL[b][nkv][0], tmp_CL, AS[sk]);
-#ifdef S_FIRST_KVC
-                  cpy_tpp(VL[b][nkv][0], VL_C[sk][b][nkv]);
-#else
-                  cpy_tpp(VL[b][nkv][0], VL_C[b][nkv][sk]);
-#endif
-                }
-              }
-              cvt_f2b_tpp(tmp_CL, CL[b][nq][0]);
-            }
-            // auto t3 = getTime();
-            // if (tid == 0) printf("MHA: bns= %d %d %ld  %10g %10g %10g
-            // %10g\n", b, n, FSk, (t1-t0)*1e6, (t2-t1)*1e6, (t3-t2)*1e6,
-            // (t3-t0)*1e6);
-          }
-        }
-        TimerEnd();
-        // auto t01 = getTime();
-        // if (tid == 0) printf("MHA: s= %ld  %10g\n", FSk, (t01-t00)*1e6);
-      }
-    }
-  } else {
-    auto t_AS = t_QL.new_empty({B, Nq, FSk_aligned}, at::kFloat);
-    // auto t_XL = t_QL.new_empty({B, N, H}, at::kFloat);
-    auto t_XL = t_QL.to(at::kFloat);
-    auto XL = GetVLAPtr<float>(t_XL, {Nq, H});
-    auto AS = GetVLAPtr<float>(t_AS, {Nq, FSk_aligned});
-
-    {
-      {
-        RECORD_SCOPE(ac_gemm21, {});
-        RECORD_OMP_TIME();
-#pragma omp parallel
-        {
-          TimerStart();
-#pragma omp for collapse(3)
-          for (int nq = 0; nq < Nq; nq++) {
-            for (int b = 0; b < B; b++) {
-              for (int sk = 0; sk < FSk; sk++) {
-                int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-                AS[b][nq][sk] = 0.0f;
-                if (sk < offset) {
-                  int bid = beam_idx[b][sk];
-                  // printf("b: %d n: %d sk: %d  bid = %d\n", b, n, sk, bid);
-#ifdef S_FIRST_KVC
-                  dot_tpp(XL[b][nq], KL_C[sk][bid][nkv], &AS[b][nq][sk]);
-#else
-                  dot_tpp(XL[b][nq], KL_C[bid][nkv][sk], &AS[b][nq][sk]);
-#endif
-                } else {
-                  // printf("b: %d n: %d sk: %d \n", b, n, sk);
-                  dot_tpp(XL[b][nq], KL[b][nkv][0], &AS[b][nq][sk]);
-#ifdef S_FIRST_KVC
-                  cpy_tpp(KL[b][nkv][0], KL_C[sk][b][nkv]);
-#else
-                  cpy_tpp(KL[b][nkv][0], KL_C[b][nkv][sk]);
-#endif
-                }
-                AS[b][nq][sk] *= one_by_sqrt_H;
-                if (am_valid) {
-                  AS[b][nq][sk] += AM[b][sk];
-                }
-              }
-            }
-          }
-          TimerEnd();
-        }
-      }
-      {
-        RECORD_SCOPE(ac_gemm22, {});
-        RECORD_OMP_TIME();
-#pragma omp parallel
-        {
-          TimerStart();
-#pragma omp for collapse(2)
-          for (int nq = 0; nq < Nq; nq++) {
-            for (int b = 0; b < B; b++) {
-              int nkv = Nq_per_kv == 1 ? nq : nq / Nq_per_kv;
-              for (int sk = FSk; sk < FSk_aligned; sk++) {
-                // pad AS to align for softmax
-                AS[b][nq][sk] = -1e9f;
-              }
-              softmax_fwd_tpp(AS[b][nq], AS[b][nq]);
-              zero_tpp(XL[b][nq]);
-              for (int sk = 0; sk < FSk; sk++) {
-                if (sk < offset) {
-                  int bid = beam_idx[b][sk];
-#ifdef S_FIRST_KVC
-                  scale_add_tpp(VL_C[sk][bid][nkv], XL[b][nq], AS[b][nq][sk]);
-#else
-                  scale_add_tpp(VL_C[bid][nkv][sk], XL[b][nq], AS[b][nq][sk]);
-#endif
-                } else {
-                  scale_add_tpp(VL[b][nkv][0], XL[b][nq], AS[b][nq][sk]);
-#ifdef S_FIRST_KVC
-                  cpy_tpp(VL[b][nkv][0], VL_C[sk][b][nkv]);
-#else
-                  cpy_tpp(VL[b][nkv][0], VL_C[b][nkv][sk]);
-#endif
-                }
-              }
-            }
-          }
-          TimerEnd();
-        }
-      }
-    }
-    t_CL = t_XL.to(t_CL.dtype());
-  }
-#endif
-  return t_CL;
-}
-
-template <typename T, typename Tv>
-inline at::Tensor attn(
-    at::Tensor t_QL,
-    at::Tensor t_KL,
-    at::Tensor t_AM,
-    at::Tensor t_VL,
-    bool isCausal = true) {
-  RECORD_SCOPE(ac_gemm1, {t_QL, t_KL});
-  auto t_CL = at::empty_like(t_QL);
-  auto sizes = t_QL.sizes();
-  long B = sizes[0];
-  long Nq = sizes[1];
-  long Sq = sizes[2];
-  long H = sizes[3];
-  float one_by_sqrt_H = 1.0 / sqrtf(H);
-  auto ksizes = t_KL.sizes();
-  long Sk = ksizes[2];
-  long Nkv = ksizes[1];
-  const long Nq_per_kv = (Nq == Nkv ? 1 : Nq / Nkv);
-  // printf("Nq = %ld, Nkv = %ld, Nq_per_kv = %ld\n", Nq, Nkv, Nq_per_kv);
-  // fflush(stdout);
-  long offset = Sk - Sq;
-  constexpr long Sqb = 64;
-  long qrem = Sq % Sqb;
-  bool inline_trans = ((Sq + Sqb - 1) / Sqb == 1);
-  const bool am_valid = (t_AM.numel() > 0);
-  bool am_is_2d = am_valid && t_AM.size(2) != 1;
-
-  int vl_in_vnni = 1; //(Sk % 2 == 0 ? 1 : 0);
-  const long VBS = (vl_in_vnni ? get_vnni_block_size<T>() : 1);
-  long Sk_pad = (Sk + VBS - 1) & ~(VBS - 1);
-  // const long Skb = (!inline_trans ? 2048 : SK_BLOCK_SIZE);
-  const long Skb = SK_BLOCK_SIZE;
-  long krem = Sk % Skb;
-  int pad = Sk_pad - Sk;
-
-  auto t_KL_TV = t_KL.new_empty({B, Nkv, Sk_pad, H});
-  auto t_VL_V = t_VL;
-  if (VBS != 1) {
-    t_VL_V = t_VL.new_empty({B, Nkv, Sk_pad, H});
-  }
-  if (am_valid && Sk != Sk_pad) {
-    // TPP_ASSERT(am_is_2d == false, "2D AM not supported yet\n");
-    if (!am_is_2d) {
-      auto t_tmp = t_AM.new_empty({B, pad});
-      t_tmp.fill_(-10000.0);
-      t_AM = at::cat({t_AM.view({B, -1}), t_tmp}, -1);
-    } else {
-      auto t_tmp = t_AM.new_empty({B, 1, Sq, pad});
-      t_tmp.fill_(-10000.0);
-      t_AM = at::cat({t_AM, t_tmp}, -1);
-    }
-  }
-  auto QL = GetVLAPtr<T>(t_QL, {Nq, Sq, H});
-  auto KL = GetVLAPtr<T>(t_KL, {Nkv, Sk, H});
-  auto KL_TV = GetVLAPtr<T>(t_KL_TV, {Nkv, Sk_pad, H});
-  auto VL = GetVLAPtr<Tv>(t_VL, {Nkv, Sk, H});
-  auto VL_V = GetVLAPtr<Tv>(t_VL_V, {Nkv, Sk_pad, H});
-  auto CL = GetVLAPtr<T>(t_CL, {Nq, Sq, H});
-  auto AM = GetVLAPtr<T>(t_AM, {Sk_pad});
-  auto AM2 = GetVLAPtr<T>(t_AM, {Sq, Sk_pad});
-  int kl_in_vnni = 1;
-  static bool print_flag = true;
-  if (print_flag) {
-    if (my_rank == 0)
-      printf(
-          "Attn: Sqb = %ld Skb = %ld use_flash = %s\n",
-          Sqb,
-          Skb,
-          USE_FLASH ? "True" : "False");
-    print_flag = false;
-  }
-
-  AttnKernels<T, Tv> attn_kern[4] = {
-      AttnKernels<T, Tv>(Sqb, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(
-          Sqb, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(qrem, Skb, Sk_pad, H, 0, kl_in_vnni, vl_in_vnni),
-      AttnKernels<T, Tv>(
-          qrem, krem + pad, Sk_pad, H, pad, kl_in_vnni, vl_in_vnni),
-  };
-
-  if (!inline_trans) {
-    RECORD_SCOPE(k_trans, {t_QL, t_KL});
-#pragma omp parallel for collapse(3)
-    for (int n = 0; n < Nkv; n++) {
-      for (int b = 0; b < B; b++) {
-        for (int sk = 0; sk < Sk; sk += Skb) {
-          int kid = (sk + Skb > Sk) ? 1 : 0;
-          attn_kern[kid].xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
-          if (VBS != 1)
-            attn_kern[kid].vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
-        }
-      }
-    }
-  }
-
-  {
-    RECORD_OMP_TIME();
-    {
-#pragma omp parallel for collapse(3)
-      for (int b = 0; b < B; b++) {
-        for (int nq = 0; nq < Nq; nq++) {
-          for (int sq = 0; sq < Sq; sq += Sqb) {
-            int nkv = nq / Nq_per_kv;
-            long qbs = (Sq - sq >= Sqb ? Sqb : Sq - sq);
-            int qid = (sq + Sqb > Sq) ? 1 : 0;
-            float omax[qbs], osum[qbs], cmax[qbs], csum[qbs];
-            for (int sk = 0; sk < Sk; sk += Skb) {
-              long kbs = (Sk - sk >= Skb ? Skb : Sk_pad - sk);
-              int kid = qid * 2 + ((sk + Skb > Sk) ? 1 : 0);
-              auto& ak = attn_kern[kid];
-              float AS[qbs][kbs];
-              Tv AST[qbs][kbs];
-              T* k_ptr = KL_TV[b][nkv][sk];
-              T k_tmp[kbs * H];
-              if (inline_trans) {
-                // ak.xform_tpp(KL[b][n][sk], KL_TV[b][n][sk]);
-                ak.xform_tpp(KL[b][nkv][sk], k_tmp);
-                k_ptr = k_tmp;
-              }
-              ak.a_gemm_tpp(QL[b][nq][sq], k_ptr, AS[0], 1);
-              if (!am_is_2d && isCausal) {
-                for (int sq1 = 0; sq1 < qbs; sq1++) {
-                  auto qval = sq + sq1 + offset;
-                  for (int sk1 = qval + 1; sk1 < sk + kbs; sk1++) {
-                    AS[sq1][sk1 - sk] = -1e9f;
-                  }
-                }
-              }
-              ak.scale_tpp(AS[0], AS[0], one_by_sqrt_H);
-              if (am_valid) {
-                if (am_is_2d)
-                  ak.add_2dmask_tpp(&AM2[b][sq][sk], AS[0], AS[0]);
-                else
-                  ak.add_mask_tpp(&AM[b][sk], AS[0]);
-              }
-              if (sk == 0) {
-                ak.softmax_fwd_tpp(1, AS[0], AST[0], omax, osum, nullptr);
-              } else {
-                ak.softmax_fwd_tpp(1, AS[0], AST[0], cmax, csum, omax);
-              }
-              // for (int xx=0;xx<kbs;xx++)
-              // if (b == 0 && n == 0 && Sq == 1) printf("AS[%d]: %g\n",
-              // sk+xx, (float)AST[0][xx]);
-              Tv tmp[qbs * H];
-              Tv* v_ptr = VL_V[b][nkv][sk];
-              Tv v_tmp[kbs * H];
-              if (inline_trans && VBS != 1) {
-                // ak.vnni_tpp(VL[b][n][sk], VL_V[b][n][sk]);
-                ak.vnni_tpp(VL[b][nkv][sk], v_tmp);
-                v_ptr = v_tmp;
-              }
-              ak.c_gemm_tpp(AST[0], v_ptr, tmp, 1);
-              if (sk == 0) {
-                ak.cvt_tpp(tmp, CL[b][nq][sq]);
-              } else {
-                ak.softmax_fixup(tmp, CL[b][nq][sq], cmax, csum, omax, osum);
-              }
-            }
-            attn_kern[qid * 2].softmax_scale(CL[b][nq][sq], osum);
-          }
-        }
-      }
-    }
-  }
-  return t_CL;
-}
-
-at::Tensor remap_indices(at::Tensor t_beam_idx, at::Tensor t_offset) {
-  long B = t_beam_idx.size(1);
-  long offset = t_offset.item<long>();
-  auto t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
-  auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset + 1});
-  auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
-  for (auto i = 0; i < B; i++) {
-    beam_idx[i][offset] = i;
-    beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
-    for (auto j = offset - 2; j >= 0;
-         j--) { // for the token of input, the target beam is alwarys 0
-      beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
-    }
-  }
-  return t_new_beam_idx;
-}
-
+namespace tpp_models {
 struct __attribute__((visibility("hidden"))) LLMBlock
     : torch::CustomClassHolder {
  public:
   std::string name;
+  long layer_idx;
   long H;
 
-  LLMBlock(std::string name, long H) : name(name), H(H) {}
+  LLMBlock(std::string name, long layer_idx, long H)
+      : name(name), layer_idx(layer_idx), H(H) {}
 
   bool check_weight_reuse(at::Tensor& t_in) {
     long BS = t_in.numel() / t_in.size(-1);
@@ -1497,13 +529,13 @@ struct __attribute__((visibility("hidden"))) LLMBlock
 
   virtual std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
-      std::vector<at::Tensor> t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) = 0;
 
   template <typename cls>
   std::vector<at::Tensor> forward_common(
       std::vector<at::Tensor>& t_inp,
-      std::vector<at::Tensor>& t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) {
     GlobalPass _gp(FWD);
     RECORD_FUNCTION(name, std::vector<c10::IValue>());
@@ -1538,183 +570,26 @@ struct __attribute__((visibility("hidden"))) LLMBlock
       at::Tensor t_KL,
       at::Tensor t_VL,
       at::Tensor t_am,
-      std::vector<at::Tensor>& t_cache) {
+      c10::intrusive_ptr<TppCache> t_cache) {
     RECORD_SCOPE(mha, {t_QL, t_KL});
-    auto t_dummy = t_KL.new_empty({0});
-    auto t_dummy_int = t_KL.new_empty({0}, at::kLong);
-    auto t_key_past = t_dummy;
-    auto t_value_past = t_dummy;
-    auto t_beam_idx = t_dummy_int;
-    auto t_offset = t_dummy_int;
+    auto q_sizes = t_QL.sizes();
     auto B = t_QL.size(0);
     auto S = t_QL.size(1);
-    // auto N = self->N;
     auto H = this->H;
-    at::Tensor t_CL;
-    long offset = 0;
-    int csz = t_cache.size();
-    if (csz > 0)
-      t_key_past = t_cache[0];
-    if (csz > 1)
-      t_value_past = t_cache[1];
-    if (csz > 2)
-      t_beam_idx = t_cache[2].to(at::kLong);
-    if (csz > 3) {
-      t_offset = t_cache[3];
-      offset = t_offset.item<long>();
-      TPP_ASSERT(
-          csz >= 6,
-          "Updated indirect kv_cache tuple should be of minimum length 6\n");
-      t_key_past = t_cache[4];
-      t_value_past = t_cache[5];
-    } else if (csz > 0) {
-      offset = t_key_past.size(2);
-    }
-    // TPP_ASSERT(S == 1, "S must be 1");
 
-    t_QL = t_QL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
-    t_KL = t_KL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
-    t_VL = t_VL.view({B, S, -1, H}).permute({0, 2, 1, 3}).contiguous();
-    auto Nq = t_QL.size(1);
-    auto Nkv = t_KL.size(1);
-    // printf("%s:%d Nq = %ld, Nkv = %ld\n", __func__, __LINE__, Nq, Nkv);
-    // TPP_ASSERT(Nq == Nkv, "Nq and Nkv are not equal\n");
-
-    if (csz < 4) {
-      if (t_key_past.numel() > 0) {
-        t_KL = kv_concat<T>(t_key_past, t_KL, 2, t_beam_idx);
-      }
-      if (t_value_past.numel() > 0) {
-        t_VL = kv_concat<T>(t_value_past, t_VL, 2, t_beam_idx);
-      }
-      // std::cout << "1 t_KL.shape: " << t_KL.sizes() << std::endl;
-
-      t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-      t_CL = t_CL.view({B, Nq, S, H})
-                 .permute({0, 2, 1, 3})
-                 .contiguous()
-                 .view({B, S, Nq * H});
-
-      return {t_CL, t_KL, t_VL};
-
-    } else if (offset == 0) {
-      // std::cout << "2 t_KL.shape: " << t_KL.sizes() << std::endl;
-      t_CL = attn<T, T>(t_QL, t_KL, t_am, t_VL);
-      auto capacity = S + KV_CACHE_INC_SIZE;
-#ifdef S_FIRST_KVC
-      t_key_past = t_KL.new_zeros({capacity, B, Nkv, H});
-      t_value_past = t_VL.new_zeros({capacity, B, Nkv, H});
-#else
-      t_key_past = t_KL.new_zeros({B, Nkv, capacity, H});
-      t_value_past = t_VL.new_zeros({B, Nkv, capacity, H});
-#endif
-      // t_beam_idx = t_beam_idx.new_zeros({capacity, B});
-      t_beam_idx =
-          at::arange(B).unsqueeze(0).expand({capacity, B}).contiguous();
-      // if (my_rank == 0) std::cout << "t_beam_idx: " << t_beam_idx.sizes()
-      // << std::endl;
-      t_offset = t_offset + S;
-#ifdef S_FIRST_KVC
-      t_key_past.slice(0, 0, S, 1).copy_(t_KL.permute({2, 0, 1, 3}));
-      t_value_past.slice(0, 0, S, 1).copy_(t_VL.permute({2, 0, 1, 3}));
-#else
-      t_key_past.slice(2, 0, S, 1).copy_(t_KL);
-      t_value_past.slice(2, 0, S, 1).copy_(t_VL);
-#endif
-      t_CL = t_CL.view({B, Nq, S, H})
-                 .permute({0, 2, 1, 3})
-                 .contiguous()
-                 .view({B, S, Nq * H});
-      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
-      // printf("old offset = %d, new_offset = %ld\n", offset,
-      // t_offset.item<long>());
-    } else {
-#ifdef S_FIRST_KVC
-      auto capacity = t_key_past.size(0);
-#else
-      auto capacity = t_key_past.size(2);
-#endif
-      if (capacity <= offset) {
-        printf(
-            "Warning: Reallocating kv cache, consider increasing KV_CACHE_INC_SIZE (%d)\n",
-            KV_CACHE_INC_SIZE);
-        auto new_capacity = offset + KV_CACHE_INC_SIZE;
-#ifdef S_FIRST_KVC
-        auto t_key_past_new = t_key_past.new_empty({new_capacity, B, Nkv, H});
-        t_key_past_new.slice(0, 0, offset, 1).copy_(t_key_past);
-        t_key_past = t_key_past_new;
-
-        auto t_value_past_new =
-            t_value_past.new_empty({new_capacity, B, Nkv, H});
-        t_value_past_new.slice(0, 0, offset, 1).copy_(t_value_past);
-        t_value_past = t_value_past_new;
-#else
-        auto t_key_past_new = t_key_past.new_empty({B, Nkv, new_capacity, H});
-        t_key_past_new.slice(2, 0, offset, 1).copy_(t_key_past);
-        t_key_past = t_key_past_new;
-
-        auto t_value_past_new =
-            t_value_past.new_empty({B, Nkv, new_capacity, H});
-        t_value_past_new.slice(2, 0, offset, 1).copy_(t_value_past);
-        t_value_past = t_value_past_new;
-#endif
-
-        auto t_beam_idx_new =
-            at::arange(B).unsqueeze(0).expand({new_capacity, B}).contiguous();
-        t_beam_idx_new.slice(0, 0, offset, 1).copy_(t_beam_idx);
-        t_beam_idx = t_beam_idx_new;
-      }
-
-      // if (my_rank == 0) std::cout << "t_beam_idx2: " <<
-      // t_beam_idx.sizes() << std::endl; std::cout << "t_key_past.shape:"
-      // << t_key_past.sizes() << std::endl; std::cout <<
-      // "t_beam_idx.shape:" << t_beam_idx.sizes() << std::endl; std::cout
-      // << "t_offset:" << t_offset << std::endl; std::cout
-      // << "B: " << B << " offset:" << offset << std::endl;
-
-      at::Tensor t_new_beam_idx;
-      if (csz > 6) {
-        t_new_beam_idx = t_cache[6];
-      } else {
-        t_new_beam_idx = t_beam_idx.new_empty({B, offset + 1});
-      }
-      auto beam_idx = GetVLAPtr<long>(t_new_beam_idx, {offset + 1});
-      if (csz <= 6) {
-        auto b_ptr = GetVLAPtr<long>(t_beam_idx, {B});
-        for (auto i = 0; i < B; i++) {
-          beam_idx[i][offset] = i;
-          beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
-          for (auto j = offset - 2; j >= 0;
-               j--) { // for the token of input, the target beam is alwarys 0
-            beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
-          }
-        }
-      }
-
-      t_CL = attn<T>(
-          t_QL, t_KL, t_am, t_VL, t_key_past, t_value_past, beam_idx, offset);
-      t_CL = t_CL.view({B, Nq, S, H})
-                 .permute({0, 2, 1, 3})
-                 .contiguous()
-                 .view({B, S, Nq * H});
-      t_offset = t_offset + 1;
-      S = t_offset.item<long>();
-#ifdef S_FIRST_KVC
-      t_KL = t_key_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
-      t_VL = t_value_past.slice(0, 0, S, 1).permute({1, 2, 0, 3});
-#else
-      t_KL = t_key_past.slice(2, 0, S, 1);
-      t_VL = t_value_past.slice(2, 0, S, 1);
-#endif
-      // printf("old offset = %d, new_offset = %ld\n", offset,
-      // t_offset.item<long>());
-      // std::cout << "t_key_past = " << t_key_past.sizes() << std::endl;
-      return {t_CL, t_KL, t_VL, t_beam_idx, t_offset, t_key_past, t_value_past};
-    }
+    t_KL = t_KL.view({B, S, -1, H}).permute({0, 2, 1, 3}); // .contiguous();
+    t_VL = t_VL.view({B, S, -1, H}).permute({0, 2, 1, 3}); // .contiguous();
+    auto N = t_KL.size(1);
+    t_QL = t_QL.view({B, S, N, -1, H}).permute({0, 2, 1, 3, 4}).contiguous();
+    auto t_CL =
+        attn_wrapper_impl<T>(t_QL, t_KL, t_VL, t_am, t_cache, layer_idx);
+    t_CL = t_CL.permute({0, 2, 1, 3, 4}).contiguous().view(q_sizes);
+    return {t_CL};
   }
 };
 
-void print_diff(const std::string& tag, at::Tensor a, at::Tensor b) {
+#if 0
+static void print_diff(const std::string& tag, at::Tensor a, at::Tensor b) {
   a = a.flatten().to(at::kFloat);
   b = b.flatten().to(at::kFloat);
   long N = a.numel();
@@ -1731,6 +606,7 @@ void print_diff(const std::string& tag, at::Tensor a, at::Tensor b) {
   }
   std::cout << tag << "  end " << std::endl;
 }
+#endif
 
 struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
  public:
@@ -1749,11 +625,12 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
 
   GPTJBlock(
       std::vector<at::Tensor> params,
+      long layer_idx,
       double eps,
       long H,
       long max_positions,
       long rotary_dim)
-      : LLMBlock("gptj_fwd", H),
+      : LLMBlock("gptj_fwd", layer_idx, H),
         eps(eps),
         H(H),
         max_positions(max_positions),
@@ -1824,7 +701,7 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
 
   virtual std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
-      std::vector<at::Tensor> t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) override {
     return this->template forward_common<GPTJBlock>(t_inp, t_cache, use_cache);
   }
@@ -1832,7 +709,7 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
   template <typename T>
   std::vector<at::Tensor> _forward(
       std::vector<at::Tensor>& t_inp,
-      std::vector<at::Tensor>& t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) {
     auto t_HS = t_inp[0];
     RECORD_SCOPE(pt_op, {t_HS});
@@ -1969,11 +846,12 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
 
   OPTDecoderLayer(
       std::vector<at::Tensor> params,
+      long layer_idx,
       double eps1,
       double eps2,
       long H,
       bool do_layer_norm_before)
-      : LLMBlock("opt_fwd", H),
+      : LLMBlock("opt_fwd", layer_idx, H),
         eps1(eps1),
         eps2(eps2),
         H(H),
@@ -2050,7 +928,7 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
 
   virtual std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
-      std::vector<at::Tensor> t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) override {
     return this->template forward_common<OPTDecoderLayer>(
         t_inp, t_cache, use_cache);
@@ -2059,7 +937,7 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
   template <typename T>
   std::vector<at::Tensor> _forward(
       std::vector<at::Tensor>& t_inp,
-      std::vector<at::Tensor>& t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) {
     auto t_HS = t_inp[0];
     RECORD_SCOPE(pt_op, {t_HS});
@@ -2167,11 +1045,12 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
   LlamaDecoderLayer(
       std::vector<at::Tensor> params,
+      long layer_idx,
       double eps,
       long H,
       long max_positions,
       long rotary_dim)
-      : LLMBlock("llama_fwd", H),
+      : LLMBlock("llama_fwd", layer_idx, H),
         eps(eps),
         H(H),
         max_positions(max_positions),
@@ -2246,7 +1125,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
   virtual std::vector<at::Tensor> forward(
       std::vector<at::Tensor> t_inp,
-      std::vector<at::Tensor> t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) override {
     return this->template forward_common<LlamaDecoderLayer>(
         t_inp, t_cache, use_cache);
@@ -2255,7 +1134,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
   template <typename T>
   std::vector<at::Tensor> _forward(
       std::vector<at::Tensor>& t_inp,
-      std::vector<at::Tensor>& t_cache,
+      c10::intrusive_ptr<TppCache> t_cache,
       bool use_cache) {
     auto t_HS = t_inp[0];
     RECORD_SCOPE(pt_op, {t_HS});
@@ -2346,7 +1225,8 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     }
   }
 };
-
+} // namespace tpp_models
+using namespace tpp_models;
 static at::Tensor fc_plain_wrap(
     at::Tensor t_in,
     at::Tensor t_wt,
@@ -2405,17 +1285,17 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   m.def("fc_plain", &fc_plain_wrap, "TPP fc_plain");
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
-  m.def("remap_indices", &remap_indices);
-  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
-  py::class_<LLMBlock>(m, "LLMBlock").def("forward", &LLMBlock::forward);
-  py::class_<GPTJBlock>(m, "GPTJBlock")
-      .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
+  py::class_<LLMBlock>(m, "LLMBlock", py::module_local())
+      .def("forward", &LLMBlock::forward);
+  py::class_<GPTJBlock>(m, "GPTJBlock", py::module_local())
+      .def(py::init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
-  py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer")
-      .def(py::init<std::vector<at::Tensor>, double, double, long, bool>())
+  py::class_<OPTDecoderLayer>(m, "OPTDecoderLayer", py::module_local())
+      .def(
+          py::init<std::vector<at::Tensor>, long, double, double, long, bool>())
       .def("forward", &OPTDecoderLayer::forward);
-  py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer")
-      .def(py::init<std::vector<at::Tensor>, double, long, long, long>())
+  py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer", py::module_local())
+      .def(py::init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
 }
 
@@ -2423,16 +1303,18 @@ TORCH_LIBRARY(tpp_llm, m) {
   m.def("fc_plain", &fc_plain_wrap);
   m.def("set_pg", &set_pg);
   m.def("allreduce", &allreduce);
-  m.def("remap_indices", &remap_indices);
-  m.def("get_batch_dim_in_kv_cache", &get_batch_dim_in_kv_cache);
   m.class_<LLMBlock>("LLMBlock").def("forward", &LLMBlock::forward);
   m.class_<GPTJBlock>("GPTJBlock")
-      .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
+      .def(torch::
+               init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &GPTJBlock::forward);
   m.class_<OPTDecoderLayer>("OPTDecoderLayer")
-      .def(torch::init<std::vector<at::Tensor>, double, double, long, bool>())
+      .def(
+          torch::
+              init<std::vector<at::Tensor>, long, double, double, long, bool>())
       .def("forward", &OPTDecoderLayer::forward);
   m.class_<LlamaDecoderLayer>("LlamaDecoderLayer")
-      .def(torch::init<std::vector<at::Tensor>, double, long, long, long>())
+      .def(torch::
+               init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
 }

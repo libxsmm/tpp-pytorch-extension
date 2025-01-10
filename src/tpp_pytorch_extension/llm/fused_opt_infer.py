@@ -25,6 +25,8 @@ from contextlib import contextmanager
 from typing import Optional, List, Tuple, Union
 import transformers
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.cache_utils import Cache
 
 from .llm_common import (
     BlockedLinear,
@@ -34,46 +36,45 @@ from .llm_common import (
     get_rank,
     get_size,
     set_pg,
-    _reorder_cache,
     block,
     compare,
     global_layer_dtype,
-    get_layer_past_and_offset,
+    TppCache,
 )
 
 
 class OPTDecoderLayer(BlockedModule):
-    def __init__(self, config):
-        super().__init__()
-        self.embed_dim = config.hidden_size
-        self.self_attn = OPTAttention(
-            embed_dim=self.embed_dim,
-            num_heads=config.num_attention_heads,
-            dropout=config.attention_dropout,
-            is_decoder=True,
-            bias=config.enable_bias,
-        )
-        self.do_layer_norm_before = config.do_layer_norm_before
-        self.dropout = config.dropout
-        self.activation_fn = ACT2FN[config.activation_function]
+    # def __init__(self, config):
+    #     super().__init__()
+    #     self.embed_dim = config.hidden_size
+    #     self.self_attn = OPTAttention(
+    #         embed_dim=self.embed_dim,
+    #         num_heads=config.num_attention_heads,
+    #         dropout=config.attention_dropout,
+    #         is_decoder=True,
+    #         bias=config.enable_bias,
+    #     )
+    #     self.do_layer_norm_before = config.do_layer_norm_before
+    #     self.dropout = config.dropout
+    #     self.activation_fn = ACT2FN[config.activation_function]
 
-        self.self_attn_layer_norm = nn.LayerNorm(
-            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
-        )
-        self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
-        self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
-        self.final_layer_norm = nn.LayerNorm(
-            self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
-        )
+    #     self.self_attn_layer_norm = nn.LayerNorm(
+    #         self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
+    #     )
+    #     self.fc1 = nn.Linear(self.embed_dim, config.ffn_dim, bias=config.enable_bias)
+    #     self.fc2 = nn.Linear(config.ffn_dim, self.embed_dim, bias=config.enable_bias)
+    #     self.final_layer_norm = nn.LayerNorm(
+    #         self.embed_dim, elementwise_affine=config.layer_norm_elementwise_affine
+    #     )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
     ) -> Union[
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]],
@@ -83,49 +84,27 @@ class OPTDecoderLayer(BlockedModule):
         # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
         # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
         if not hasattr(self, "cpp_block"):
-            raise
+            raise ValueError("cpp_block is not initialized")
         orig_hidden_states = hidden_states
-        S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(
-            hidden_states,
-            self.blocked_input_signature,
-            [None, None, self.features_block_size],
-        )
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
 
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
-        discrete_kv = getattr(self, "discrete_kv", False)
-        past_key_value, offset = get_layer_past_and_offset(past_key_value, discrete_kv)
         add_tensor_or_empty(attention_mask)
 
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
-        # print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
-        # print("PHS:", hidden_states.shape)
-        past_key_value = [
-            i.to(self.layer_dtype) if i.is_floating_point() else i
-            for i in past_key_value
-        ]
-
-        outputs = self.cpp_block.forward(inputs, past_key_value, use_cache)
+        outputs = self.cpp_block.forward(inputs, past_key_value.get_cpp(), use_cache)
         hs = outputs[0]
-        present = tuple(outputs[1:])
-
-        hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
-        # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
-        # v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
 
         if use_cache:
-            outputs = (hs, present)
-        else:
-            outputs = (hs,)
+            outputs += (past_key_value,)
 
-        return outputs  # hidden_states, present, (attentions)
+        return outputs
 
 
 def FixOPTDecoderLayer(
@@ -187,6 +166,7 @@ def FixOPTDecoderLayer(
 
         self.cpp_block = torch.classes.tpp_llm.OPTDecoderLayer(
             params,
+            self.self_attn.layer_idx,
             self.self_attn_layer_norm.eps,
             self.final_layer_norm.eps,
             self.self_attn.head_dim,
@@ -200,6 +180,10 @@ def OptimizeModelForOPT(model, dtype, device="cpu", weight_dtype=None):
 
     if weight_dtype is None:
         weight_dtype = dtype
+    layers = model.model.decoder.layers
+    for i, l in enumerate(layers):
+        if not hasattr(l.self_attn, "layer_idx"):
+            l.self_attn.layer_idx = i
     for m in model.modules():
         if isinstance(m, transformers.models.opt.modeling_opt.OPTDecoderLayer):
             FixOPTDecoderLayer(m, 16, 64, dtype, weight_dtype=weight_dtype)
@@ -217,9 +201,124 @@ def OptimizeModelForOPT(model, dtype, device="cpu", weight_dtype=None):
             )
 
 
-transformers.models.opt.modeling_opt.OPTForCausalLM._reorder_cache = staticmethod(
-    _reorder_cache
-)
+def OPTDecoder_forward(
+    self,
+    input_ids: torch.LongTensor = None,
+    attention_mask: Optional[torch.Tensor] = None,
+    head_mask: Optional[torch.Tensor] = None,
+    past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    output_attentions = False
+    output_hidden_states = False
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    # retrieve input_ids and inputs_embeds
+    if input_ids is not None and inputs_embeds is not None:
+        raise ValueError(
+            "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time"
+        )
+    elif input_ids is not None:
+        input_shape = input_ids.size()
+        input_ids = input_ids.view(-1, input_shape[-1])
+    elif inputs_embeds is not None:
+        input_shape = inputs_embeds.size()[:-1]
+    else:
+        raise ValueError(
+            "You have to specify either decoder_input_ids or decoder_inputs_embeds"
+        )
+
+    if inputs_embeds is None:
+        inputs_embeds = self.embed_tokens(input_ids)
+
+    if use_cache and not isinstance(past_key_values, TppCache):
+        if past_key_values is None:
+            past_key_values = TppCache()
+        else:
+            if (
+                isinstance(past_key_values, Cache)
+                and past_key_values.get_seq_length() == 0
+            ):
+                past_key_values = TppCache()
+            else:
+                raise ValueError("past_key_values must be of TppCache type")
+
+    # create causal mask
+    causal_mask = past_key_values.align_and_invert_mask(attention_mask, inputs_embeds)
+
+    past_key_values_length = past_key_values.get_seq_length()
+
+    # embed positions
+
+    if position_ids is None:
+        position_ids = torch.cumsum(attention_mask, dim=1)
+        position_ids = (position_ids * attention_mask - 1).long()
+        # cut positions if `past_key_values_length` is > 0
+        position_ids = position_ids[:, past_key_values_length:]
+
+    pos_embeds = self.embed_positions(
+        attention_mask, past_key_values_length, position_ids=position_ids
+    )
+
+    if self.project_in is not None:
+        inputs_embeds = self.project_in(inputs_embeds)
+
+    hidden_states = inputs_embeds + pos_embeds
+
+    # decoder layers
+    all_hidden_states = () if output_hidden_states else None
+    all_self_attns = () if output_attentions else None
+    next_decoder_cache = () if use_cache else None
+
+    for idx, decoder_layer in enumerate(self.layers):
+        # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
+
+        layer_outputs = decoder_layer(
+            hidden_states,
+            attention_mask=causal_mask,
+            # position_ids=position_ids,
+            past_key_value=past_key_values,
+            output_attentions=output_attentions,
+            use_cache=use_cache,
+        )
+
+        hidden_states = layer_outputs[0]
+
+        if use_cache:
+            next_decoder_cache = layer_outputs[1]
+
+    if self.final_layer_norm is not None:
+        hidden_states = self.final_layer_norm(hidden_states)
+
+    if self.project_out is not None:
+        hidden_states = self.project_out(hidden_states)
+
+    next_cache = next_decoder_cache if use_cache else None
+    if not return_dict:
+        return tuple(
+            v
+            for v in [hidden_states, next_cache, all_hidden_states, all_self_attns]
+            if v is not None
+        )
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attns,
+    )
+
+
+transformers.models.opt.modeling_opt.OPTDecoder.forward = OPTDecoder_forward
+
 
 OPTForCausalLM_forward = transformers.models.opt.modeling_opt.OPTForCausalLM.forward
 
@@ -236,6 +335,8 @@ def OPTForCausalLM_forward_patched(
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    num_logits_to_keep: int = 0,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     output_attentions = False
     output_hidden_states = False
@@ -243,16 +344,17 @@ def OPTForCausalLM_forward_patched(
         return_dict if return_dict is not None else self.config.use_return_dict
     )
 
-    only_last_logit = (
-        self.config.only_last_logit
-        if hasattr(self.config, "only_last_logit")
-        else False
-    )
+    # only_last_logit = (
+    #     self.config.only_last_logit
+    #     if hasattr(self.config, "only_last_logit")
+    #     else False
+    # )
 
     # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
     outputs = self.model.decoder(
         input_ids=input_ids,
         attention_mask=attention_mask,
+        position_ids=position_ids,
         head_mask=head_mask,
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
@@ -263,11 +365,11 @@ def OPTForCausalLM_forward_patched(
     )
     hidden_states = outputs[0]
 
-    # We only need logits for last token doing text generation
-    if only_last_logit == True and labels is None:
-        hidden_states = hidden_states[:, -1:, :]
+    # # We only need logits for last token doing text generation
+    # if only_last_logit == True and labels is None:
+    #     hidden_states = hidden_states[:, -1:, :]
 
-    logits = self.lm_head(hidden_states).contiguous()
+    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).contiguous()
 
     loss = None
     if labels is not None:
@@ -293,20 +395,6 @@ def OPTForCausalLM_forward_patched(
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
     )
-
-    # return OPTForCausalLM_forward(
-    #     self,
-    #     input_ids=input_ids,
-    #     attention_mask=attention_mask,
-    #     past_key_values=past_key_values,
-    #     head_mask=head_mask,
-    #     inputs_embeds=inputs_embeds,
-    #     labels=labels,
-    #     use_cache=use_cache,
-    #     output_attentions=output_attentions,
-    #     output_hidden_states=output_hidden_states,
-    #     return_dict=return_dict,
-    # )
 
 
 transformers.models.opt.modeling_opt.OPTForCausalLM.forward = (
