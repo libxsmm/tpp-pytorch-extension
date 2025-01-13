@@ -30,17 +30,6 @@ using namespace tpp;
 #include "shm_coll.h"
 #include "tensor_helper.h"
 
-#define S_FIRST_KVC
-#define PER_THREAD_COPY
-
-static long get_batch_dim_in_kv_cache() {
-#ifdef S_FIRST_KVC
-  return 1;
-#else
-  return 0;
-#endif
-}
-
 static int my_rank = guess_mpi_rank();
 static int my_size = 1;
 static int TPP_CACHE_REMAPPED_WEIGHTS =
