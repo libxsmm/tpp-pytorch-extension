@@ -138,6 +138,20 @@ class TppCache(DynamicCache):
         print_line_info()
         return None
 
+    def crop(self, max_length: int):
+        """Crop the past key values up to a new `max_length` in terms of tokens. `max_length` can also be
+        negative to remove `max_length` tokens. This is used in assisted decoding and contrastive search."""
+        # In case it is negative
+        seq_len = self.get_seq_length()
+        if max_length < 0:
+            max_length = seq_len - abs(max_length)
+
+        if seq_len <= max_length:
+            return
+
+        print(f"seq_len = {seq_len}, max_length = {max_length} size = {len(self)}")
+        self.tpp_cache.crop(max_length)
+
     def align_and_invert_mask(
         self, mask: torch.Tensor, inputs_embeds: torch.Tensor
     ) -> torch.Tensor:

@@ -1963,6 +1963,7 @@ REGISTER_SUBMODULE(_tpp_attn, m) {
       .def("get_capacity", &TppCache::get_capacity)
       //.def("get_kv_cache_meta", &TppCache::get_kv_cache_meta)
       .def("align_and_invert_mask", &TppCache::align_and_invert_mask)
+      .def("crop", &TppCache::crop)
       .def("reorder_cache", &TppCache::reorder_cache);
   m.def("attn", &attn_wrapper);
 }
@@ -1977,5 +1978,6 @@ TORCH_LIBRARY_FRAGMENT(tpp_llm, m) {
       .def("get_capacity", &TppCache::get_capacity)
       //.def("get_kv_cache_meta", &TppCache::get_kv_cache_meta)
       .def("align_and_invert_mask", &TppCache::align_and_invert_mask)
+      .def("crop", &TppCache::crop)
       .def("reorder_cache", &TppCache::reorder_cache);
 }

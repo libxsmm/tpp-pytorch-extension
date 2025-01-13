@@ -219,6 +219,11 @@ struct LayerCache {
     offset += S;
     return {t_key_past, t_value_past};
   }
+
+  void crop(long max_length) {
+    if (offset > max_length)
+      offset = max_length;
+  }
 };
 
 struct __attribute__((visibility("hidden"))) TppCache
@@ -290,6 +295,12 @@ struct __attribute__((visibility("hidden"))) TppCache
       return 0;
     }
     return layers[layer_idx].get_capacity();
+  }
+
+  void crop(long max_length) {
+    for (auto i = 0; i < (int)layers.size(); i++) {
+      layers[i].crop(max_length);
+    }
   }
 
   long size() {
