@@ -34,9 +34,9 @@ static int my_rank = guess_mpi_rank();
 static int SK_BLOCK_SIZE = env2int("SK_BLOCK_SIZE", 128);
 static const bool USE_FLASH = env2int("USE_FLASH", 1);
 
-int key_layout_id = KVLayout::kvBNHS;
+int key_layout_id = KVLayout::kBNSH;
 // int key_layout_id = KVLayout::kSBNH;
-int value_layout_id = KVLayout::kvBNSH;
+int value_layout_id = KVLayout::kBNSH;
 
 REGISTER_LOCAL_SCOPE(ac_gemm1, "ac_gemm1");
 
@@ -80,7 +80,7 @@ struct KVLayout_SBNH : public KVLayout {
   // SCOPEIT_DECL(ConvertTPP<Ts, Tp>) cvt_tpp;
   ConvertTPP<Ts, Tp> cvt_tpp;
 
-  KVLayout_SBNH(long B, long N, long H, long S2) : KVLayout(B, N, H, S2) {
+  KVLayout_SBNH(long B, long N, long H, long S2) : KVLayout(B, N, H, S2, 2, 0) {
     Hp = 1;
     Np = H;
     Bp = N * H;
@@ -135,7 +135,7 @@ struct KVLayout_BNHS : public KVLayout {
   // SCOPEIT_DECL(ConvertTPP<Ts, Tp>) cvt_tpp;
   XformExtTPP<Ts> trans_tpp_H, trans_tpp_NH;
 
-  KVLayout_BNHS(long B, long N, long H, long S2) : KVLayout(B, N, H, S2) {
+  KVLayout_BNHS(long B, long N, long H, long S2) : KVLayout(B, N, H, S2, 1, 0) {
     S2p = 1;
     Hp = S2;
     Np = H * Hp;
@@ -243,7 +243,8 @@ struct KVLayout_vBNHS : public KVLayout {
   // SCOPEIT_DECL(ConvertTPP<Ts, Tp>) cvt_tpp;
   XformExtTPP<Ts> trans_tpp_H, trans_tpp_NH;
 
-  KVLayout_vBNHS(long B, long N, long H, long S2) : KVLayout(B, N, H, S2) {
+  KVLayout_vBNHS(long B, long N, long H, long S2)
+      : KVLayout(B, N, H, S2, 1, 0) {
     S2p = 1;
     Hp = S2;
     Np = H * Hp;
@@ -361,7 +362,7 @@ struct KVLayout_BNSH : public KVLayout {
   ConvertTPP<Ts, Tp> cvt_tpp_1, cvt_tpp_H, cvt_tpp_NH;
   // XformExtTPP<Ts> trans_tpp_H, trans_tpp_NH;
 
-  KVLayout_BNSH(long B, long N, long H, long S2) : KVLayout(B, N, H, S2) {
+  KVLayout_BNSH(long B, long N, long H, long S2) : KVLayout(B, N, H, S2, 1, 0) {
     Hp = 1;
     S2p = H;
     Np = S2 * S2p;
@@ -469,7 +470,8 @@ struct KVLayout_vBNSH : public KVLayout {
   ConvertTPP<Ts, Tp> cvt_tpp;
   XformExtTPP<Ts> vnni_tpp_H, vnni_tpp_NH;
 
-  KVLayout_vBNSH(long B, long N, long H, long S2) : KVLayout(B, N, H, S2) {
+  KVLayout_vBNSH(long B, long N, long H, long S2)
+      : KVLayout(B, N, H, S2, 1, 0) {
     Hp = 1;
     S2p = H;
     Np = S2 * S2p;
@@ -689,11 +691,25 @@ struct AttnKernelsNew {
   SoftMaxFixUpTPP<T> softmax_fixup;
   SoftMaxFlashScaleTPP<T> softmax_scale;
 
-  AttnKernelsNew(long Sqb, long Skb, long H, const KVCacheMeta& cm) {
+  AttnKernelsNew(
+      long Sqb,
+      long Skb,
+      long H,
+      const KVCacheMeta& cm,
+      bool isBeamSearch) {
     if (Sqb == 0)
       return;
+    if (isBeamSearch) {
+      TPP_ASSERT(
+          cm.key.h_str == 1 && cm.value.h_str == 1,
+          "Beam search only supports h_str=1");
+      TPP_ASSERT(
+          cm.key.in_vnni == 0 && cm.value.in_vnni == 0,
+          "Beam search only supports in_vnni=0");
+    }
     // [Sqb, H] * [H, Skb] = [Sqb, Skb]
-    auto k_ld = cm.kl_needs_trans ? cm.key.s2_str : cm.key.h_str;
+    auto k_ld =
+        cm.kl_needs_trans ? (isBeamSearch ? H : cm.key.s2_str) : cm.key.h_str;
     a_gemm_tpp = BrgemmTPP<T, float, Tc>(
         Sqb,
         Skb,
@@ -720,9 +736,9 @@ struct AttnKernelsNew {
         H,
         Skb,
         Sqb * Skb,
-        cm.value.s1_str,
+        isBeamSearch ? Skb * H : cm.value.s1_str,
         Skb,
-        cm.value.s2_str,
+        isBeamSearch ? H : cm.value.s2_str,
         H,
         0.0,
         0,
@@ -739,17 +755,19 @@ AttnKernelsNew<T, Tc>& GetAttnKernelsNew(
     long Sqb,
     long Skb,
     long H,
-    const KVCacheMeta& cm) {
+    const KVCacheMeta& cm,
+    bool isBeamSearch) {
   static ska::flat_hash_map<std::string, AttnKernelsNew<T, Tc>*> attn_kernels;
   // Below key assumes static Skb, H and cm
-  std::string key = std::to_string(Sqb);
+  std::string key = std::to_string(Sqb) + "_" + std::to_string(H) + "_" +
+      cm.hash_str + "_" + std::to_string(isBeamSearch);
   AttnKernelsNew<T, Tc>* kernel = nullptr;
   auto search = attn_kernels.find(key);
   if (search != attn_kernels.end()) {
     kernel = search->second;
   }
   if (kernel == nullptr) {
-    kernel = new AttnKernelsNew<T, Tc>(Sqb, Skb, H, cm);
+    kernel = new AttnKernelsNew<T, Tc>(Sqb, Skb, H, cm, isBeamSearch);
     attn_kernels[key] = kernel;
   }
   if (kernel == nullptr) {
@@ -783,6 +801,8 @@ inline at::Tensor attn(
   at::Tensor t_beam_idx;
   if (isBeamSearch) {
     t_beam_idx = t_KV[2];
+  } else {
+    t_beam_idx = at::empty({0}, t_QL.options().dtype(at::kLong));
   }
 
   // KL: [NT, B, N, H, S2]
@@ -813,6 +833,14 @@ inline at::Tensor attn(
   auto VL = GetVLAPtrFromStrides<Tc>(t_VL, {s1v_str, bv_str, nv_str});
   auto CL = GetVLAPtr<T>(t_CL, {N, Sq, R, H});
   auto AM = GetVLAPtr<T>(t_AM, {S1, S2});
+  auto beam_idx = GetVLAPtr<long>(t_beam_idx, {S1, S2});
+
+  if (isBeamSearch) {
+    // std::cout << "beam idx: " << t_beam_idx.sizes() << std::endl;
+    // std::cout << "S1: " << S1 << " S2: " << S2 << std::endl;
+    TPP_ASSERT(t_beam_idx.size(1) == S1 * S2, "Invalid beam_idx size\n");
+  }
+
   static bool print_flag = true;
   if (print_flag) {
     if (my_rank == 0)
@@ -829,8 +857,8 @@ inline at::Tensor attn(
   }
 
   AttnKernelsNew<T, Tc> attn_kern[2] = {
-      GetAttnKernelsNew<T, Tc>(Sqb * R, S2, H, cm),
-      GetAttnKernelsNew<T, Tc>(qrem * R, S2, H, cm),
+      GetAttnKernelsNew<T, Tc>(Sqb * R, S2, H, cm, isBeamSearch),
+      GetAttnKernelsNew<T, Tc>(qrem * R, S2, H, cm, isBeamSearch),
   };
   {
     RECORD_OMP_TIME();
@@ -857,6 +885,18 @@ inline at::Tensor attn(
                 // printf("s1 = %d, k = %d b = %d n = %d kbs = %d qbs = %d S1End
                 // = %d\n", s1, k, b, n, kbs, qbs, S1End);
                 Tc* k_ptr = KL[s1 + k][b][n];
+                Tc k_buf[S2 * H];
+                if (isBeamSearch) {
+                  auto p_idx = beam_idx[b][s1 + k];
+                  for (int s2 = 0; s2 < S2; s2++) {
+                    auto b_idx = p_idx[s2];
+                    memcpy(
+                        k_buf + s2 * H,
+                        KL[s1 + k][b_idx][n] + s2 * cm.key.s2_str,
+                        H * sizeof(Tc));
+                  }
+                  k_ptr = k_buf;
+                }
                 ak.a_gemm_tpp(q_ptr, k_ptr, AS[k], 1, true);
                 ak.scale_tpp(AS[k], AS[k], one_by_sqrt_H);
                 ak.add_mask_tpp(AM[b][s1 + k], AS[k]);
@@ -884,8 +924,20 @@ inline at::Tensor attn(
               } else {
                 ak.softmax_fwd_tpp(kbs, AS[0], AST[0], cmax, csum, omax);
               }
+              Tc v_buf[kbs * S2 * H];
               T tmp[qbs * R * H];
               Tc* v_ptr = VL[s1][b][n];
+              if (isBeamSearch) {
+                for (int k = 0; k < kbs; k++) {
+                  auto p_idx = beam_idx[b][s1 + k];
+                  for (int s2 = 0; s2 < S2; s2++) {
+                    auto b_idx = p_idx[s2];
+                    Tc* p_tmp = VL[s1 + k][b_idx][n] + s2 * cm.value.s2_str;
+                    memcpy(v_buf + k * S2 * H + s2 * H, p_tmp, H * sizeof(Tc));
+                  }
+                }
+                v_ptr = v_buf;
+              }
               ak.c_gemm_tpp(AST[0], v_ptr, tmp, kbs);
               if (s1 == 0) {
                 ak.cvt_tpp(tmp, c_ptr);

@@ -61,10 +61,15 @@ struct KVCacheMeta {
   KVMeta value;
   long S2;
   int kl_needs_trans;
+  std::string hash_str;
 
   KVCacheMeta() : S2(0), kl_needs_trans(1) {}
   KVCacheMeta(const KVMeta& key, const KVMeta& value, long S2)
-      : key(key), value(value), S2(S2), kl_needs_trans(key.s2_str != 1) {}
+      : key(key),
+        value(value),
+        S2(S2),
+        kl_needs_trans(key.s2_str != 1),
+        hash_str(hash()) {}
 
   void print() const {
     printf(
@@ -87,6 +92,29 @@ struct KVCacheMeta {
         value.in_vnni);
     printf("S2 = %ld kl_needs_trans = %d\n", S2, kl_needs_trans);
   }
+  std::string hash() const {
+    char buf[200];
+    snprintf(
+        buf,
+        199,
+        "ks1%ld_ks2%ld_kb%ld_kn%ld_kh%ld_kv%d_"
+        "vs1%ld_vs2%ld_vb%ld_vn%ld_vh%ld_vv%d_knt%d_S2%ld",
+        key.s1_str,
+        key.s2_str,
+        key.b_str,
+        key.n_str,
+        key.h_str,
+        key.in_vnni,
+        value.s1_str,
+        value.s2_str,
+        value.b_str,
+        value.n_str,
+        value.h_str,
+        value.in_vnni,
+        kl_needs_trans,
+        S2);
+    return std::string(buf);
+  }
 };
 
 struct KVLayout {
@@ -94,15 +122,19 @@ struct KVLayout {
   long S1p, S2p, Bp, Np, Hp;
   int in_vnni;
   int VBS;
+  const long batch_dim;
   const long S1_dim;
   constexpr static int kSBNH = 0; // [S1, S2, B, N, H]
   constexpr static int kBNSH = 1; // [S1, B, N, S2, H]
   constexpr static int kBNHS = 2; // [S1, B, N, H, S2]
   constexpr static int kvBNSH = 3; // [S1, B, N, S2, H] with vnni
   constexpr static int kvBNHS = 4; // [S1, B, N, H, S2] with vnni
-  KVLayout(long B, long N, long H, long S2, long S1_dim = 0)
-      : B(B), N(N), H(H), S2(S2), S1_dim(S1_dim) {}
+  KVLayout(long B, long N, long H, long S2, long batch_dim = 1, long S1_dim = 0)
+      : B(B), N(N), H(H), S2(S2), batch_dim(batch_dim), S1_dim(S1_dim) {}
   virtual int get_layout() const = 0;
+  long get_batch_dim() const {
+    return batch_dim;
+  }
   virtual at::Tensor new_empty(const at::TensorOptions& options) const = 0;
   virtual const KVMeta get_meta() const = 0;
   virtual void copy_states(
@@ -281,15 +313,25 @@ struct __attribute__((visibility("hidden"))) TppCache
   const KVCacheMeta get_kv_cache_meta() {
     return cm;
   }
-  void reorder_cache(at::Tensor t_beam_idx) {
+  void reorder_cache(at::Tensor t_beam_reorder) {
     isBeamSearch = true;
-    auto B = t_beam_idx.size(0);
+    // std::cout << "Reordering cache\n";
+    // std::cout << "t_beam_reorder: " << t_beam_reorder.sizes() << std::endl;
+    // std::cout << "t_beam_reorders: " << t_beam_reorders.sizes() << std::endl;
+    // std::cout << "offset = " << layers[0].offset << std::endl;
+    // std::cout << "layers[0].t_key_past: " << layers[0].t_key_past.sizes()
+    //           << std::endl;
+    // std::cout << "layers[0].t_value_past: " << layers[0].t_value_past.sizes()
+    // << std::endl;
+    auto B = t_beam_reorder.size(0);
+    auto k_b_dim = key_layout->get_batch_dim();
+    auto v_b_dim = value_layout->get_batch_dim();
+    auto offset = layers[0].offset;
     if (t_beam_reorders.numel() == 0) {
       auto nTokens = layers[0].get_capacity();
-      auto offset = layers[0].offset;
-      t_beam_reorders = t_beam_idx.new_empty({nTokens, B});
-      t_beam_reorders.slice(0, 0, offset, 1).copy_(t_beam_idx.unsqueeze(0));
-      auto CB = layers[0].t_key_past.size(1);
+      t_beam_reorders = t_beam_reorder.new_zeros({nTokens, B});
+      t_beam_reorders.slice(0, 0, offset, 1).copy_(t_beam_reorder.unsqueeze(0));
+      auto CB = layers[0].t_key_past.size(k_b_dim);
       if (CB != B) {
         TPP_ASSERT(
             B % CB == 0,
@@ -297,23 +339,56 @@ struct __attribute__((visibility("hidden"))) TppCache
             B,
             CB);
         auto nBeams = B / CB;
-        for (auto l : layers) {
-          l.t_key_past = l.t_key_past.repeat_interleave(nBeams, 1).contiguous();
+        // std::cout << "Repeating cache B = " << B << " CB = " << CB << "
+        // nBeams = " << nBeams << " \n"; std::cout << "k_b_dim = " << k_b_dim
+        // << " v_b_dim = " << v_b_dim << std::endl; Reinitialize the layout to
+        // reflect new batch size (B)
+        at::Tensor t_dummy = layers[0].t_key_past.new_empty(
+            {B, key_layout->N, 1, key_layout->H});
+        init_layout(t_dummy);
+        for (auto& l : layers) {
+          l.t_key_past =
+              l.t_key_past.repeat_interleave(nBeams, k_b_dim).contiguous();
+          l.key_layout = key_layout;
           l.t_value_past =
-              l.t_value_past.repeat_interleave(nBeams, 1).contiguous();
+              l.t_value_past.repeat_interleave(nBeams, v_b_dim).contiguous();
+          l.value_layout = value_layout;
         }
       }
     } else {
-      auto offset = layers[0].offset;
       if (t_beam_reorders.size(0) < offset) {
         auto nTokens = layers[0].get_capacity();
-        auto t_beam_reorders_new = t_beam_idx.new_empty({nTokens, B});
+        auto t_beam_reorders_new = t_beam_reorder.new_zeros({nTokens, B});
         t_beam_reorders_new.slice(0, 0, t_beam_reorders.size(0), 1)
             .copy_(t_beam_reorders);
         t_beam_reorders = t_beam_reorders_new;
       }
-      t_beam_reorders[offset - 1] = t_beam_idx;
+      t_beam_reorders[offset - 1] = t_beam_reorder;
     }
+    // Align (offset + 1) to S2
+    auto S2 = LayerCache::block_size;
+    auto S1 = (offset + S2) / S2;
+    auto S_pad = S1 * S2;
+    if (t_beam_idx.numel() == 0 || t_beam_idx.size(1) != S_pad) {
+      t_beam_idx = t_beam_reorders.new_zeros({B, S_pad});
+    }
+    auto beam_idx = GetVLAPtr<long>(t_beam_idx, {S_pad});
+    auto b_ptr = GetVLAPtr<long>(t_beam_reorders, {B});
+    for (auto i = 0; i < B; i++) {
+      beam_idx[i][offset] = i;
+      beam_idx[i][offset - 1] = b_ptr[offset - 1][i];
+      for (auto j = offset - 2; j >= 0; j--) {
+        beam_idx[i][j] = b_ptr[j][beam_idx[i][j + 1]];
+      }
+    }
+    // std::cout << "After reorder:" << std::endl;
+    // std::cout << "t_beam_reorders: " << t_beam_reorders.sizes() << std::endl;
+    // std::cout << "t_beam_idx: " << t_beam_idx.sizes() << std::endl;
+    // std::cout << "offset = " << layers[0].offset << std::endl;
+    // std::cout << "layers[0].t_key_past: " << layers[0].t_key_past.sizes()
+    //           << std::endl;
+    // std::cout << "layers[0].t_value_past: " << layers[0].t_value_past.sizes()
+    // << std::endl;
   }
 };
 

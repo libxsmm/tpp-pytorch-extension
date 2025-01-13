@@ -33,7 +33,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import (
     GenerationMixin,
 )
-from transformers.cache_utils import Cache
+from transformers.cache_utils import Cache, DynamicCache
 import tpp_pytorch_extension as tpx
 
 USE_LOW_PREC_PARAMS = True
@@ -76,7 +76,7 @@ def print_line_info():
     print(f"Running At {fn}():{ln}  from {pf}:{pfl}:{pfn}()")
 
 
-class TppCache(Cache):
+class TppCache(DynamicCache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
     """
@@ -96,7 +96,7 @@ class TppCache(Cache):
         Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
         to the number of layers in the model.
         """
-        print_line_info()
+        # print_line_info()
         return self.tpp_cache.size()
 
     def update(
@@ -155,7 +155,7 @@ class TppCache(Cache):
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
-        print_line_info()
+        # print_line_info()
         self.tpp_cache.reorder_cache(beam_idx)
 
     def get_cpp(self):

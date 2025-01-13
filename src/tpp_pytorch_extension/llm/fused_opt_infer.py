@@ -199,6 +199,7 @@ def OptimizeModelForOPT(model, dtype, device="cpu", weight_dtype=None):
             m._parameters[name] = param_cls(
                 torch.empty_like(m._parameters[name], device=device), **kwargs
             )
+    model._supports_cache_class = True
 
 
 def OPTDecoder_forward(
@@ -336,6 +337,7 @@ def OPTForCausalLM_forward_patched(
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
     position_ids: Optional[torch.LongTensor] = None,
+    cache_position: Optional[torch.LongTensor] = None,
     num_logits_to_keep: int = 0,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     output_attentions = False
