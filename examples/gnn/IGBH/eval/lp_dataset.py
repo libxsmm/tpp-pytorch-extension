@@ -50,6 +50,7 @@ class IGBHeteroDGLDataset(DGLDataset):
       self.graph.predict = 'paper'
       print(self.graph)
 
+      '''
       label_file = 'node_label_19.npy' if not self.use_label_2K else 'node_label_2K.npy'
 
       if self.data_type == 'int8':
@@ -187,7 +188,7 @@ class IGBHeteroDGLDataset(DGLDataset):
           self.graph.nodes['journal'].data['feat'] = journal_node_features
           if self.data_type == 'int8':
               self.graph.nodes['journal'].data['scf'] = journal_feat_scf
-      
+      '''
     
   def __getitem__(self, i):
       return self.graph

@@ -406,5 +406,12 @@ at::Tensor quantize_int8sym(
     int64_t axis,
     bool is_vnni);
 
+at::Tensor create_qtensor_int8sym(
+    at::Tensor val,
+    at::Tensor scales,
+    int64_t block_size,
+    int64_t axis,
+    bool is_vnni);
+
 inline at::Tensor remap_and_quantize_mxfp4(at::Tensor t);
 inline at::Tensor remap_and_quantize_qint8(at::Tensor t);

@@ -11,9 +11,13 @@ from contextlib import contextmanager
 from tpp_pytorch_extension.gnn.gat_inference import fused_gat as tpp_gat
 from tpp_pytorch_extension.gnn.common_inference import gnn_utils
 from lp_dataset import IGBHeteroDGLDataset
+from rgat import RGAT, block, opt_impl
 import tpp_pytorch_extension as ppx
-from tpp_pytorch_extension._C._qtype import remap_and_quantize_qint8
-
+from tpp_pytorch_extension._C._qtype import (
+        remap_and_quantize_qint8,
+        create_qtensor_int8sym
+     )
+import os.path as osp
 from dgl.dataloading import NeighborSampler
 import os, psutil
 import collections
@@ -22,99 +26,82 @@ import datetime
 import warnings
 warnings.filterwarnings("ignore")
 
-use_tpp = False
-linear = None
+def load_data(args):
+    use_label_2K = (args.num_classes == 2983)
+    label_file = 'node_label_19.npy' if not use_label_2K else 'node_label_2K.npy'
+    paper_lbl_path = osp.join(args.path, args.dataset_size, 'processed', 'paper', label_file)
+    if args.dataset_size in ['large', 'full']:
+        paper_node_labels = torch.from_numpy(np.fromfile(paper_lbl_path, dtype=np.float32)).to(torch.long)
+    else:
+        paper_node_labels = torch.from_numpy(np.load(paper_lbl_path)).long()
 
-global_layer_dtype = torch.float32
-global_use_qint8_gemm = False
+    root_name = 'node_feat'
+    if args.data_type == 'bf16':
+        root_name += '.pt'
+    elif args.data_type == 'int8':
+        root_name += '_int8.pt'
+    elif args.data_type == 'hf8':
+        root_name += '_hf8.pt'
+    elif args.data_type == 'bf8':
+        root_name += '_bf8.pt'
 
-@contextmanager
-def opt_impl(enable=True, use_qint8_gemm=False, use_bf16=False):
-    try:
-        global GATConv
-        global linear
-        global use_tpp
-        global global_layer_dtype
-        global global_use_qint8_gemm
-        orig_GATConv = GATConv
-        linear = nn.Linear
-        try:
-            if enable:
-                use_tpp = enable
-                if use_bf16:
-                    global_layer_dtype = torch.bfloat16
-                if use_qint8_gemm:
-                    global_use_qint8_gemm = use_qint8_gemm
-                GATConv = tpp_gat.GATConvOpt
-                linear = tpp_gat.LinearOut
-            yield
-        finally:
-            GATConv = orig_GATConv
-            linear = nn.Linear
-    except ImportError as e:
-        pass
+    nfeat = {}
+    author_feat_path = osp.join(args.path, args.dataset_size, 'processed', 'author', root_name)
+    author_node_features = torch.load(author_feat_path)
 
-class RGAT(nn.Module):
-    def __init__(self, etypes, in_feats, h_feats, num_classes, num_layers, n_heads, activation, dropout=0.0):
-        super().__init__()
-        self.layers = nn.ModuleList()
+    if args.dataset_size in ['large', 'full']:
+        conference_feat_path = osp.join(args.path, args.dataset_size, 'processed', 'conference', root_name)
+        conference_node_features = torch.load(conference_feat_path)
+        journal_feat_path = osp.join(args.path, args.dataset_size, 'processed', 'journal', root_name)
+        journal_node_features = torch.load(journal_feat_path)
 
-        if not use_tpp: activation = None
-        self.layers.append(HeteroGraphConv({
-            etype: GATConv(in_feats, h_feats // n_heads, n_heads, 
-                activation=activation, 
-                feat_drop=dropout, 
-                layer_dtype=global_layer_dtype,
-                use_qint8_gemm=global_use_qint8_gemm,
-            )
-            for etype in etypes}))
-        for _ in range(num_layers-2):
-            self.layers.append(HeteroGraphConv({
-                etype: GATConv(h_feats, h_feats // n_heads, n_heads, 
-                    activation=activation, 
-                    feat_drop=dropout, 
-                    layer_dtype=global_layer_dtype,
-                    use_qint8_gemm=global_use_qint8_gemm,
-                )
-                for etype in etypes}))
-        self.layers.append(HeteroGraphConv({
-            etype: GATConv(h_feats, h_feats // n_heads, 
-                n_heads, activation=None, 
-                layer_dtype=global_layer_dtype, 
-                use_qint8_gemm=global_use_qint8_gemm,
-            )
-            for etype in etypes}))
-        if not use_tpp:
-            self.dropout = nn.Dropout(dropout)
-        self.linear = linear(h_feats, num_classes, global_layer_dtype)
+    fos_feat_path = osp.join(args.path, args.dataset_size, 'processed', 'fos', root_name)
+    fos_node_features = torch.load(fos_feat_path)
 
-    def forward(self, blocks, x):
-        h = x
-        for l, (layer, block) in enumerate(zip(self.layers, blocks)):
-            h = layer(block, h)
-            h = apply_each(h, lambda x: x.view(x.shape[0], x.shape[1] * x.shape[2]))
-            if l != len(self.layers) - 1 and not use_tpp:
-                h = apply_each(h, F.relu)
-                h = apply_each(h, self.dropout)
-        return self.linear(h['paper'])   
+    institute_feat_path = osp.join(args.path, args.dataset_size, 'processed','institute', root_name)
+    institute_node_features = torch.load(institute_feat_path)
 
-def block(model):
-    for m in model.modules():
-        if hasattr(m, "maybe_block_params"):
-            m.maybe_block_params()
+    paper_feat_path = osp.join(args.path, args.dataset_size, 'processed', 'paper', root_name)
+    paper_node_features = torch.load(paper_feat_path)
 
-def load_subtensor_dict(nfeat, labels, seeds, input_nodes):
-    """
-    Extracts features and labels for a set of nodes.
-    """
-    batch_inputs={}
-    ntypes = nfeat.keys()
-    for ntype in ntypes:
-        batch_inputs[ntype] = gnn_utils.gather_features(nfeat[ntype], input_nodes[ntype])
+    if args.data_type == 'int8':
+        author_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'author', 'node_feat_scf.pt')
+        author_feat_scf = torch.load(author_scf_path)
+        block_size = author_node_features.shape[1] // author_feat_scf.shape[1]
+        nfeat.update({'author': create_qtensor_int8sym(author_node_features, author_feat_scf, block_size, 1, False)})
 
-    batch_labels = labels[seeds]
+        if args.dataset_size in ['large', 'full']:
+            conference_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'conference', 'node_feat_scf.pt')
+            conference_feat_scf = torch.load(conference_scf_path)
+            nfeat.update({'conference': create_qtensor_int8sym(conference_node_features, conference_feat_scf, block_size, 1, False)})
 
-    return batch_inputs, batch_labels
+        fos_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'fos', 'node_feat_scf.pt')
+        fos_feat_scf = torch.load(fos_scf_path)
+        nfeat.update({'fos': create_qtensor_int8sym(fos_node_features, fos_feat_scf, block_size, 1, False)})
+
+        institute_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'institute', 'node_feat_scf.pt')
+        institute_feat_scf = torch.load(institute_scf_path)
+        nfeat.update({'institute': create_qtensor_int8sym(institute_node_features, institute_feat_scf, block_size, 1, False)})
+
+        if args.dataset_size in ['large', 'full']:
+            journal_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'journal', 'node_feat_scf.pt')
+            journal_feat_scf = torch.load(journal_scf_path)
+            nfeat.update({'journal': create_qtensor_int8sym(journal_node_features, journal_feat_scf, block_size, 1, False)})
+
+        paper_scf_path = osp.join(args.path, args.dataset_size, 'processed', 'paper', 'node_feat_scf.pt')
+        paper_feat_scf = torch.load(paper_scf_path)
+        nfeat.update({'paper': create_qtensor_int8sym(paper_node_features, paper_feat_scf, block_size, 1, False)})
+    else:
+        nfeat.update({'author': author_node_features})
+        if args.dataset_size in ['large', 'full']:
+            nfeat.update({'conference': conference_node_features})
+        nfeat.update({'fos': fos_node_features})
+        nfeat.update({'institute': institute_node_features})
+        if args.dataset_size in ['large', 'full']:
+            nfeat.update({'journal': journal_node_features})
+        nfeat.update({'paper': paper_node_features})
+
+    return nfeat, paper_node_labels, author_node_features.shape[1]
 
 def track_acc(g, category, args, device):
 
@@ -132,29 +119,36 @@ def track_acc(g, category, args, device):
         val_nids = int(args.validation_frac * val_nid.shape[0])
     val_nid = val_nid[:val_nids]
 
-    nfeat = g.ndata['feat']
-    labels = g.ndata['label'][category]
-    in_feats = g.ndata['feat'][category].shape[1]
+    nfeat, labels, in_feats = load_data(args)
 
-    with opt_impl(args.use_tpp, args.use_qint8_gemm, args.use_bf16):
-        model = RGAT(g.etypes, in_feats, args.hidden_channels,
-                args.num_classes, args.num_layers, args.num_heads, 
-                F.leaky_relu).to(device)
-        model.requires_grad_(False)
-    #print(model)
+    model = RGAT(g.etypes, args.use_tpp, args.use_qint8_gemm, args.use_bf16).to(device)
+    model.eval()
+    
+    def load_state_dict(model_path):
+        ckpt = torch.load(model_path, map_location=torch.device('cpu'))
+        for key in list(ckpt.keys()):
+            newkey = key.replace('module.', '')
+            ckpt[newkey] = ckpt.pop(key)
+        return ckpt
 
-    checkpoint = torch.load(args.checkpoint)
+    state_dict = load_state_dict(args.checkpoint)
+    model.load_state_dict(state_dict)
 
-    model.load_state_dict(checkpoint)
+    '''
+    mkeys = model.model.layers[0].mods.keys()    
+    for k in mkeys:
+        model.model.layers[0].mods[k].copy_weights(int(os.environ["OMP_NUM_THREADS"]))
+    '''
+    
     if args.use_tpp:
-        block(model)
+        block(model.model)
 
     if args.use_qint8_gemm:
-        for l in range(len(model.layers)):
-            mkeys = model.layers[l].mods.keys()
+        for l in range(len(model.model.layers)):
+            mkeys = model.model.layers[l].mods.keys()
             for k in mkeys:
-                model.layers[l].mods[k].fc.weight = \
-                    torch.nn.Parameter(remap_and_quantize_qint8(model.layers[l].mods[k].fc.weight), requires_grad=False)
+                model.model.layers[l].mods[k].fc.weight = \
+                    torch.nn.Parameter(remap_and_quantize_qint8(model.model.layers[l].mods[k].fc.weight), requires_grad=False)
 
     param_size = 0
     for param in model.parameters():
@@ -188,21 +182,23 @@ def track_acc(g, category, args, device):
                 seeds = val_nid[step_:]
             seeds_dict = {category:seeds}
 
-            seeds_dict, output_nodes, blocks = sampler.sample_blocks(g, seeds_dict)
+            _, _, blocks = sampler.sample_blocks(g, seeds_dict)
 
             input_nodes = blocks[0].srcdata[dgl.NID]
-
+            
             t0 = time.time()
 
             # Load the input features as well as output labels
+            '''
             batch_inputs, batch_labels = load_subtensor_dict(
                 nfeat, labels, seeds, input_nodes
             )
+            '''
             t1 = time.time()
 
             if args.batch_size == 1:
                 with torch.no_grad():
-                    preds = [model(blocks, batch_inputs).argmax(1).numpy()]
+                    preds = [model(blocks, nfeat, input_nodes).argmax(1).numpy()] # batch_inputs).argmax(1).numpy()]
                     labs = [blocks[-1].dstdata['label'][category].numpy()]
 
                     acc = sklearn.metrics.accuracy_score(labs, preds)
@@ -222,7 +218,9 @@ def track_acc(g, category, args, device):
                 )
             elif args.batch_size > 1:
                 with torch.no_grad():
-                    predictions.append(model(blocks, batch_inputs).argmax(1).numpy())
+                    predictions.append(model.forward_gather(blocks, nfeat, input_nodes).argmax(1).numpy()) # batch_inputs).argmax(1).numpy())
+                    #predictions.append(model(blocks, batch_inputs).argmax(1).numpy())
+                    #predictions.append(model.forward_graph(blocks).argmax(1).numpy())
                     lables.append(blocks[-1].dstdata['label'][category].numpy())
 
                 t2 = time.time()

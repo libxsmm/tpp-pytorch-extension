@@ -27,7 +27,7 @@ static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 128);
 static const char* GEMM_LOOP_SCHEME_REUSE =
-    getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
+    getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "acb";
 static const char* GEMM_LOOP_SCHEME_STREAMING =
     getenv("GEMM_LOOP_SCHEME_STREAMING") ? getenv("GEMM_LOOP_SCHEME_STREAMING")
                                          : "aCb";
@@ -175,8 +175,8 @@ class TppBlockedLinearWBase {
       gemm = search->second;
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias);
-      gemm_cache[hash] = gemm;
-      printf("Hash: %s\n", hash);
+      //gemm_cache[hash] = gemm;
+      //printf("Hash: %s\n", hash);
     }
     return *gemm;
   }
@@ -463,10 +463,6 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
         TPP_ASSERT(block_size % Hc == 0, "Block size mismatch\n");
         n_Hc_blocks = block_size / Hc;
         ScNc = Nc / n_Hc_blocks;
-        printf(
-            "Using weight type at::kQInt8 q_bs: %ld, Hc: %ld\n",
-            block_size,
-            Hc);
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }
