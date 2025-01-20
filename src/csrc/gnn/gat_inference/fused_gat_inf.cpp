@@ -74,8 +74,6 @@ inline void gather_fc_plain_quant(
   TPP_ASSERT(block_size % Hc == 0, "Block size mismatch\n");
   long n_Hc_blocks = block_size / Hc;
   long ScNc = Nc / n_Hc_blocks;
-  //printf("BS = %ld, C = %ld, Nc = %ld, Hc = %ld, Nk = %ld, Hk = %ld\n",BS,C,Nc,Hc,Nk,Hk);
-  //printf("block_size = %ld, n_Hc_blocks = %ld, ScNc = %ld\n",block_size,n_Hc_blocks,ScNc);
   auto wt_V = GetVLAPtr<T>(t_wt, {Nc, (Hc * Hk) / pack_size});
   auto t_w_scf = q_per_block_scales(t_wt);
   auto t_i_scf = q_per_block_scales(t_in);
@@ -141,7 +139,7 @@ inline void gather_fc_plain_quant(
             for(int nk=0; nk < Nk; nk++) {
               zero_tpp_rem(out[s1][nk]);
               for (int c = 0; c < Nc; c += n_Hc_blocks) {
-                brgemm_tpp_rem(tmp[0][c], wt_V[nk][c], tmp_out, n_Hc_blocks, true);
+                brgemm_tpp_rem(tmp[0][c], wt_V[nk][c], tmp_out, n_Hc_blocks, false);
                 dequant_acc_rem(
                     tmp_out,
                     out[s1][nk],
