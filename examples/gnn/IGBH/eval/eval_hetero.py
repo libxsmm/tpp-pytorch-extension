@@ -103,6 +103,19 @@ def load_data(args):
 
     return nfeat, paper_node_labels, author_node_features.shape[1]
 
+def load_subtensor_dict(nfeat, labels, seeds, input_nodes):
+    """
+    Extracts features and labels for a set of nodes.
+    """
+    batch_inputs={}
+    ntypes = nfeat.keys()
+    for ntype in ntypes:
+        batch_inputs[ntype] = gnn_utils.gather_features(nfeat[ntype], input_nodes[ntype])
+
+    batch_labels = labels[seeds]
+
+    return batch_inputs, batch_labels
+
 def track_acc(g, category, args, device):
 
     seed = int(datetime.datetime.now().timestamp())
@@ -114,14 +127,16 @@ def track_acc(g, category, args, device):
 
     val_nid = torch.nonzero(g.nodes[category].data['val_mask'], as_tuple=True)[0]
     if args.profile or args.tpp_profile:
-        val_nids = 10000
+        val_nids = 100000
     else:
         val_nids = int(args.validation_frac * val_nid.shape[0])
     val_nid = val_nid[:val_nids]
 
     nfeat, labels, in_feats = load_data(args)
+    graph_paper_nodes = g.num_nodes(category)
+    g.nodes[category].data['label'] = labels[0:graph_paper_nodes]
 
-    model = RGAT(g.etypes, args.use_tpp, args.use_qint8_gemm, args.use_bf16).to(device)
+    model = RGAT(g.etypes, args.use_tpp, args.use_qint8_gemm, args.use_bf16)
     model.eval()
     
     def load_state_dict(model_path):

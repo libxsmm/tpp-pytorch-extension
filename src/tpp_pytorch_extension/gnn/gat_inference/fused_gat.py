@@ -65,11 +65,11 @@ class MLPAttentionFunction(torch.autograd.Function):
                           )
         return (attn_out, mlp_out)  
 
-class GatherMLPFunction(torch.autograd.Function):
+class GatherMLPAttnFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs):
-        out = fused_gat_cpp.gather_mlp(inputs)
-        return out
+        (mlp_out, attn_out) = fused_gat_cpp.gather_mlp_attn(inputs)
+        return (attn_out, mlp_out)
 
 class AttnFunction(torch.autograd.Function):
     @staticmethod
@@ -222,7 +222,7 @@ class GATConvOpt(BlockedModule):
                 self.bc = cbf
                 break
 
-        for kbf in [32]:
+        for kbf in [64]:
             if self.bk % kbf == 0:
                 self.bk = kbf
                 break
@@ -233,19 +233,19 @@ class GATConvOpt(BlockedModule):
                 out_feats * num_heads,
                 bias=False,
             )
-            FixLinear(self.fc_src, self.bk, self.bc, layer_dtype)
+            FixLinear(self.fc_src, self.bk, self.bc, global_layer_dtype if use_qint8_gemm else layer_dtype)
 
             self.fc_dst = torch.nn.Linear(
                 self._in_dst_feats, out_feats * num_heads, bias=False
             )
-            FixLinear(self.fc_dst, self.bk, self.bc, layer_dtype)
+            FixLinear(self.fc_dst, self.bk, self.bc, global_layer_dtype if use_qint8_gemm else layer_dtype)
         else:
             self.fc = torch.nn.Linear(
                 self._in_src_feats,
                 out_feats * num_heads,
                 bias=False,
             )
-            FixLinear(self.fc, self.bk, self.bc, layer_dtype)
+            FixLinear(self.fc, self.bk, self.bc, global_layer_dtype if use_qint8_gemm else layer_dtype)
 
         self.attn_l = BlockedParameter(
             torch.FloatTensor(size=(1, num_heads, out_feats))
@@ -485,19 +485,19 @@ class GATConvOpt(BlockedModule):
                 else:
                     if self.use_qint8_gemm or h_src.dtype != torch.qint8:
                         if first_layer:
-                            inputs_src = [h_src, src_idx, self.fc.weight]
+                            inputs_src = [h_src, src_idx, self.fc.weight, self.attn_l]
                         else:
                             inputs_src = [h_src, self.fc.weight, self.attn_l]
                     else:
                         inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
 
                     if first_layer:
-                        feat_src_ = GatherMLPFunction.apply(inputs_src)
+                        el, feat_src_ = GatherMLPAttnFunction.apply(inputs_src)
                         feat_src = feat_src_.view(
                             src_prefix_shape, self._num_heads, self._out_feats
                         )
-                        inputs_src_attn = [feat_src_, self.attn_l]
-                        el = AttnFunction.apply(inputs_src_attn)
+                        #inputs_src_attn = [feat_src_, self.attn_l]
+                        #el = AttnFunction.apply(inputs_src_attn)
                     else:
                         N = h_src.size(0)
                         align = self.align if (N > self.align or N == 0) else N
@@ -516,19 +516,19 @@ class GATConvOpt(BlockedModule):
 
                     if self.use_qint8_gemm or h_dst.dtype != torch.qint8:
                         if first_layer:
-                            inputs_dst = [h_dst, dst_idx, self.fc.weight]
+                            inputs_dst = [h_dst, dst_idx, self.fc.weight, self.attn_r]
                         else:
                             inputs_dst = [h_dst, self.fc.weight, self.attn_r]
                     else:
                         inputs_dst = [h_dst, scf_dst, self.fc.weight, self.attn_r]
 
                     if first_layer:
-                        feat_dst_ = GatherMLPFunction.apply(inputs_dst)
+                        er, feat_dst_ = GatherMLPAttnFunction.apply(inputs_dst)
                         feat_dst = feat_dst_.view(
                             dst_prefix_shape, self._num_heads, self._out_feats
                         )
-                        inputs_dst_attn = [feat_dst_, self.attn_r]
-                        er = AttnFunction.apply(inputs_dst_attn)
+                        #inputs_dst_attn = [feat_dst_, self.attn_r]
+                        #er = AttnFunction.apply(inputs_dst_attn)
                     else:
                         N = h_dst.size(0)
 

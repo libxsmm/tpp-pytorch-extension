@@ -27,7 +27,7 @@ class IGBHeteroDGLDataset(DGLDataset):
                dataset_size='tiny',
                in_memory=False,
                use_label_2K=False,
-               data_type='bf16'):
+               data_type='bf16',):
     self.dir = path
     self.dataset_size = dataset_size
     self.in_memory = in_memory
@@ -188,7 +188,7 @@ class IGBHeteroDGLDataset(DGLDataset):
           self.graph.nodes['journal'].data['feat'] = journal_node_features
           if self.data_type == 'int8':
               self.graph.nodes['journal'].data['scf'] = journal_feat_scf
-      '''
+    '''
     
   def __getitem__(self, i):
       return self.graph
