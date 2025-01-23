@@ -46,7 +46,8 @@ static std::vector<at::Tensor> gather_mlp_attn(
   at::Tensor t_in = inp[0];
   at::Tensor t_idx = inp[1];
   at::Tensor t_wt = inp[2];
-  at::Tensor t_attn_3d = inp[3];
+  at::Tensor t_bias = inp[3];
+  at::Tensor t_attn_3d = inp[4];
 
   auto wt_sizes = t_wt.sizes();
   auto K = wt_sizes[0] * wt_sizes[3];
@@ -108,66 +109,37 @@ static std::vector<at::Tensor> gather_mlp_attn(
 }
 
 std::vector<at::Tensor> mlp_attn(
-    long align,
-    int add_bias,
-    int use_bf_or_fp16,
-    int use_qint8_gemm,
-    std::vector<at::Tensor> inputs) {
+    std::vector<at::Tensor> inp) {
   GlobalPass _gp(FWD);
 
-  if(!use_qint8_gemm) {
-    auto dact = -1;
-    if(inputs[0].dtype() == at::kChar) dact=0;
-    else if(inputs[0].dtype() == at::kFloat8_e4m3fn) dact=1;
-    else if(inputs[0].dtype() == at::kFloat8_e5m2) dact=2;
-    else if(inputs[0].dtype() == at::kBFloat16) dact=3;
+  at::Tensor t_in = inp[0];
+  auto dt = t_in.dtype();
 
-    assert(inputs[2].dtype() == at::kBFloat16);
-    assert(inputs[3].dtype() == at::kBFloat16);
-
-    if(dact==0) {
-      typedef int8_t Tact;
-#include "mlp_attn_scf.h"
-    }
-    else if(dact==1) {
-      typedef hfloat8 Tact;
+  if(dt==at::kFloat) {
+    typedef float Tact;
 #include "mlp_attn.h"
-    }
-    else if(dact==2) {
-      typedef bfloat8 Tact;
+  } else if(dt == at::kBFloat16 || dt == at::kQInt8) {
+    typedef bfloat16 Tact;
 #include "mlp_attn.h"
-    }
-    else if(dact==3) {
-      typedef bfloat16 Tact;
+  } else if(dt == at::kFloat8_e4m3fn) {
+    typedef hfloat8 Tact;
 #include "mlp_attn.h"
-    }
-    else {
-      TPP_ASSERT(
-          0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
-    }
-  }
-  else {
-    if(use_bf_or_fp16==0) {
-      typedef bfloat16 Tact;
+  } else if(dt == at::kFloat8_e5m2) {
+    typedef bfloat8 Tact;
 #include "mlp_attn.h"
-    }
-    else if(use_bf_or_fp16==1) {
-      typedef half Tact;
-#include "mlp_attn.h"
-    }
-    else {
-      TPP_ASSERT(
-          0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
-    }
+  } else {
+    TPP_ASSERT(
+        0, "%s:%d Unsupported type for activations\n", __FILE__, __LINE__);
   }
 }
 
-at::Tensor mlp(std::vector<at::Tensor> inputs) {
+at::Tensor mlp(std::vector<at::Tensor> inp) {
   GlobalPass _gp(FWD);
 
   at::Tensor t_in = inp[0];
   at::Tensor t_wt = inp[1];
   at::Tensor t_bias = inp[2];
+  auto dt = t_wt.dtype();
 
   if(dt == at::kFloat) {
     at::Tensor t_out = fc_plain<float>(t_in, t_wt, t_bias);
@@ -175,6 +147,7 @@ at::Tensor mlp(std::vector<at::Tensor> inputs) {
   }
   else if(dt == at::kBFloat16) {
     at::Tensor t_out = fc_plain<bfloat16>(t_in, t_wt, t_bias);
+    return t_out;
   }
   else {
     TPP_ASSERT(

@@ -13,17 +13,10 @@ RECORD_FUNCTION("mlp_attn", std::vector<c10::IValue>());
 at::Tensor t_in, t_attn_3d, t_wt, t_bias;
 int i = 0;
 
-t_in = inputs[i++];
-t_wt = inputs[i++];
-t_attn_3d = inputs[i++];
-if (add_bias)
-  t_bias = inputs[i++];
-else {
-  if(use_bf_or_fp16 == 0)
-    t_bias = at::empty(0,at::kBFloat16);
-  else if(use_bf_or_fp16==1)
-    t_bias = at::empty(0,at::kHalf);
-}
+t_in = inp[i++];
+t_wt = inp[i++];
+t_bias = inp[i++];
+t_attn_3d = inp[i++];
 
 at::Tensor t_out_mlp = fc_plain<Tact>(t_in, t_wt, t_bias);
 

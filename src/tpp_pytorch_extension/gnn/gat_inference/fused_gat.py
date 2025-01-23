@@ -55,14 +55,8 @@ QINT8_BLOCK_SIZE=128
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, use_bf_or_fp16, fuse_bias, use_qint8_gemm, inputs):
-        (mlp_out, attn_out) = fused_gat_cpp.mlp_attn(
-                                  align,
-                                  0 if use_bf_or_fp16 else 1,
-                                  1 if fuse_bias else 0, 
-                                  1 if use_qint8_gemm else 0,
-                                  inputs
-                          )
+    def forward(ctx, inputs):
+        (mlp_out, attn_out) = fused_gat_cpp.mlp_attn(inputs)
         return (attn_out, mlp_out)  
 
 class GatherMLPAttnFunction(torch.autograd.Function):
@@ -79,9 +73,9 @@ class AttnFunction(torch.autograd.Function):
 
 class MLPFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, fuse_bias, inputs):
+    def forward(ctx, inputs):
 
-        out = fused_gat_cpp.mlp(align, 1 if fuse_bias else 0, inputs)
+        out = fused_gat_cpp.mlp(inputs)
         return out
 
 class LinearOut(BlockedModule):
@@ -105,9 +99,7 @@ class LinearOut(BlockedModule):
 
     def forward(self, input):
         inputs = [input, self.weight, self.bias]
-        N = input.size(0)
-        align = 32 if (N > 32 or N == 0) else N
-        out = MLPFunction.apply(align, 1, inputs)
+        out = MLPFunction.apply(inputs)
 
         return out
 
@@ -438,22 +430,13 @@ class GATConvOpt(BlockedModule):
                 if not hasattr(self, "fc"):
                     assert hasattr(self, "fc_src") and hasattr(self, "fc_dst")
 
-                    if self.use_qint8_gemm or h_src.dtype != torch.qint8: 
-                        inputs_src = [h_src, self.fc_src.weight, self.attn_l]
+                    if self.fc_src.bias is None:
+                        t_bias = torch.empty(0,dtype=h_src.dtype)
+                        inputs_src = [h_src, self.fc_src.weight, t_bias, self.attn_l]
                     else:
-                        inputs_src = [h_src, scf_src, self.fc_src.weight, self.attn_l]
-
-                    if self.fuse_src_bias:
-                        inputs_src.append(self.fc_src.bias)
-
-                    N = h_src.size(0)
-                    align = self.align if (N > self.align or N == 0) else N
+                        inputs_src = [h_src, self.fc_src.weight, self.fc_src.bias, self.attn_l]
 
                     el, feat_src_ = MLPAttentionFunction.apply(
-                        align,
-                        self.use_bf_or_fp16,
-                        self.fuse_src_bias,
-                        self.use_qint8_gemm,
                         inputs_src,
                     )
 
@@ -461,52 +444,53 @@ class GATConvOpt(BlockedModule):
                         *src_prefix_shape, self._num_heads, self._out_feats
                     )
 
-                    N = h_dst.size(0)
-                    if self.use_qint8_gemm or h_dst.dtype != torch.int8:
-                        inputs_dst = [h_dst, self.fc_dst.weight, self.attn_r]
+                    if self.fc_dst.bias is None:
+                        t_bias = torch.empty(0,dtype=h_dst.dtype)
+                        inputs_src = [h_src, self.fc_src.weight, t_bias, self.attn_l]
                     else:
-                        inputs_dst = [h_dst, scf_dst, self.fc_dst.weight, self.attn_r] 
-
-                    if self.fuse_dst_bias:
-                        inputs_dst.append(self.fc_dst.bias)
-
-                    align = self.align if (N > self.align or N == 0) else N
+                        inputs_dst = [h_dst, self.fc_dst.weight, self.fc_dst.bias, self.attn_r]
 
                     er, feat_dst_ = MLPAttentionFunction.apply(
-                        align,
-                        self.use_bf_or_fp16,
-                        self.fuse_dst_bias,
-                        self.use_qint8_gemm,
                         inputs_dst,
                     )
                     feat_dst = feat_dst_.view(
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
                 else:
-                    if self.use_qint8_gemm or h_src.dtype != torch.qint8:
-                        if first_layer:
-                            inputs_src = [h_src, src_idx, self.fc.weight, self.attn_l]
-                        else:
-                            inputs_src = [h_src, self.fc.weight, self.attn_l]
-                    else:
-                        inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
-
                     if first_layer:
+                        if self.fc.bias is None:
+                            t_bias = torch.empty(0,dtype=self.attn_l.dtype)
+                            inputs_src = [h_src, src_idx, self.fc.weight, t_bias, self.attn_l]
+                        else:
+                            inputs_src = [h_src, src_idx, self.fc.weight, self.fc.bias, self.attn_l]
+
+                        # source node mlp
                         el, feat_src_ = GatherMLPAttnFunction.apply(inputs_src)
                         feat_src = feat_src_.view(
                             src_prefix_shape, self._num_heads, self._out_feats
                         )
-                        #inputs_src_attn = [feat_src_, self.attn_l]
-                        #el = AttnFunction.apply(inputs_src_attn)
-                    else:
-                        N = h_src.size(0)
-                        align = self.align if (N > self.align or N == 0) else N
 
+                        # dst node mlp
+                        if self.fc.bias is None:
+                            t_bias = torch.empty(0,dtype=self.attn_r.dtype)
+                            inputs_dst = [h_dst, dst_idx, self.fc.weight, t_bias, self.attn_r]
+                        else:
+                            inputs_dst = [h_dst, dst_idx, self.fc.weight, self.fc.bias, self.attn_r]
+
+                        er, feat_dst_ = GatherMLPAttnFunction.apply(inputs_dst)
+                        feat_dst = feat_dst_.view(
+                            dst_prefix_shape, self._num_heads, self._out_feats
+                        )
+                    else:
+                        # source node mlp
+                        if self.fc.bias is None:
+                            t_bias = torch.empty(0,dtype=self.attn_l.dtype)
+                            inputs_src = [h_src, self.fc.weight, t_bias, self.attn_l]
+                        else:
+                            inputs_src = [h_src, self.fc.weight, self.fc.bias, self.attn_l]
+
+                        # dst node mlp
                         el, feat_src_ = MLPAttentionFunction.apply(
-                            align,
-                            self.use_bf_or_fp16,
-                            False,
-                            self.use_qint8_gemm,
                             inputs_src,
                         )
 
@@ -514,30 +498,13 @@ class GATConvOpt(BlockedModule):
                             *src_prefix_shape, self._num_heads, self._out_feats
                         )
 
-                    if self.use_qint8_gemm or h_dst.dtype != torch.qint8:
-                        if first_layer:
-                            inputs_dst = [h_dst, dst_idx, self.fc.weight, self.attn_r]
+                        if self.fc.bias is None:
+                            t_bias = torch.empty(0,dtype=self.attn_r.dtype)
+                            inputs_dst = [h_dst, self.fc.weight, t_bias, self.attn_r]
                         else:
-                            inputs_dst = [h_dst, self.fc.weight, self.attn_r]
-                    else:
-                        inputs_dst = [h_dst, scf_dst, self.fc.weight, self.attn_r]
+                            inputs_dst = [h_dst, self.fc.weight, self.fc.bias, self.attn_r]
 
-                    if first_layer:
-                        er, feat_dst_ = GatherMLPAttnFunction.apply(inputs_dst)
-                        feat_dst = feat_dst_.view(
-                            dst_prefix_shape, self._num_heads, self._out_feats
-                        )
-                        #inputs_dst_attn = [feat_dst_, self.attn_r]
-                        #er = AttnFunction.apply(inputs_dst_attn)
-                    else:
-                        N = h_dst.size(0)
-
-                        align = self.align if (N > self.align or N == 0) else N
                         er, feat_dst_ = MLPAttentionFunction.apply(
-                            align,
-                            self.use_bf_or_fp16,
-                            False,
-                            self.use_qint8_gemm,
                             inputs_dst,
                         )
                         feat_dst = feat_dst_.view(
@@ -548,34 +515,32 @@ class GATConvOpt(BlockedModule):
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
                 h_src = feat
 
-                if h_src.dtype == torch.int8 and h_dst.dtype == torch.int8:
-                    scf_src = graph.srcdata['scf']
-
-                    assert h_src.shape[0] == scf_src.shape[0]
-
-                    if self.use_qint8_gemm:
-                        block_size = h_src.shape[1] // scf_src.shape[1]
-                        assert block_size == (h_dst.shape[1] // scf_dst.shape[1])
-
-                        h_src = create_qtensor_int8sym(h_src, scf_src, block_size, 1, False) 
-
-                        inputs_src = [h_src, self.fc.weight, self.attn_l]
+                if first_layer:
+                    if self.fc.bias is None:
+                        t_bias = torch.empty(0,dtype=self.attn_l.dtype)
+                        inputs_src = [h_src, src_idx, self.fc.weight, t_bias, self.attn_l]
                     else:
-                        fc_wt = self.fc.weight
-                        inputs_src = [h_src, scf_src, self.fc.weight, self.attn_l]
+                        inputs_src = [h_src, src_idx, self.fc.weight, self.fc.bias, self.attn_l]
 
-                N = h_src.size(0)
-                align = self.align if (N > self.align or N == 0) else N
+                    el, feat_src_ = GatherMLPAttnFunction.apply(inputs_src)
+                    feat_src = feat_src_.view(
+                        src_prefix_shape, self._num_heads, self._out_feats
+                    )
 
-                el, feat_src_ = MLPAttentionFunction.apply(
-                    align,
-                    self.use_qint8_gemm,
-                    False,
-                    inputs_src,
-                )
-                feat_src = feat_src_.view(
-                    *src_prefix_shape, self._num_heads, self._out_feats
-                )
+                else:
+                    if self.fc.bias is None:
+                        t_bias = torch.empty(0,dtype=self.attn_l.dtype)
+                        inputs_src = [h_src, self.fc.weight, t_bias, self.attn_l]
+                    else:
+                        inputs_src = [h_src, self.fc.weight, self.fc.bias, self.attn_l]
+
+                    el, feat_src_ = MLPAttentionFunction.apply(
+                        inputs_src,
+                    )
+
+                    feat_src = feat_src_.view(
+                        *src_prefix_shape, self._num_heads, self._out_feats
+                    )
 
                 if graph.is_block:
                     feat_dst = self.feat_src[: graph.number_of_dst_nodes()]
@@ -590,11 +555,8 @@ class GATConvOpt(BlockedModule):
             # compute edge attention, el and er 
             graph.apply_edges(fn.u_add_v("el", "er", "e"))
             e = self.leaky_relu(graph.edata.pop("e"))
-            etype = e.dtype
             # compute softmax
-            graph.edata["a"] = self.attn_drop(edge_softmax(graph, e.float()))
-
-            graph.edata["a"] = graph.edata["a"].to(etype)
+            graph.edata["a"] = self.attn_drop(edge_softmax(graph, e))
 
             # message passing
             graph.update_all(fn.u_mul_e("ft", "a", "m"), fn.sum("m", "ft"))
