@@ -55,4 +55,4 @@ auto lrelu_bwd_tpp = SCOPEIT(LeakyReLUBwdTPP<T>(bn, K, alpha), ACT);
   }
 }
 
-return t_grad_in;
+return t_grad_in.view({N, K, 1});

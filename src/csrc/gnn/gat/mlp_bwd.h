@@ -76,19 +76,7 @@ if (t_wt.dim() == 5)
 else
   t_grad_wt_tmp = t_grad_wt;
 
-at::Tensor t_grad_bias;
-if (add_bias) {
-  if (dwt == 0)
-    t_grad_bias = at::empty({nk * bk});
-  else if (dwt == 1)
-    t_grad_bias = at::empty({nk * bk}, at::kBFloat16);
-} else {
-  if (dwt == 0)
-    t_grad_bias = at::empty(0);
-  else if (dwt == 1)
-    t_grad_bias = at::empty(0, at::kBFloat16);
-}
-
+auto t_grad_bias = t_wt.new_empty({nk, bk});
 auto grad_out = GetVLAPtr<Tact>(t_grad_out, {bn, nk, bk});
 auto grad_in = GetVLAPtr<Tact>(t_grad_in, {bn, nc, bc});
 
@@ -165,7 +153,7 @@ auto brgemm_dw_lp_tpp_b1 =
   RECORD_SCOPE(gm_dbias, {t_grad_out, t_grad_bias});
   {
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-    if (add_bias) {
+    {
       tensor_set_zero(nk, bk, t_grad_bias);
       float* bias_ptrs[threads];
 #pragma omp parallel
@@ -554,7 +542,4 @@ auto trans_tpp = SCOPEIT(
   }
 }
 
-if (add_bias)
-  return {t_grad_in, t_grad_wt, t_grad_bias};
-else
-  return {t_grad_in, t_grad_wt};
+return {t_grad_in, t_grad_wt, t_grad_bias};

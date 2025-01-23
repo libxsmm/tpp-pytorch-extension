@@ -44,18 +44,14 @@ global_layer_dtype = torch.float32
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inp_needs_grad, res_spmm, *inputs):
+    def forward(ctx, align, add_bias, inp_needs_grad, res_spmm, *inputs):
 
-        if fuse_bias:
-            (mlp_inp, wt, attn, bias) = inputs
-            (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(inputs)
-        else:
-            (mlp_inp, wt, attn) = inputs
-            (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(align, 0, inputs)
+        (mlp_inp, wt, bias, attn) = inputs
+        (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(inputs)
 
         ctx.save_for_backward(mlp_out, attn, mlp_inp, wt)  # attn_input = mlp_out
         ctx.align = align
-        ctx.fuse_bias = fuse_bias
+        ctx.add_bias = add_bias,
         ctx.inp_needs_grad = inp_needs_grad
         ctx.res_spmm = res_spmm
 
@@ -65,42 +61,24 @@ class MLPAttentionFunction(torch.autograd.Function):
     def backward(ctx, *grad_outs):
         inputs = list(grad_outs)
         inputs += ctx.saved_tensors
-        if ctx.fuse_bias:
-            (grad_inp, grad_wt, grad_attn, grad_bias,) = fused_gat_cpp.mlp_attn_bwd(
-                ctx.align,
-                1 if ctx.inp_needs_grad else 0,
-                1,
-                1 if ctx.res_spmm else 0,
-                inputs,
-            )
-        else:
-            grad_inp, grad_wt, grad_attn = fused_gat_cpp.mlp_attn_bwd(
-                ctx.align,
-                1 if ctx.inp_needs_grad else 0,
-                0,
-                1 if ctx.res_spmm else 0,
-                inputs,
-            )
-        if ctx.fuse_bias:
-            return (None, None, None, None, grad_inp, grad_wt, grad_attn, grad_bias)
-        else:
-            return (None, None, None, None, grad_inp, grad_wt, grad_attn)
-
+        (grad_inp, grad_wt, grad_bias, grad_attn) = fused_gat_cpp.mlp_attn_bwd(
+            ctx.align,
+            1 if ctx.inp_needs_grad else 0,
+            1 if ctx.add_bias else 0,
+            1 if ctx.res_spmm else 0,
+            inputs,
+        )
+        return (None, None, None, None, grad_inp, grad_wt, grad_bias, grad_attn)
 
 class MLPFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, fuse_bias, inp_needs_grad, *inputs):
+    def forward(ctx, align, inp_needs_grad, *inputs):
 
-        if fuse_bias:
-            (inp, wt, bias) = inputs
-            out = fused_gat_cpp.mlp_fwd(align, 1, inputs)
-        else:
-            (inp, wt) = inputs
-            out = fused_gat_cpp.mlp_fwd(align, 0, inputs)
+        (inp, wt, bias) = inputs
+        out = fused_gat_cpp.mlp_fwd(inputs)
 
         ctx.save_for_backward(inp, wt)
         ctx.align = align
-        ctx.fuse_bias = fuse_bias
         ctx.inp_needs_grad = inp_needs_grad
 
         return out
@@ -109,17 +87,10 @@ class MLPFunction(torch.autograd.Function):
     def backward(ctx, *grad_out):
         inputs = list(grad_out)
         inputs += ctx.saved_tensors
-        if ctx.fuse_bias:
-            grad_inp, grad_wt, grad_bias = fused_gat_cpp.mlp_bwd(
-                ctx.align, 1 if ctx.inp_needs_grad else 0, 1, inputs
-            )
-            return (None, None, None, grad_inp, grad_wt, grad_bias)
-        else:
-            grad_inp, grad_wt = fused_gat_cpp.mlp_bwd(
-                ctx.align, 1 if ctx.inp_needs_grad else 0, 0, inputs
-            )
-            return (None, None, None, grad_inp, grad_wt)
-
+        grad_inp, grad_wt, grad_bias = fused_gat_cpp.mlp_bwd(
+            ctx.align, 1 if ctx.inp_needs_grad else 0, inputs
+        )
+        return (None, None, grad_inp, grad_wt, grad_bias)
 
 class LinearOut(BlockedModule):
     def __init__(self, in_features, out_features, layer_dtype, bias=True):
@@ -152,7 +123,7 @@ class LinearOut(BlockedModule):
         inputs = [input, self.weight, self.bias]
         N = input.size(0)
         align = 32 if (N > 32 or N == 0) else N
-        out = MLPFunction.apply(align, 1, 1, *inputs)
+        out = MLPFunction.apply(align, 1, *inputs)
 
         return out
 
@@ -504,17 +475,18 @@ class GATConvOpt(BlockedModule):
 
                 if not hasattr(self, "fc"):
                     assert hasattr(self, "fc_src") and hasattr(self, "fc_dst")
-                    inputs_src = [h_src, self.fc_src.weight, self.attn_l]
-
-                    if self.fuse_src_bias:
-                        inputs_src.append(self.fc_src.bias)
+                    if not self.fuse_bias:
+                        t_bias = torch.empty(0,dtype=self.fc_src.weight.dtype)
+                        inputs_src = [h_src, self.fc_src.weight, t_bias, self.attn_l]
+                    else:
+                        inputs_src = [h_src, self.fc_src.weight, self.fc_src.bias, self.attn_l]
 
                     N = h_src.size(0)
                     align = self.align if (N > self.align or N == 0) else N
 
                     el, feat_src_ = MLPAttentionFunction.apply(
                         align,
-                        self.fuse_src_bias,
+                        self.fuse_bias,
                         self.inp_needs_grad,
                         True,
                         *inputs_src,
@@ -525,15 +497,17 @@ class GATConvOpt(BlockedModule):
                     )
 
                     N = h_dst.size(0)
-                    inputs_dst = [h_dst, self.fc_dst.weight, self.attn_r]
-                    if self.fuse_dst_bias:
-                        inputs_dst.append(self.fc_dst.bias)
-
                     align = self.align if (N > self.align or N == 0) else N
+
+                    if not self.fuse_bias:
+                        t_bias = torch.empty(0,dtype=self.fc_dst.weight.dtype)
+                        inputs_dst = [h_dst, self.fc_dst.weight, t_bias, self.attn_r]
+                    else:
+                        inputs_dst = [h_dst, self.fc_dst.weight, self.fc_dst.bias, self.attn_r]
 
                     er, feat_dst_ = MLPAttentionFunction.apply(
                         align,
-                        self.fuse_dst_bias,
+                        self.fuse_bias,
                         self.inp_needs_grad,
                         False,
                         *inputs_dst,
@@ -542,7 +516,8 @@ class GATConvOpt(BlockedModule):
                         *dst_prefix_shape, self._num_heads, self._out_feats
                     )
                 else:
-                    inputs_src = [h_src, self.fc.weight, self.attn_l]
+                    t_bias = torch.empty(0,dtype=self.fc.weight.dtype)
+                    inputs_src = [h_src, self.fc.weight, t_bias, self.attn_l]
 
                     N = h_src.size(0)
                     align = self.align if (N > self.align or N == 0) else N
@@ -560,10 +535,9 @@ class GATConvOpt(BlockedModule):
                     )
 
                     N = h_dst.size(0)
-
                     align = self.align if (N > self.align or N == 0) else N
 
-                    inputs_dst = [h_dst, self.fc.weight, self.attn_r]
+                    inputs_dst = [h_dst, self.fc.weight, t_bias, self.attn_r]
                     er, feat_dst_ = MLPAttentionFunction.apply(
                         align,
                         False,
@@ -579,7 +553,8 @@ class GATConvOpt(BlockedModule):
                 src_prefix_shape = dst_prefix_shape = feat.shape[:-1]
                 h_src = feat
 
-                inputs_src = [h_src, self.fc.weight, self.attn_l]
+                t_bias = torch.empty(0,dtype=self.fc.weight.dtype)
+                inputs_src = [h_src, self.fc.weight, t_bias, self.attn_l]
 
                 N = h_src.size(0)
                 align = self.align if (N > self.align or N == 0) else N

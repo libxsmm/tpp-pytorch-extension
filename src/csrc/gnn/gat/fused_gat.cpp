@@ -120,9 +120,7 @@ at::Tensor mlp_fwd(std::vector<at::Tensor> inputs) {
     typedef float T;
     at::Tensor t_in = inputs[0];
     at::Tensor t_wt = inputs[1];
-    at::Tensor t_bias = at::empty(0);
-    if(add_bias)
-      t_bias = inputs[2];
+    at::Tensor t_bias = inputs[2];
 
     at::Tensor t_out = fc_plain<T>(t_in, t_wt, t_bias);
     return t_out;
@@ -143,7 +141,6 @@ at::Tensor mlp_fwd(std::vector<at::Tensor> inputs) {
 std::vector<at::Tensor> mlp_bwd(
     long align,
     int inp_needs_grad,
-    int add_bias,
     std::vector<at::Tensor> inputs) {
   GlobalPass _gp(BWD);
 

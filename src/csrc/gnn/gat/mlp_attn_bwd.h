@@ -667,7 +667,4 @@ auto trans_tpp = SCOPEIT(
   }
 }
 
-if (add_bias)
-  return {t_grad_in, t_grad_wt, t_grad_attn.view({1, H, F}), t_grad_bias};
-else
-  return {t_grad_in, t_grad_wt, t_grad_attn.view({1, H, F})};
+return {t_grad_in, t_grad_wt, t_grad_bias, t_grad_attn.view({1, H, F}), };

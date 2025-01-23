@@ -176,7 +176,7 @@ class TppBlockedLinearWBase {
     if (gemm == NULL) {
       gemm = new GemmT(t_in, t_wt, t_bias);
       gemm_cache[hash] = gemm;
-      printf("Hash: %s\n", hash);
+      //printf("Hash: %s\n", hash);
     }
     return *gemm;
   }

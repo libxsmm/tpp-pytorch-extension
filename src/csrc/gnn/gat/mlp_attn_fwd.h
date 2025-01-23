@@ -15,14 +15,14 @@ int i = 0;
 
 t_in_mlp = inputs[i++];
 t_wt = inputs[i++];
-t_attn_3d = inputs[i++];
 t_bias = inputs[i++];
+t_attn_3d = inputs[i++];
 
 at::Tensor t_out_mlp = fc_plain<T>(t_in_mlp, t_wt, t_bias);
 
 auto attn_sizes = t_attn_3d.sizes();
 
-auto N = attn_sizes[0];
+auto N = t_out_mlp.sizes()[0];
 auto H = attn_sizes[1];
 auto F = attn_sizes[2];
 

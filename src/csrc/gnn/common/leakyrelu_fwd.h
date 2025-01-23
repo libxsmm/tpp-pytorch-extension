@@ -50,4 +50,4 @@ auto leaky_relu_fwd_tpp =
   }
 }
 
-return {t_out, t_lrelu_mask};
+return {t_out.view({N,K,1}), t_lrelu_mask};
