@@ -44,11 +44,11 @@ global_layer_dtype = torch.float32
 
 class MLPAttentionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, align, fuse_bias, inp_needs_grad, res_spmm, *inputs):
+    def forward(ctx, inp_needs_grad, res_spmm, *inputs):
 
         if fuse_bias:
             (mlp_inp, wt, attn, bias) = inputs
-            (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(align, 1, inputs)
+            (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(inputs)
         else:
             (mlp_inp, wt, attn) = inputs
             (mlp_out, attn_out) = fused_gat_cpp.mlp_attn_fwd(align, 0, inputs)

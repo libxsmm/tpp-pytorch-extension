@@ -8,7 +8,7 @@
 /* Authors: Ramanarayan Mohanty, Sasikanth Avancha (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION("fused_gat_mlp_flat_bwd_v4", std::vector<c10::IValue>());
+RECORD_FUNCTION("gat_mlp_flat_bwd", std::vector<c10::IValue>());
 
 at::Tensor t_in, t_wt, t_attn_in, t_attn;
 

@@ -83,7 +83,7 @@ class RGAT(nn.Module):
     def forward(self, blocks, x):
         h = x
         for l, (layer, block) in enumerate(zip(self.layers, blocks)):
-            h = layer(block, h)
+            h = layer(block, h, mod_kwargs=None)
             h = apply_each(h, lambda x: x.view(x.shape[0], x.shape[1] * x.shape[2]))
         return self.linear(h['paper'])
 
