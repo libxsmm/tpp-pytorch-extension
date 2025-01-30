@@ -11,9 +11,10 @@
 #ifndef _TPP_UTILS_H_
 #define _TPP_UTILS_H_
 
-#include <ATen/record_function.h>
-#include <torch/csrc/autograd/VariableTypeUtils.h>
-#include <torch/extension.h>
+// #include <ATen/record_function.h>
+// #include <torch/csrc/autograd/VariableTypeUtils.h>
+// #include <torch/extension.h>
+#include <unistd.h>
 #include "float8.h"
 #include "vla.h"
 
@@ -40,8 +41,8 @@
     }                          \
   } while (0)
 
-typedef at::BFloat16 bfloat16;
-typedef at::Half half;
+// typedef at::BFloat16 bfloat16;
+// typedef at::Half half;
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 typedef at::Float8_e5m2 bfloat8;
 typedef at::Float8_e4m3fn hfloat8;

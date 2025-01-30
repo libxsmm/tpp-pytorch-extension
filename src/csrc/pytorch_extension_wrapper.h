@@ -23,6 +23,7 @@ namespace at {
 
 class BFloat16 {
  public:
+  BFloat16(){val=0;}
   BFloat16(float f) {
     u_bf16 tmp;
     tmp.f = f;
@@ -43,6 +44,7 @@ class BFloat16 {
   unsigned short val;
 };
 
+#if 0
 #ifdef __x86_64__
 class Half {
  public:
@@ -62,6 +64,10 @@ typedef __fp16 Half;
 #error "Unsupported architecture"
 #endif
 
+#else
+class Half{};
+#endif
 }; // namespace at
+
 
 #endif // _PYTORCH_EXTENSION_WRAPPER_H_
