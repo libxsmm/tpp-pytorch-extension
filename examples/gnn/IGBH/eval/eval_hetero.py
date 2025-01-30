@@ -125,7 +125,8 @@ def track_acc(g, category, args, device):
     fanouts = [int(fanout) for fanout in args.fan_out.split(",")]
     sampler = NeighborSampler(fanouts, fused=True)
 
-    val_nid = torch.nonzero(g.nodes[category].data['val_mask'], as_tuple=True)[0]
+    #val_nid = torch.nonzero(g.nodes[category].data['val_mask'], as_tuple=True)[0]
+    val_nid = torch.load(osp.join(args.path, args.dataset_size, 'processed', 'val_idx.pt'))
     if args.profile or args.tpp_profile:
         val_nids = 100000
     else:

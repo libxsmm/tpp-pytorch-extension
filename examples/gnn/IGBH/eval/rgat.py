@@ -42,14 +42,14 @@ class RGAT_DGL(nn.Module):
         self.layers = nn.ModuleList()
         
         self.layers.append(dgl.nn.pytorch.HeteroGraphConv({
-            etype: GATConv(in_feats, h_feats // n_heads, n_heads, activation=F.leaky_relu,
+            etype: GATConv(in_feats, h_feats // n_heads, n_heads, 
                    layer_dtype=global_layer_dtype,
                    use_qint8_gemm=global_use_qint8_gemm,)
             for etype in etypes}))
 
         for _ in range(num_layers - 2):
             self.layers.append(dgl.nn.pytorch.HeteroGraphConv({
-                etype: GATConv(h_feats, h_feats // n_heads, n_heads, activation=F.leaky_relu,
+                etype: GATConv(h_feats, h_feats // n_heads, n_heads, 
                    layer_dtype=global_layer_dtype,
                    use_qint8_gemm=global_use_qint8_gemm,)
                 for etype in etypes}))
@@ -81,6 +81,9 @@ class RGAT_DGL(nn.Module):
                 h = layer(block, h, mod_kwargs=mod_kwargs)
 
             h = dgl.apply_each(h, lambda x: x.view( x.shape[0], x.shape[1] * x.shape[2]))
+            if l != len(self.layers) - 1 and not use_tpp:
+                h = apply_each(h, F.relu)
+                h = apply_each(h, self.dropout)
 
         return self.linear(h['paper'])
 
