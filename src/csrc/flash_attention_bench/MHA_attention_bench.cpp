@@ -35,31 +35,31 @@ using namespace tpp;
 
 // REGISTER_SCOPE(alpha_ac_gemm, "alpha_ac_gemm");
 // REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
- 
-// void fused_gating_attention_fwd_bf16(
-//     bfloat16* q_data,
-//     bfloat16* m_data,
-//     float* bias,
-//     float* nonbatched_bias,
-//     bfloat16* query_w,
-//     bfloat16* key_w,
-//     bfloat16* value_w,
-//     bfloat16* gating_w,
-//     float* gating_b,
-//     bfloat16* output_w,
-//     float* output_b,
-//     bfloat16* output,
-//     int64_t B_t,
-//     int64_t S_t,
-//     int64_t N_t,
-//     int64_t H_t,
-//     int64_t HS_t,
-//     bool flag) {
-  // GlobalPass _gp(FWD);
+
+void fused_gating_attention_fwd_bf16(
+    bfloat16* q_data,
+    bfloat16* m_data,
+    float* bias,
+    float* nonbatched_bias,
+    bfloat16* query_w,
+    bfloat16* key_w,
+    bfloat16* value_w,
+    bfloat16* gating_w,
+    float* gating_b,
+    bfloat16* output_w,
+    float* output_b,
+    bfloat16* output,
+    int64_t B_t,
+    int64_t S_t,
+    int64_t N_t,
+    int64_t H_t,
+    int64_t HS_t,
+    bool flag) {
+  GlobalPass _gp(FWD);
   
-//   typedef bfloat16 T;
-//   #include "fused_gating_attention_fwd_tmpl_bf16.h"
-// }
+  typedef bfloat16 T;
+  #include "fused_gating_attention_fwd_tmpl_bf16.h"
+}
 
 void fused_gating_attention_fwd_fp32(
     float* q_data,
@@ -159,11 +159,11 @@ int main(int argc, char* argv[]) {
   
     auto t0 = getTime();
     // Run the forward function
-    // fused_gating_attention_fwd_bf16(
-    //     q_data, m_data, bias, nonbatched_bias, 
-    //     query_w, key_w, value_w, gating_w, gating_b, 
-    //     output_w, output_b, output, 
-    //     batch_size, seq_len, num_heads, head_size, embedding_dim, nb_bias_flag);
+    fused_gating_attention_fwd_bf16(
+        q_data, m_data, bias, nonbatched_bias, 
+        query_w, key_w, value_w, gating_w, gating_b, 
+        output_w, output_b, output, 
+        batch_size, seq_len, num_heads, head_size, embedding_dim, nb_bias_flag);
 
     auto t1 = getTime();
     printf("Time taken: %f ms\n", (t1 - t0) * 1e3);
