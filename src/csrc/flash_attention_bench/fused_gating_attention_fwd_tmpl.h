@@ -20,7 +20,6 @@
 // int64_t H_t = query_w.size(2); /* head size (32) */
 
 // auto flag = nonbatched_bias.size(0) > 0;
-int flag = 0;
 int64_t Sp_t = S_t;
 
 // int64_t S_t = Sp_t;
@@ -46,7 +45,7 @@ int64_t Sp_t = S_t;
 // bias = bias.contiguous();
 // nonbatched_bias = nonbatched_bias.contiguous();
 // auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t);
-float* sfmask = new float[S_t - Sp_t];
+T* sfmask = new T[S_t - Sp_t];
 for (int i = 0; i < S_t - Sp_t; i++) {
   sfmask[i] = -30000;
 }
@@ -54,30 +53,30 @@ auto sfmask_a = GetVLAPtr<T>(sfmask, {1L});
 
 auto q_data_a = GetVLAPtr<T>(q_data, {S_t, HS_t});
 auto m_data_a = GetVLAPtr<T>(m_data, {S_t, HS_t});
-auto bias_a = GetVLAPtr<T>(bias, {S_t});
-auto nonbatched_bias_a = GetVLAPtr<T>(nonbatched_bias, {N_t, S_t, S_t});
+auto bias_a = GetVLAPtr<float>(bias, {S_t});
+auto nonbatched_bias_a = GetVLAPtr<float>(nonbatched_bias, {N_t, S_t, S_t});
 
 auto query_w_a = GetVLAPtr<T>(query_w, {N_t, H_t});
 auto key_w_a = GetVLAPtr<T>(key_w, {N_t, H_t});
 auto value_w_a = GetVLAPtr<T>(value_w, {N_t, H_t});
 auto gating_w_a = GetVLAPtr<T>(gating_w, {N_t, H_t});
-auto gating_b_a = GetVLAPtr<T>(gating_b, {H_t});
+auto gating_b_a = GetVLAPtr<float>(gating_b, {H_t});
 auto output_w_a = GetVLAPtr<T>(output_w, {H_t, HS_t});
-auto output_b_a = GetVLAPtr<T>(output_b, {1L});
+auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
-float* q = new float[B_t * S_t * N_t *H_t];
+T* q = new T[B_t * S_t * N_t *H_t];
 // auto q = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
 auto q_a = GetVLAPtr<T>(q, {S_t, N_t, H_t});
 
-float* k = new float[B_t * S_t * N_t * H_t];
+T* k = new T[B_t * S_t * N_t * H_t];
 // auto k = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
 auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});
 
-float* v = new float[B_t *S_t * N_t *H_t];
+T* v = new T[B_t *S_t * N_t *H_t];
 // auto v = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
 auto v_a = GetVLAPtr<T>(v, {S_t, N_t, H_t});
 
-float* weighted_avg = new float[B_t * S_t * N_t * H_t];
+T* weighted_avg = new T[B_t * S_t * N_t * H_t];
 // auto weighted_avg =
 //     q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
 auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t, H_t});
@@ -198,12 +197,12 @@ if (S_t < 2048) {
       0,
       1)));
 
-  auto a_addbias_tpp = SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t, S_t), BIAS);
+  auto a_addbias_tpp = SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t, S_t), BIAS);
   auto a_add_nbbias_tpp =
-      SCOPEIT((AddTPP<T, T>(A_BLOCKSIZE, S_t, S_t, S_t)), BIAS);
+      SCOPEIT((AddTPP<float, float>(A_BLOCKSIZE, S_t, S_t, S_t)), BIAS);
 
   auto a_add_sfmask_tpp =
-      SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t - Sp_t, S_t), BIAS);
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t - Sp_t, S_t), BIAS);
   auto a_softmax_tpp =
       SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, S_t)), SOFTMAX);
 
@@ -281,9 +280,9 @@ if (S_t < 2048) {
       1)));
 
   auto a_addbias_online_tpp =
-      SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, Ak_BLOCKSIZE, Ak_BLOCKSIZE), BIAS);
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, Ak_BLOCKSIZE, Ak_BLOCKSIZE), BIAS);
   auto a_add_nbbias_online_tpp = SCOPEIT(
-      (AddTPP<T, T>(
+      (AddTPP<float, float>(
           A_BLOCKSIZE, Ak_BLOCKSIZE, S_t, Ak_BLOCKSIZE, Ak_BLOCKSIZE)),
       BIAS);
 
@@ -325,14 +324,14 @@ if (S_t < 2048) {
       1)));
 
   auto a_addbias_online_edge_tpp =
-      SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, lastBlockSize, lastBlockSize), BIAS);
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, lastBlockSize, lastBlockSize), BIAS);
   auto a_add_nbbias_online_edge_tpp = SCOPEIT(
-      (AddTPP<T, T>(
+      (AddTPP<float, float>(
           A_BLOCKSIZE, lastBlockSize, S_t, lastBlockSize, lastBlockSize)),
       BIAS);
 
   auto a_add_sfmask_online_tpp =
-      SCOPEIT(AddBiasTPP<T>(A_BLOCKSIZE, S_t - Sp_t, lastBlockSize), BIAS);
+      SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t - Sp_t, lastBlockSize), BIAS);
 
   auto a_softmax_online_edge_tpp = SCOPEIT(
       (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
@@ -418,7 +417,7 @@ auto g_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
         T>(C_BLOCKSIZE, N_t* H_t, HS_t, 0, 0, lda, ldb, ldc, 0.0, 0, 1)));
-auto g_addbias_tpp = SCOPEIT(AddBiasTPP<T>(C_BLOCKSIZE, N_t* H_t, ldc), BIAS);
+auto g_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, N_t* H_t, ldc), BIAS);
 auto g_sigmoid_tpp =
     SCOPEIT(SiLUFwdTPP<T>(C_BLOCKSIZE, N_t* H_t, ldc, ldc), EW_MUL);
 auto g_mul_tpp = SCOPEIT((MulTPP<T, T>(C_BLOCKSIZE * N_t * H_t)), EW_MUL);
@@ -427,7 +426,7 @@ auto out_gemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
         T>(C_BLOCKSIZE, HS_t, N_t* H_t, 0, 0, lda, ldb, ldc, 0.0, 0, 1)));
-auto out_addbias_tpp = SCOPEIT(AddBiasTPP<T>(C_BLOCKSIZE, HS_t, ldc), BIAS);
+auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
 // gating_w}), gating_b));   /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,

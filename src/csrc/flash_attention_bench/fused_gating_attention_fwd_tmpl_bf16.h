@@ -8,42 +8,50 @@
 /* Author: Narendra Chaudhary (Intel Corp.)
  ******************************************************************************/
 
-RECORD_FUNCTION(
-    "Gating attention forward",
-    std::vector<c10::IValue>({q_data, m_data})); // For recording time
+// RECORD_FUNCTION(
+//     "Gating attention forward",
+//     std::vector<c10::IValue>({q_data, m_data})); // For recording time
 
-int64_t B_t = q_data.size(0); /* Batch (512) */
-int64_t Sp_t = q_data.size(1); /* Query (764) */
-int64_t HS_t = q_data.size(2); /* Channels (256) */
+// int64_t B_t = q_data.size(0); /* Batch (512) */
+// int64_t Sp_t = q_data.size(1); /* Query (764) */
+// int64_t HS_t = q_data.size(2); /* Channels (256) */
 
-int64_t N_t = query_w.size(1); /* number of heads (8) */
-int64_t H_t = query_w.size(2); /* head size (32) */
+// int64_t N_t = query_w.size(1); /* number of heads (8) */
+// int64_t H_t = query_w.size(2); /* head size (32) */
 
-auto flag = nonbatched_bias.size(0) > 0;
+// auto flag = nonbatched_bias.size(0) > 0;
 
-int64_t S_t = Sp_t;
-if (Sp_t % QKV_BLOCKSIZE != 0) {
-  S_t = (Sp_t / QKV_BLOCKSIZE + 1) * QKV_BLOCKSIZE; // 768
+int64_t Sp_t = S_t;
 
-  auto q_data_pad = q_data.new_zeros({B_t, S_t - Sp_t, HS_t});
-  auto m_data_pad = m_data.new_zeros({B_t, S_t - Sp_t, HS_t});
-  auto bias_pad = bias.new_zeros({B_t, 1, 1, S_t - Sp_t});
-  auto nonbatched_bias_pad1 =
-      nonbatched_bias.new_zeros({N_t, Sp_t, S_t - Sp_t});
-  auto nonbatched_bias_pad2 = nonbatched_bias.new_zeros({N_t, S_t - Sp_t, S_t});
+// int64_t S_t = Sp_t;
+// if (Sp_t % QKV_BLOCKSIZE != 0) {
+//   S_t = (Sp_t / QKV_BLOCKSIZE + 1) * QKV_BLOCKSIZE; // 768
 
-  q_data = at::cat({q_data, q_data_pad}, 1);
-  m_data = at::cat({m_data, m_data_pad}, 1);
-  bias = at::cat({bias, bias_pad}, 3);
-  if (flag) {
-    nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad1}, 2);
-    nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
-  }
+//   auto q_data_pad = q_data.new_zeros({B_t, S_t - Sp_t, HS_t});
+//   auto m_data_pad = m_data.new_zeros({B_t, S_t - Sp_t, HS_t});
+//   auto bias_pad = bias.new_zeros({B_t, 1, 1, S_t - Sp_t});
+//   auto nonbatched_bias_pad1 =
+//       nonbatched_bias.new_zeros({N_t, Sp_t, S_t - Sp_t});
+//   auto nonbatched_bias_pad2 = nonbatched_bias.new_zeros({N_t, S_t - Sp_t, S_t});
+
+//   q_data = at::cat({q_data, q_data_pad}, 1);
+//   m_data = at::cat({m_data, m_data_pad}, 1);
+//   bias = at::cat({bias, bias_pad}, 3);
+//   if (flag) {
+//     nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad1}, 2);
+//     nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
+//   }
+// }
+
+// bias = bias.contiguous();
+// nonbatched_bias = nonbatched_bias.contiguous();
+// auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t, at::kFloat).contiguous();
+// auto sfmask_a = GetVLAPtr<float>(sfmask, {1L});
+
+float* sfmask = new float[S_t - Sp_t];
+for (int i = 0; i < S_t - Sp_t; i++) {
+  sfmask[i] = -30000;
 }
-
-bias = bias.contiguous();
-nonbatched_bias = nonbatched_bias.contiguous();
-auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t, at::kFloat).contiguous();
 auto sfmask_a = GetVLAPtr<float>(sfmask, {1L});
 
 auto q_data_a = GetVLAPtr<T>(q_data, {S_t, HS_t});
@@ -60,20 +68,24 @@ auto gating_b_a = GetVLAPtr<float>(gating_b, {H_t});
 auto output_w_a = GetVLAPtr<T>(output_w, {H_t, HS_t});
 auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
-auto q = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
+T* q = new T[B_t * S_t * N_t *H_t];
+// auto q = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
 auto q_a = GetVLAPtr<T>(q, {S_t, N_t, H_t});
 
-auto k = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
+T* k = new T[B_t * S_t * N_t * H_t];
+// auto k = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
 auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});
 
-auto v = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
+T* v = new T[B_t *S_t * N_t *H_t];
+// auto v = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
 auto v_a = GetVLAPtr<T>(v, {S_t * N_t * H_t});
 
-auto weighted_avg =
-    q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
+T* weighted_avg = new T[B_t * S_t * N_t * H_t];
+// auto weighted_avg =
+//     q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
 auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t, H_t});
 
-auto output = q_data.new_empty({B_t, S_t, HS_t}); /* [512, 764, 256] */
+// auto output = q_data.new_empty({B_t, S_t, HS_t}); /* [512, 764, 256] */
 auto output_a = GetVLAPtr<T>(output, {S_t, HS_t});
 
 int lda = HS_t;
@@ -90,23 +102,26 @@ auto q_convert_tpp =
 auto scale_tpp =
     SCOPEIT((ScaleTPP<float, float>(QKV_BLOCKSIZE * HS_t)), EW_SCL);
 auto zero_tpp = SCOPEIT(SetZeroTPP<float>(QKV_BLOCKSIZE * HS_t), EW_ZERO);
-float alpha = (1.0 / sqrt(key_dim));
+// float alpha = (1.0 / sqrt(key_dim));
+float alpha = (1.0 / sqrt(H_t));
 
 auto qkv_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
         T>(HS_t, N_t* H_t, HS_t, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
     VNNI);
-auto qkv_w_vnni = q_data.new_empty({HS_t, N_t, H_t}); /* [256, 8, 32] */
+
+T* qkv_w_vnni = new T[HS_t * N_t * H_t]; 
+// auto qkv_w_vnni = q_data.new_empty({HS_t, N_t, H_t}); /* [256, 8, 32] */
 auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 
 // auto q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
 // (1.0/sqrt(key_dim))) ;     /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
 // 32] */
 {
-  RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
+  // RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
   {
     qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+    // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
     {
@@ -160,10 +175,10 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 // auto k = at::einsum("bka,ahc->bkhc", {m_data, key_w});
 // /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8, 32] */
 {
-  RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
+  // RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
   {
     qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+    // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
     {
       kv_brgemm_tpp.config();
@@ -184,10 +199,10 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 // auto v = at::einsum("bka,ahc->bkhc", {m_data, value_w});
 // /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8, 32] */
 {
-  RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
+  // RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
   {
     qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+    // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
     {
@@ -250,9 +265,9 @@ if (S_t < 2560) {
       SCOPEIT((VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, S_t)), SOFTMAX);
 
   {
-    RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
+    // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
     {
-      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+      // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel for collapse(3)
       for (int i = 0; i < B_t; i++) {
@@ -391,9 +406,9 @@ if (S_t < 2560) {
   // }
 
   {
-    RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
+    // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
     {
-      RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+      // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel for collapse(3)
       for (int i = 0; i < B_t; i++) {
@@ -510,7 +525,9 @@ auto output_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
         T>(N_t * H_t, HS_t, N_t* H_t, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
     VNNI);
-auto output_w_vnni = q_data.new_empty({N_t, H_t, HS_t}); /* [8, 32, 256] */
+
+T* output_w_vnni = new T[N_t * H_t * HS_t];
+// auto output_w_vnni = q_data.new_empty({N_t, H_t, HS_t}); /* [8, 32, 256] */
 auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
@@ -520,11 +537,11 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 // at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}), output_b);
 // /* [512, 764, 256]  = [512, 764, 8, 32] * [8, 32, 256] + [256] */
 {
-  RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
+  // RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
     qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+    // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
     {
@@ -556,8 +573,8 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
   }
 }
 
-if (S_t != Sp_t) {
-  output = output.narrow(1, 0, Sp_t);
-}
+// if (S_t != Sp_t) {
+//   output = output.narrow(1, 0, Sp_t);
+// }
 
-return output;
+// return output;
