@@ -81,9 +81,8 @@ class RGAT_DGL(nn.Module):
                 h = layer(block, h, mod_kwargs=mod_kwargs)
 
             h = dgl.apply_each(h, lambda x: x.view( x.shape[0], x.shape[1] * x.shape[2]))
-            if l != len(self.layers) - 1 and not use_tpp:
-                h = apply_each(h, F.relu)
-                h = apply_each(h, self.dropout)
+            if l != len(self.layers) - 1:
+                h = apply_each(h, F.leaky_relu)
 
         return self.linear(h['paper'])
 
