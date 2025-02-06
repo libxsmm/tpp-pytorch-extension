@@ -224,8 +224,9 @@ if (S_t < 2048) {
                   &tmp_logits[0][j2],
                   1);
             }
+            if (bias_flag)
+              a_addbias_tpp(&bias_a[i][0], &tmp_logits[0][0]);
 
-            a_addbias_tpp(&bias_a[i][0], &tmp_logits[0][0]);
             if (flag)
               a_add_nbbias_tpp(
                   &nonbatched_bias_a[0][n][j1][0],
@@ -356,7 +357,9 @@ if (S_t < 2048) {
               a_brgemm_tpp(
                   &q_a[i][j1][n][0], &k_a[i][n * H_t * S_t + j2], tmp_S, 1);
 
-              a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
+              if (bias_flag)
+                a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
+
               if (flag)
                 a_add_nbbias_online_tpp(
                     &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
@@ -460,6 +463,12 @@ auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
     }
   }
 }
+
+delete[] sfmask;
+delete[] q;
+delete[] k;
+delete[] v;
+delete[] weighted_avg;
 
 // if (S_t != Sp_t) {
 //   output = output.narrow(1, 0, Sp_t);

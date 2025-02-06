@@ -53,10 +53,13 @@ extern int tpp_debug_trace;
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
 extern long long hsh_key, hsh_ret;
 namespace tpp {
-// typedef at::BFloat16 bfloat16;
+#ifdef TORCH_API_INCLUDE_EXTENSION_H
+typedef at::BFloat16 bfloat16;
+typedef at::Half half;
+#else
 typedef unsigned short bfloat16;
 typedef short half;
-// typedef at::Half half;
+#endif
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 typedef at::Float8_e5m2 bfloat8;
 typedef at::Float8_e4m3fn hfloat8;

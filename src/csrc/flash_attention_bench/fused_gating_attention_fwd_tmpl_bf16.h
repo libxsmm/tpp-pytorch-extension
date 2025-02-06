@@ -287,7 +287,9 @@ if (S_t < 2560) {
                   true);
             }
             a_brgemm_tpp.release();
-            a_addbias_tpp(&bias_a[i][0], &tmp_logits[0][0]);
+            if (bias_flag)
+              a_addbias_tpp(&bias_a[i][0], &tmp_logits[0][0]);
+
             if (flag)
               a_add_nbbias_tpp(
                   &nonbatched_bias_a[0][n][j1][0],
@@ -405,12 +407,22 @@ if (S_t < 2560) {
       (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
   // }
 
-  {
+  // {
     // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
-    {
+    // {
       // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
-#pragma omp parallel for collapse(3)
+//#pragma omp parallel for collapse(3)
+
+  int max_threads = omp_get_max_threads();
+  auto barriers = std::vector<Barrier>(max_threads/Barrier::size);
+  #pragma omp parallel
+  {
+    int start = 0;
+    int tid = omp_get_thread_num();
+    int cid = tid / Barrier::size;
+    tid = tid % Barrier::size;
+    #pragma omp for collapse(3)
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
@@ -423,6 +435,10 @@ if (S_t < 2560) {
 
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
+              if (tid==1 && start == 0){
+                barriers[cid].wait(tid);
+                start = 1;
+              }
               a_brgemm_tpp(
                   &q_a[i][j1][n][0],
                   &k_a[i][n * H_t * S_t + 2 * j2],
@@ -430,17 +446,27 @@ if (S_t < 2560) {
                   1,
                   false);
 
-              a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
+              if (tid==0 && start == 0){
+                barriers[cid].wait(tid);
+                start = 1;
+              }
+
+              if (bias_flag)
+                a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
+
               if (flag) {
                 a_add_nbbias_online_tpp(
                     &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
               }
-
+              if (tid == 1)
+                barriers[cid].wait(tid);
               if (j2 == 0) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, omax, osum, nullptr);
               } else {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, cmax, csum, omax);
               }
+              if (tid == 0)
+                barriers[cid].wait(tid);
 
               c_brgemm_online_tpp(
                   tmp_S_bf16,
@@ -493,7 +519,8 @@ if (S_t < 2560) {
       }
     }
   }
-}
+//   }
+// }
 
 lda = HS_t;
 ldb = N_t * H_t;
@@ -572,6 +599,14 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
     }
   }
 }
+
+delete[] sfmask;
+delete[] q;
+delete[] k;
+delete[] v;
+delete[] weighted_avg;
+delete[] output_w_vnni;
+delete[] qkv_w_vnni;
 
 // if (S_t != Sp_t) {
 //   output = output.narrow(1, 0, Sp_t);
