@@ -51,6 +51,7 @@ extern int tpp_debug_trace;
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
 extern long long hsh_key, hsh_ret;
+extern int TPP_USE_DYNAMIC_LD;
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -2434,6 +2435,11 @@ class BrgemmTPP {
         unroll_hint(unroll_hint),
         a_vnni(a_vnni),
         b_vnni(b_vnni),
+        use_dynamic_ld(TPP_USE_DYNAMIC_LD && !b_trans),
+        l_stride_a(str_a * sizeof(Tin)),
+        l_stride_b(
+            b_vnni == 2 || b_vnni == 8 ? str_b * sizeof(Tw) / 2
+                                       : str_b * sizeof(Tw)),
         k_gemm_with_tc(this, 0),
         k_cfg(this, 1),
         k_rls(this, 2),
@@ -2462,6 +2468,13 @@ class BrgemmTPP {
     gemm_param.c.primary = (void*)C;
     gemm_param.a.primary = (void*)B;
     gemm_param.b.primary = (void*)A;
+    if (use_dynamic_ld) {
+      gemm_param.a.secondary = &l_stride_b;
+      gemm_param.b.secondary = &l_stride_a;
+      gemm_param.a.quinary = &ldb;
+      gemm_param.b.quinary = &lda;
+      gemm_param.c.quinary = &ldc;
+    }
     if (!no_tile_cfg) {
       k_gemm_with_tc(&gemm_param);
     } else {
@@ -2482,6 +2495,14 @@ class BrgemmTPP {
     gemm_param.a.primary = (void*)B;
     gemm_param.a.tertiary = (void*)B_scales;
     gemm_param.b.primary = (void*)A;
+    if (use_dynamic_ld) {
+      TPP_ASSERT(false, "Should not come here %s:%d\n", __FILE__, __LINE__);
+      gemm_param.a.secondary = &l_stride_b;
+      gemm_param.b.secondary = &l_stride_a;
+      gemm_param.a.quinary = &ldb;
+      gemm_param.b.quinary = &lda;
+      gemm_param.c.quinary = &ldc;
+    }
     if (!no_tile_cfg) {
       k_gemm_with_tc(&gemm_param);
     } else {
@@ -2504,6 +2525,14 @@ class BrgemmTPP {
     gemm_param.a.tertiary = (void*)B_scales;
     gemm_param.b.primary = (void*)A;
     gemm_param.b.tertiary = (void*)A_scales;
+    if (use_dynamic_ld) {
+      TPP_ASSERT(false, "Should not come here %s:%d\n", __FILE__, __LINE__);
+      gemm_param.a.secondary = &l_stride_b;
+      gemm_param.b.secondary = &l_stride_a;
+      gemm_param.a.quinary = &ldb;
+      gemm_param.b.quinary = &lda;
+      gemm_param.c.quinary = &ldc;
+    }
     if (!no_tile_cfg) {
       k_gemm_with_tc(&gemm_param);
     } else {
@@ -2567,7 +2596,7 @@ class BrgemmTPP {
 
   class BrgemmKernel : public BaseTPP {
    public:
-    BrgemmKernel() {}
+    BrgemmKernel() : p(nullptr) {}
     BrgemmKernel(BrgemmTPP* p, int config) : p(p), config(config) {
       auto dt_in = XsmmDtype<Tin>();
       auto dt_wt = XsmmDtype<Tw>();
@@ -2603,28 +2632,52 @@ class BrgemmTPP {
    protected:
     std::string hash_str() override {
       char hash[200];
-      snprintf(
-          hash,
-          200,
-          "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_bv%d_dti%d_dtw%d_dto%d_dtc%d",
-          p->M,
-          p->N,
-          p->K,
-          p->str_a,
-          p->str_b,
-          brgemm_type,
-          (int)p->beta,
-          p->a_trans,
-          p->unroll_hint,
-          (long)p->lda,
-          (long)p->ldb,
-          (long)p->ldc,
-          config,
-          p->b_vnni,
-          XsmmDtype<Tin>(),
-          XsmmDtype<Tw>(),
-          XsmmDtype<Tout>(),
-          XsmmDtype<Tcomp>());
+      if (!p->use_dynamic_ld) {
+        snprintf(
+            hash,
+            200,
+            "brgemm_m%ld_n%ld_k%ld_a%ld_b%ld_t%ld_beta%d_at%d_bt%d_uh%d_ld_a%ld_b%ld_c%ld_cfg%d_av%d_bv%d_dti%d_dtw%d_dto%d_dtc%d",
+            p->M,
+            p->N,
+            p->K,
+            p->str_a,
+            p->str_b,
+            brgemm_type,
+            (int)p->beta,
+            p->a_trans,
+            p->b_trans,
+            p->unroll_hint,
+            (long)p->lda,
+            (long)p->ldb,
+            (long)p->ldc,
+            config,
+            p->a_vnni,
+            p->b_vnni,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tw>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tcomp>());
+      } else {
+        snprintf(
+            hash,
+            200,
+            "brgemm_m%ld_n%ld_k%ld_t%ld_beta%d_at%d_bt%d_uh%d_cfg%d_av%d_bv%d_dti%d_dtw%d_dto%d_dtc%d_dynld",
+            p->M,
+            p->N,
+            p->K,
+            brgemm_type,
+            (int)p->beta,
+            p->a_trans,
+            p->b_trans,
+            p->unroll_hint,
+            config,
+            p->a_vnni,
+            p->b_vnni,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tw>(),
+            XsmmDtype<Tout>(),
+            XsmmDtype<Tcomp>());
+      }
       return std::string(hash);
     }
     void* build_kernel() override {
@@ -2678,19 +2731,22 @@ class BrgemmTPP {
       l_shape.m = p->N;
       l_shape.n = p->M;
       l_shape.k = p->K;
-      l_shape.lda = p->ldb;
-      l_shape.ldb = p->lda;
-      l_shape.ldc = p->ldc;
+      l_shape.lda = p->use_dynamic_ld ? LIBXSMM_RUNTIME_SET_LD : p->ldb;
+      l_shape.ldb = p->use_dynamic_ld ? LIBXSMM_RUNTIME_SET_LD : p->lda;
+      l_shape.ldc = p->use_dynamic_ld ? LIBXSMM_RUNTIME_SET_LD : p->ldc;
       l_shape.a_in_type = XsmmDtype<Tw>();
       l_shape.b_in_type = XsmmDtype<Tin>();
       l_shape.out_type = XsmmDtype<Tout>();
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = (p->b_vnni == 2 || p->b_vnni == 8)
-          ? (p->str_b * sizeof(Tw)) / 2
-          : p->str_b * sizeof(Tw);
-      l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
+      if (!p->use_dynamic_ld) {
+        l_brconfig.br_stride_a_hint = p->l_stride_b;
+        l_brconfig.br_stride_b_hint = p->l_stride_a;
+      } else {
+        l_brconfig.br_stride_a_hint = 0;
+        l_brconfig.br_stride_b_hint = 0;
+      }
       l_brconfig.br_unroll_hint = p->unroll_hint;
 
       if (config == 1 || config == 2) {
@@ -2712,9 +2768,9 @@ class BrgemmTPP {
 
  private:
   long M, N, K, str_a, str_b;
-  libxsmm_blasint lda;
-  libxsmm_blasint ldb;
-  libxsmm_blasint ldc;
+  long long lda;
+  long long ldb;
+  long long ldc;
   float beta;
   int a_trans;
   int b_trans;
@@ -2722,6 +2778,8 @@ class BrgemmTPP {
   int unroll_hint;
   int a_vnni;
   int b_vnni;
+  int use_dynamic_ld;
+  long long l_stride_a, l_stride_b;
   libxsmm_tilecfg_state l_tilestate;
   BrgemmKernel k_gemm_with_tc;
   BrgemmKernel k_cfg;

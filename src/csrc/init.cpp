@@ -21,6 +21,7 @@ int TPP_VERBOSE = env2int("TPP_VERBOSE", 0);
 static int TPP_DEBUG_TIMER_TIDS_UPTO = env2int("TPP_DEBUG_TIMER_TIDS_UPTO", 0);
 static int TPP_DEBUG_TIMER_RANK = env2int("TPP_DEBUG_TIMER_RANK", 0);
 static int TPP_DEBUG_TIMER_DETAILED = env2int("TPP_DEBUG_TIMER_DETAILED", 0);
+int TPP_USE_DYNAMIC_LD = env2int("TPP_USE_DYNAMIC_LD", 0);
 
 #ifdef DEBUG_TRACE_TPP
 int tpp_debug_trace = env2int("TPP_DEBUG_TRACE", 0);
