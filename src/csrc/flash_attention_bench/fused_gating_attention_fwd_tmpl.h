@@ -338,11 +338,15 @@ if (S_t < 2048) {
       (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
   // }
 
+  // {
+  //   // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
+  //   {
+  //     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
+
+  #pragma omp parallel
   {
-    // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
-    {
-      // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(3)
+    double wtime = omp_get_wtime();
+      #pragma omp for collapse(3) nowait
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
@@ -408,9 +412,14 @@ if (S_t < 2048) {
           }
         }
       }
-    }
+
+    wtime = omp_get_wtime() - wtime;
+    printf( "Time taken by thread %d is %f\n", omp_get_thread_num(), wtime );
+    // std::cout<< "Time taken by thread " << omp_get_thread_num() << "is" << wtime << std::endl;
   }
+//   }
 }
+printf( "\n ----------------------------New threads starting -------------------------- \n" );
 
 lda = HS_t;
 ldb = N_t * H_t;
