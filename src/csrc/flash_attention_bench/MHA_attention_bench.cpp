@@ -14,6 +14,7 @@
 #include <cmath>
 #include <iostream>
 #include <tuple>
+#include <cpuid.h>
 
 // #include <ATen/record_function.h>
 #include "ext_tpp.h"
@@ -36,6 +37,16 @@ using namespace tpp;
 
 // REGISTER_SCOPE(alpha_ac_gemm, "alpha_ac_gemm");
 // REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
+
+unsigned long long rdtsc_ordered() {
+  unsigned int eax, ebx, ecx, edx;
+  __cpuid(1, eax, ebx, ecx, edx); // Using specific function for cpuid
+
+  return __rdtsc();
+  // unsigned int lo, hi;
+  // __asm__ volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+  // return ((unsigned long long)hi << 32) | lo;
+}
 
 class Barrier {
 
@@ -169,8 +180,10 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
     output[l] = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
 
     for (int i = 0; i < batch_size*seq_len*embedding_dim; ++i) {
-      q_data[l][i] = static_cast<T>(rand()) / RAND_MAX;
-      m_data[l][i] = static_cast<T>(rand()) / RAND_MAX;
+      q_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
+      m_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
+      // q_data[l][i] = 1;
+      // m_data[l][i] = 2;
     }
     for (int i = 0; i < batch_size*seq_len; ++i) {
       bias[l][i] = static_cast<float>(rand()) / RAND_MAX;
@@ -179,10 +192,14 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
       nonbatched_bias[l][i] = static_cast<float>(rand()) / RAND_MAX;
     }
     for (int i = 0; i < embedding_dim * num_heads * head_size; ++i) {
-          query_w[l][i] = static_cast<T>(rand()) / RAND_MAX;
-          key_w[l][i] = static_cast<T>(rand()) / RAND_MAX;
-          value_w[l][i] = static_cast<T>(rand()) / RAND_MAX;
-          gating_w[l][i] = static_cast<T>(rand()) / RAND_MAX;
+          query_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
+          key_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
+          value_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
+          gating_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
+          // query_w[l][i] = 1;
+          // key_w[l][i] = 2;
+          // value_w[l][i] = 3;
+          // gating_w[l][i] = 4;
     }
     for (int i = 0; i < num_heads * head_size; ++i) {
       gating_b[l][i] = static_cast<float>(rand()) / RAND_MAX;
