@@ -107,6 +107,7 @@ def FixLlamaDecoderLayer(
     bc=None,
     layer_dtype=global_layer_dtype,
     weight_dtype=global_layer_dtype,
+    rotary_emb=None,
 ):
     if not isinstance(self, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
         return
@@ -158,19 +159,22 @@ def FixLlamaDecoderLayer(
             self.mlp.down_proj.weight,
         ]  # since bias is False
 
-        if hasattr(self.self_attn, "rotary_emb"):
-            position_ids = torch.arange(
-                self.self_attn.max_position_embeddings
-            ).unsqueeze(0)
+        if rotary_emb is None and hasattr(self.self_attn, "rotary_emb"):
+            rotary_emb = self.self_attn.rotary_emb
+
+        if rotary_emb is not None:
+            # max_position_embeddings = self.self_attn.max_position_embeddings
+            max_position_embeddings = rotary_emb.config.max_position_embeddings
+            position_ids = torch.arange(max_position_embeddings).unsqueeze(0)
             embed_positions = (
                 torch.cat(
-                    self.self_attn.rotary_emb(
+                    rotary_emb(
                         self.self_attn.q_proj.weight,
                         position_ids,
                     ),
                     dim=0,
                 )
-                .view([2, self.self_attn.max_position_embeddings, -1])
+                .view([2, max_position_embeddings, -1])
                 .to(torch.float)
             )
         else:
@@ -183,7 +187,7 @@ def FixLlamaDecoderLayer(
             self.self_attn.layer_idx,
             self.input_layernorm.variance_epsilon,
             self.self_attn.head_dim,
-            self.self_attn.max_position_embeddings,
+            max_position_embeddings,
             self.self_attn.head_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
@@ -199,9 +203,17 @@ def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
         ), "attention_bias is not supported for Llama yet!"
     if weight_dtype is None:
         weight_dtype = dtype
+    rotary_emb = None
+    for m in model.modules():
+        if isinstance(m, transformers.models.llama.modeling_llama.LlamaPreTrainedModel):
+            if hasattr(m, "rotary_emb"):
+                rotary_emb = m.rotary_emb
+                break
     for m in model.modules():
         if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
-            FixLlamaDecoderLayer(m, 16, 64, dtype, weight_dtype=weight_dtype)
+            FixLlamaDecoderLayer(
+                m, 16, 64, dtype, weight_dtype=weight_dtype, rotary_emb=rotary_emb
+            )
         elif isinstance(m, torch.nn.Linear):
             if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
                 FixLinear(m, 100, 64, dtype, parallel_dim=1, block_size=64)

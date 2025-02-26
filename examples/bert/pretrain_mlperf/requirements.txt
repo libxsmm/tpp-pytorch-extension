@@ -1,2 +1,2 @@
-transformers==4.40.0
+transformers==4.49.0
 mlperf-logging @ git+https://github.com/mlperf/logging
