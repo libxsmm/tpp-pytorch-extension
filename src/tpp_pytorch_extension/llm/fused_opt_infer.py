@@ -338,7 +338,7 @@ def OPTForCausalLM_forward_patched(
     return_dict: Optional[bool] = None,
     position_ids: Optional[torch.LongTensor] = None,
     cache_position: Optional[torch.LongTensor] = None,
-    num_logits_to_keep: int = 0,
+    logits_to_keep: Union[int, torch.Tensor] = 0,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     output_attentions = False
     output_hidden_states = False
@@ -367,11 +367,13 @@ def OPTForCausalLM_forward_patched(
     )
     hidden_states = outputs[0]
 
-    # # We only need logits for last token doing text generation
-    # if only_last_logit == True and labels is None:
-    #     hidden_states = hidden_states[:, -1:, :]
-
-    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).contiguous()
+    # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+    slice_indices = (
+        slice(-logits_to_keep, None)
+        if isinstance(logits_to_keep, int)
+        else logits_to_keep
+    )
+    logits = self.lm_head(hidden_states[:, slice_indices, :]).contiguous()
 
     loss = None
     if labels is not None:

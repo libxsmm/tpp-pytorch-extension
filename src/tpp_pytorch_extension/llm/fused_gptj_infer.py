@@ -323,7 +323,7 @@ def GPTJForCausalLM_forward_patched(
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
-    num_logits_to_keep: int = 0,
+    logits_to_keep: int = 0,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     r"""
     labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -367,9 +367,12 @@ def GPTJForCausalLM_forward_patched(
     # if only_last_logit == True and labels is None:
     #    hidden_states = hidden_states[:, -1:, :]
 
-    lm_logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :]).to(
-        torch.float32
+    slice_indices = (
+        slice(-logits_to_keep, None)
+        if isinstance(logits_to_keep, int)
+        else logits_to_keep
     )
+    lm_logits = self.lm_head(hidden_states[:, slice_indices, :]).to(torch.float32)
 
     loss = None
     if labels is not None:
