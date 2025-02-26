@@ -1214,6 +1214,208 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
     }
   }
 };
+
+struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {
+ public:
+  at::Tensor t_Wq, t_Wk, t_Wv, t_Wp;
+  at::Tensor t_Wg, t_Wu, t_Wd;
+  at::Tensor t_Gi, t_Gpa;
+  at::Tensor t_Bq, t_Bk, t_Bv;
+  at::Tensor t_EP; // embed_positions
+  at::Tensor t_Wq_1, t_Wk_1, t_Wv_1, t_Wp_1;
+  at::Tensor t_Wg_1, t_Wu_1, t_Wd_1;
+  bool first_token_remapped = false;
+  float eps;
+  long Nq, Nkv, H;
+  long max_positions, rotary_dim;
+
+  Qwen2DecoderLayer(
+      std::vector<at::Tensor> params,
+      long layer_idx,
+      double eps,
+      long H,
+      long max_positions,
+      long rotary_dim)
+      : LLMBlock("llama_fwd", layer_idx, H),
+        eps(eps),
+        H(H),
+        max_positions(max_positions),
+        rotary_dim(rotary_dim) {
+    int i = 0;
+    t_Gi = params[i++]; // input_ln_gamma
+
+    t_Wq = params[i++]; // q_proj
+    t_Wk = params[i++]; // k_proj
+    t_Wv = params[i++]; // v_proj
+    t_Wp = params[i++]; // out_proj
+
+    t_Gpa = params[i++]; // post_attention_ln_gamma
+
+    t_Wg = params[i++]; // fc_gate
+    t_Wu = params[i++]; // fc_up
+    t_Wd = params[i++]; // fc_down
+
+    t_Bq = params[i++]; // q_proj
+    t_Bk = params[i++]; // k_proj
+    t_Bv = params[i++]; // v_proj
+
+    t_EP = params[i++]; // embed_positions
+
+    if (USE_MXFP4) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_mxfp4(t_Wq);
+      t_Wk = remap_and_quantize_mxfp4(t_Wk);
+      t_Wv = remap_and_quantize_mxfp4(t_Wv);
+      t_Wp = remap_and_quantize_mxfp4(t_Wp);
+      t_Wg = remap_and_quantize_mxfp4(t_Wg);
+      t_Wu = remap_and_quantize_mxfp4(t_Wu);
+      t_Wd = remap_and_quantize_mxfp4(t_Wd);
+    }
+
+    else if (USE_QINT8) {
+      if (t_Wq.dtype() == at::kBFloat16) {
+        remap_for_first_token<bfloat16>();
+      } else {
+        remap_for_first_token<float>();
+      }
+      t_Wq = remap_and_quantize_qint8(t_Wq);
+      t_Wk = remap_and_quantize_qint8(t_Wk);
+      t_Wv = remap_and_quantize_qint8(t_Wv);
+      t_Wp = remap_and_quantize_qint8(t_Wp);
+      t_Wg = remap_and_quantize_qint8(t_Wg);
+      t_Wu = remap_and_quantize_qint8(t_Wu);
+      t_Wd = remap_and_quantize_qint8(t_Wd);
+    }
+
+    Nq = t_Wq.size(0) * t_Wq.size(3) / H;
+    Nkv = t_Wk.size(0) * t_Wk.size(3) / H;
+    auto dt = t_Wq.dtype();
+    if (my_rank == 0) {
+      std::cout << "my_size=" << my_size << " Nq=" << Nq << " Nkv=" << Nkv
+                << " wt dt=" << dt << " H=" << H << std::endl;
+    }
+  }
+
+  template <typename Tw>
+  void remap_for_first_token() {
+    auto dtype = c10::CppTypeToScalarType<Tw>::value;
+    t_Wq_1 = wt_tensor_for_first_token<Tw>(t_Wq.to(dtype));
+    t_Wk_1 = wt_tensor_for_first_token<Tw>(t_Wk.to(dtype));
+    t_Wv_1 = wt_tensor_for_first_token<Tw>(t_Wv.to(dtype));
+    t_Wp_1 = wt_tensor_for_first_token<Tw>(t_Wp.to(dtype));
+    t_Wg_1 = wt_tensor_for_first_token<Tw>(t_Wg.to(dtype));
+    t_Wu_1 = wt_tensor_for_first_token<Tw>(t_Wu.to(dtype));
+    t_Wd_1 = wt_tensor_for_first_token<Tw>(t_Wd.to(dtype));
+    first_token_remapped = true;
+  }
+
+  virtual std::vector<at::Tensor> forward(
+      std::vector<at::Tensor> t_inp,
+      c10::intrusive_ptr<TppCache> t_cache,
+      bool use_cache) override {
+    return this->template forward_common<Qwen2DecoderLayer>(
+        t_inp, t_cache, use_cache);
+  }
+
+  template <typename T>
+  std::vector<at::Tensor> _forward(
+      std::vector<at::Tensor>& t_inp,
+      c10::intrusive_ptr<TppCache> t_cache,
+      bool use_cache) {
+    auto t_HS = t_inp[0];
+    RECORD_SCOPE(pt_op, {t_HS});
+    auto t_am = t_inp[1];
+    auto t_pid = t_inp[2];
+
+    bool weight_reuse = check_weight_reuse(t_HS);
+
+    float scale = 1.0 / my_size;
+
+    auto t_Wq = this->t_Wq;
+    auto t_Wk = this->t_Wk;
+    auto t_Wv = this->t_Wv;
+    auto t_Wp = this->t_Wp;
+    auto t_Wg = this->t_Wg;
+    auto t_Wu = this->t_Wu;
+    auto t_Wd = this->t_Wd;
+
+    if (weight_reuse && TPP_CACHE_REMAPPED_WEIGHTS) {
+      if (!first_token_remapped)
+        remap_for_first_token<T>();
+
+      t_Wq = this->t_Wq_1;
+      t_Wk = this->t_Wk_1;
+      t_Wv = this->t_Wv_1;
+      t_Wp = this->t_Wp_1;
+      t_Wg = this->t_Wg_1;
+      t_Wu = this->t_Wu_1;
+      t_Wd = this->t_Wd_1;
+    }
+
+    auto t_null = t_HS.new_empty({0});
+    auto t_res = t_HS;
+    t_HS = llama_rms_norm<T>(t_HS, t_Gi, eps);
+
+    auto qkv_gemm = GemmCaller<T>(SCOPE_ARG(qkv_gemm));
+    auto proj_gemm = GemmCaller<T>(SCOPE_ARG(proj_gemm));
+    auto i_gemm = GemmCaller<T>(SCOPE_ARG(i_gemm));
+    auto o_gemm = GemmCaller<T>(SCOPE_ARG(o_gemm));
+
+    at::Tensor t_QL, t_KL, t_VL;
+    if (FUSED_QKV_GEMM == 0) {
+      t_QL = qkv_gemm(t_HS, t_Wq, t_Bq);
+      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+
+      t_KL = qkv_gemm(t_HS, t_Wk, t_Bk);
+      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+
+      t_VL = qkv_gemm(t_HS, t_Wv, t_Bv);
+    } else {
+      auto t_qkv_outs =
+          fused_qkv_gemm<T>(t_HS, {t_Wq, t_Wk, t_Wv}, {t_Bq, t_Bk, t_Bv});
+      t_QL = t_qkv_outs[0];
+      t_KL = t_qkv_outs[1];
+      t_VL = t_qkv_outs[2];
+      apply_rotary_pos_emb_llama<T>(t_QL, t_EP, t_pid, Nq, H);
+      apply_rotary_pos_emb_llama<T>(t_KL, t_EP, t_pid, Nkv, H);
+    }
+
+    auto outputs = self_mha<T>(t_QL, t_KL, t_VL, t_am, t_cache);
+
+    auto t_CL = outputs[0];
+
+    auto t_SO = proj_gemm(AddScalePostOp(t_res, scale), t_CL, t_Wp, t_null);
+
+    if (my_size > 1) {
+      allreduce(t_SO);
+    }
+
+    t_res = t_SO;
+
+    t_HS = llama_rms_norm<T>(t_SO, t_Gpa, eps);
+
+    auto t_I = i_gemm(SiluPostOp(), t_HS, t_Wg, t_null);
+    t_I = i_gemm(MulPostOp(t_I), t_HS, t_Wu, t_null);
+    auto t_Out = o_gemm(AddScalePostOp(t_res, scale), t_I, t_Wd, t_null);
+
+    if (my_size > 1) {
+      allreduce(t_Out);
+    }
+
+    outputs[0] = t_Out;
+
+    if (use_cache) {
+      return outputs;
+    } else {
+      return {t_Out};
+    }
+  }
+};
+
 } // namespace tpp_models
 using namespace tpp_models;
 static at::Tensor fc_plain_wrap(
@@ -1286,6 +1488,9 @@ REGISTER_SUBMODULE(_fused_llm_infer, m) {
   py::class_<LlamaDecoderLayer>(m, "LlamaDecoderLayer", py::module_local())
       .def(py::init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
+  py::class_<Qwen2DecoderLayer>(m, "Qwen2DecoderLayer", py::module_local())
+      .def(py::init<std::vector<at::Tensor>, long, double, long, long, long>())
+      .def("forward", &Qwen2DecoderLayer::forward);
 }
 
 TORCH_LIBRARY(tpp_llm, m) {
@@ -1306,4 +1511,8 @@ TORCH_LIBRARY(tpp_llm, m) {
       .def(torch::
                init<std::vector<at::Tensor>, long, double, long, long, long>())
       .def("forward", &LlamaDecoderLayer::forward);
+  m.class_<Qwen2DecoderLayer>("Qwen2DecoderLayer")
+      .def(torch::
+               init<std::vector<at::Tensor>, long, double, long, long, long>())
+      .def("forward", &Qwen2DecoderLayer::forward);
 }

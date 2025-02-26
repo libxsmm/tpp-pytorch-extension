@@ -250,6 +250,12 @@ if args.use_tpp:
         OptimizeModelForLlama(
             model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
         )
+    elif model.config.architectures[0] == "Qwen2ForCausalLM":
+        from tpp_pytorch_extension.llm.fused_qwen2_infer import OptimizeModelForQwen2
+
+        OptimizeModelForQwen2(
+            model, dtype=tpp_dtype, device=device, weight_dtype=weight_dtype
+        )
     else:
         print(type(model.config.architectures))
         print(model.config.architectures)
