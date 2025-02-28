@@ -68,9 +68,9 @@ parser.add_argument(
 parser.add_argument(
     "--weight-dtype",
     type=str,
-    choices=["float32", "bfloat16", "bfloat8", "hfloat8", None],
+    choices=["float32", "bfloat16", "bfloat8", "hfloat8", "mxfp4", "qint8", None],
     default=None,
-    help="bfloat16, float32 or bfloat8 or hfloat8",
+    help="bfloat16, float32 or bfloat8 or hfloat8 or mxfp4 or qint8",
 )
 parser.add_argument(
     "--input-tokens",
@@ -217,7 +217,8 @@ if args.ipex:
 
 if args.use_tpp:
     dist_init()
-    weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
+    # weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
+    weight_dtype = args.weight_dtype
     if args.tpp_no_opt:
         # use tpp only to print first and 2nd token latencies
         pass

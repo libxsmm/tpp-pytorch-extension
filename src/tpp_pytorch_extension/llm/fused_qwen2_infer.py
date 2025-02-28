@@ -107,7 +107,7 @@ def FixQwen2DecoderLayer(
     bc=None,
     layer_dtype=global_layer_dtype,
     weight_dtype=global_layer_dtype,
-    rotary_emb=None,
+    embed_positions=None,
 ):
     if not isinstance(self, transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer):
         return
@@ -164,26 +164,6 @@ def FixQwen2DecoderLayer(
             self.self_attn.v_proj.bias,
         ]
 
-        if rotary_emb is None and hasattr(self.self_attn, "rotary_emb"):
-            rotary_emb = self.self_attn.rotary_emb
-
-        if rotary_emb is not None:
-            # max_position_embeddings = self.self_attn.max_position_embeddings
-            max_position_embeddings = rotary_emb.config.max_position_embeddings
-            position_ids = torch.arange(max_position_embeddings).unsqueeze(0)
-            embed_positions = (
-                torch.cat(
-                    rotary_emb(
-                        self.self_attn.q_proj.weight,
-                        position_ids,
-                    ),
-                    dim=0,
-                )
-                .view([2, max_position_embeddings, -1])
-                .to(torch.float)
-            )
-        else:
-            raise NotImplementedError("Requires self.self_attn.rotary_emb")
         params += [embed_positions]
 
         self.cpp_block = torch.classes.tpp_llm.Qwen2DecoderLayer(
@@ -191,7 +171,7 @@ def FixQwen2DecoderLayer(
             self.self_attn.layer_idx,
             self.input_layernorm.variance_epsilon,
             self.self_attn.head_dim,
-            max_position_embeddings,
+            embed_positions.shape[1],
             self.self_attn.head_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
@@ -207,16 +187,37 @@ def OptimizeModelForQwen2(model, dtype, device="cpu", weight_dtype=None):
         ), "use_sliding_window is not supported for Qwen2 yet!"
     if weight_dtype is None:
         weight_dtype = dtype
-    rotary_emb = None
+    embed_positions = None
     for m in model.modules():
         if isinstance(m, transformers.models.qwen2.modeling_qwen2.Qwen2PreTrainedModel):
             if hasattr(m, "rotary_emb"):
                 rotary_emb = m.rotary_emb
+                max_position_embeddings = rotary_emb.config.max_position_embeddings
+                position_ids = torch.arange(max_position_embeddings).unsqueeze(0)
+                embed_positions = (
+                    torch.cat(
+                        rotary_emb(
+                            torch.empty([1], dtype=torch.float),
+                            position_ids,
+                        ),
+                        dim=0,
+                    )
+                    .view([2, max_position_embeddings, -1])
+                    .to(torch.float)
+                )
                 break
+    if embed_positions is None:
+        raise NotImplementedError("Unable to create embed_positions")
+
     for m in model.modules():
         if isinstance(m, transformers.models.qwen2.modeling_qwen2.Qwen2DecoderLayer):
             FixQwen2DecoderLayer(
-                m, 16, 64, dtype, weight_dtype=weight_dtype, rotary_emb=rotary_emb
+                m,
+                16,
+                64,
+                dtype,
+                weight_dtype,
+                embed_positions,
             )
         elif isinstance(m, torch.nn.Linear):
             if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:

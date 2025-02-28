@@ -20,6 +20,7 @@ from tpp_pytorch_extension.utils.blocked_layout import (
 )
 from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
 from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
+from tpp_pytorch_extension._C import _qtype as qtype
 import tpp_pytorch_extension
 import time
 from contextlib import contextmanager
@@ -381,7 +382,8 @@ def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
     def maybe_block_params(self):
-        self.weight.block()
+        if hasattr(self.weight, "block"):
+            self.weight.block()
         if self.bias is not None:
             self.bias.block()
 
@@ -444,6 +446,18 @@ def FixLinear(
         self.parallelize(parallel_dim, get_rank(), get_size(), block_size=block_size)
     if weight_dtype is None:
         weight_dtype = layer_dtype
+    elif isinstance(weight_dtype, str):
+        if weight_dtype not in ["mxfp4", "qint8"]:
+            try:
+                weight_dtype = getattr(torch, weight_dtype)
+            except:
+                raise ValueError(f"Unknown weight_dtype {weight_dtype}")
+    else:
+        if not isinstance(weight_dtype, torch.dtype):
+            raise ValueError(
+                f"weight_dtype must be either str or torch.dtype but is {type(weight_dtype)}"
+            )
+
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
@@ -464,13 +478,27 @@ def FixLinear(
                     ],
                 ],
                 [0, 2, 3, 1, 4],
-                weight_dtype,
+                layer_dtype,
             )
         )
 
     if self.bias is not None:
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
+    block(self)
+    if isinstance(weight_dtype, str):
+        if weight_dtype == "mxfp4":
+            self.weight = torch.nn.Parameter(
+                qtype.remap_and_quantize_mxfp4(self.weight), requires_grad=False
+            )
+        elif weight_dtype == "qint8":
+            self.weight = torch.nn.Parameter(
+                qtype.remap_and_quantize_qint8(self.weight), requires_grad=False
+            )
+    else:
+        self.weight = torch.nn.Parameter(
+            self.weight.data.to(weight_dtype), requires_grad=False
+        )
 
 
 def ShardLinear(m, dim, rank, size, block_size=1):

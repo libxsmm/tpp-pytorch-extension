@@ -641,30 +641,40 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
 
     t_EP = params[i++]; // embed_positions
 
-    if (USE_MXFP4) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+    if (t_Wq.is_quantized()) {
+      t_Wq_1 = t_Wq;
+      t_Wk_1 = t_Wk;
+      t_Wv_1 = t_Wv;
+      t_Wp_1 = t_Wp;
+      t_Wi_1 = t_Wi;
+      t_Wo_1 = t_Wo;
+      first_token_remapped = true;
+    } else {
+      if (USE_MXFP4) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_mxfp4(t_Wq);
+        t_Wk = remap_and_quantize_mxfp4(t_Wk);
+        t_Wv = remap_and_quantize_mxfp4(t_Wv);
+        t_Wp = remap_and_quantize_mxfp4(t_Wp);
+        t_Wi = remap_and_quantize_mxfp4(t_Wi);
+        t_Wo = remap_and_quantize_mxfp4(t_Wo);
+      } else if (USE_QINT8) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint8(t_Wq);
+        t_Wk = remap_and_quantize_qint8(t_Wk);
+        t_Wv = remap_and_quantize_qint8(t_Wv);
+        t_Wp = remap_and_quantize_qint8(t_Wp);
+        t_Wi = remap_and_quantize_qint8(t_Wi);
+        t_Wo = remap_and_quantize_qint8(t_Wo);
       }
-      t_Wq = remap_and_quantize_mxfp4(t_Wq);
-      t_Wk = remap_and_quantize_mxfp4(t_Wk);
-      t_Wv = remap_and_quantize_mxfp4(t_Wv);
-      t_Wp = remap_and_quantize_mxfp4(t_Wp);
-      t_Wi = remap_and_quantize_mxfp4(t_Wi);
-      t_Wo = remap_and_quantize_mxfp4(t_Wo);
-    } else if (USE_QINT8) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
-      }
-      t_Wq = remap_and_quantize_qint8(t_Wq);
-      t_Wk = remap_and_quantize_qint8(t_Wk);
-      t_Wv = remap_and_quantize_qint8(t_Wv);
-      t_Wp = remap_and_quantize_qint8(t_Wp);
-      t_Wi = remap_and_quantize_qint8(t_Wi);
-      t_Wo = remap_and_quantize_qint8(t_Wo);
     }
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
@@ -865,32 +875,42 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
     t_Wo = params[i++]; // fc2
     t_Bo = params[i++];
 
-    if (USE_MXFP4) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+    if (t_Wq.is_quantized()) {
+      t_Wq_1 = t_Wq;
+      t_Wk_1 = t_Wk;
+      t_Wv_1 = t_Wv;
+      t_Wp_1 = t_Wp;
+      t_Wi_1 = t_Wi;
+      t_Wo_1 = t_Wo;
+      first_token_remapped = true;
+    } else {
+      if (USE_MXFP4) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_mxfp4(t_Wq);
+        t_Wk = remap_and_quantize_mxfp4(t_Wk);
+        t_Wv = remap_and_quantize_mxfp4(t_Wv);
+        t_Wp = remap_and_quantize_mxfp4(t_Wp);
+        t_Wi = remap_and_quantize_mxfp4(t_Wi);
+        t_Wo = remap_and_quantize_mxfp4(t_Wo);
       }
-      t_Wq = remap_and_quantize_mxfp4(t_Wq);
-      t_Wk = remap_and_quantize_mxfp4(t_Wk);
-      t_Wv = remap_and_quantize_mxfp4(t_Wv);
-      t_Wp = remap_and_quantize_mxfp4(t_Wp);
-      t_Wi = remap_and_quantize_mxfp4(t_Wi);
-      t_Wo = remap_and_quantize_mxfp4(t_Wo);
-    }
 
-    else if (USE_QINT8) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+      else if (USE_QINT8) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint8(t_Wq);
+        t_Wk = remap_and_quantize_qint8(t_Wk);
+        t_Wv = remap_and_quantize_qint8(t_Wv);
+        t_Wp = remap_and_quantize_qint8(t_Wp);
+        t_Wi = remap_and_quantize_qint8(t_Wi);
+        t_Wo = remap_and_quantize_qint8(t_Wo);
       }
-      t_Wq = remap_and_quantize_qint8(t_Wq);
-      t_Wk = remap_and_quantize_qint8(t_Wk);
-      t_Wv = remap_and_quantize_qint8(t_Wv);
-      t_Wp = remap_and_quantize_qint8(t_Wp);
-      t_Wi = remap_and_quantize_qint8(t_Wi);
-      t_Wo = remap_and_quantize_qint8(t_Wo);
     }
 
     N = t_Wq.size(0) * t_Wq.size(3) / H;
@@ -1060,34 +1080,45 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
 
     t_EP = params[i++]; // embed_positions
 
-    if (USE_MXFP4) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+    if (t_Wq.is_quantized()) {
+      t_Wq_1 = t_Wq;
+      t_Wk_1 = t_Wk;
+      t_Wv_1 = t_Wv;
+      t_Wp_1 = t_Wp;
+      t_Wg_1 = t_Wg;
+      t_Wu_1 = t_Wu;
+      t_Wd_1 = t_Wd;
+      first_token_remapped = true;
+    } else {
+      if (USE_MXFP4) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_mxfp4(t_Wq);
+        t_Wk = remap_and_quantize_mxfp4(t_Wk);
+        t_Wv = remap_and_quantize_mxfp4(t_Wv);
+        t_Wp = remap_and_quantize_mxfp4(t_Wp);
+        t_Wg = remap_and_quantize_mxfp4(t_Wg);
+        t_Wu = remap_and_quantize_mxfp4(t_Wu);
+        t_Wd = remap_and_quantize_mxfp4(t_Wd);
       }
-      t_Wq = remap_and_quantize_mxfp4(t_Wq);
-      t_Wk = remap_and_quantize_mxfp4(t_Wk);
-      t_Wv = remap_and_quantize_mxfp4(t_Wv);
-      t_Wp = remap_and_quantize_mxfp4(t_Wp);
-      t_Wg = remap_and_quantize_mxfp4(t_Wg);
-      t_Wu = remap_and_quantize_mxfp4(t_Wu);
-      t_Wd = remap_and_quantize_mxfp4(t_Wd);
-    }
 
-    else if (USE_QINT8) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+      else if (USE_QINT8) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint8(t_Wq);
+        t_Wk = remap_and_quantize_qint8(t_Wk);
+        t_Wv = remap_and_quantize_qint8(t_Wv);
+        t_Wp = remap_and_quantize_qint8(t_Wp);
+        t_Wg = remap_and_quantize_qint8(t_Wg);
+        t_Wu = remap_and_quantize_qint8(t_Wu);
+        t_Wd = remap_and_quantize_qint8(t_Wd);
       }
-      t_Wq = remap_and_quantize_qint8(t_Wq);
-      t_Wk = remap_and_quantize_qint8(t_Wk);
-      t_Wv = remap_and_quantize_qint8(t_Wv);
-      t_Wp = remap_and_quantize_qint8(t_Wp);
-      t_Wg = remap_and_quantize_qint8(t_Wg);
-      t_Wu = remap_and_quantize_qint8(t_Wu);
-      t_Wd = remap_and_quantize_qint8(t_Wd);
     }
 
     Nq = t_Wq.size(0) * t_Wq.size(3) / H;
@@ -1261,34 +1292,45 @@ struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {
 
     t_EP = params[i++]; // embed_positions
 
-    if (USE_MXFP4) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+    if (t_Wq.is_quantized()) {
+      t_Wq_1 = t_Wq;
+      t_Wk_1 = t_Wk;
+      t_Wv_1 = t_Wv;
+      t_Wp_1 = t_Wp;
+      t_Wg_1 = t_Wg;
+      t_Wu_1 = t_Wu;
+      t_Wd_1 = t_Wd;
+      first_token_remapped = true;
+    } else {
+      if (USE_MXFP4) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_mxfp4(t_Wq);
+        t_Wk = remap_and_quantize_mxfp4(t_Wk);
+        t_Wv = remap_and_quantize_mxfp4(t_Wv);
+        t_Wp = remap_and_quantize_mxfp4(t_Wp);
+        t_Wg = remap_and_quantize_mxfp4(t_Wg);
+        t_Wu = remap_and_quantize_mxfp4(t_Wu);
+        t_Wd = remap_and_quantize_mxfp4(t_Wd);
       }
-      t_Wq = remap_and_quantize_mxfp4(t_Wq);
-      t_Wk = remap_and_quantize_mxfp4(t_Wk);
-      t_Wv = remap_and_quantize_mxfp4(t_Wv);
-      t_Wp = remap_and_quantize_mxfp4(t_Wp);
-      t_Wg = remap_and_quantize_mxfp4(t_Wg);
-      t_Wu = remap_and_quantize_mxfp4(t_Wu);
-      t_Wd = remap_and_quantize_mxfp4(t_Wd);
-    }
 
-    else if (USE_QINT8) {
-      if (t_Wq.dtype() == at::kBFloat16) {
-        remap_for_first_token<bfloat16>();
-      } else {
-        remap_for_first_token<float>();
+      else if (USE_QINT8) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint8(t_Wq);
+        t_Wk = remap_and_quantize_qint8(t_Wk);
+        t_Wv = remap_and_quantize_qint8(t_Wv);
+        t_Wp = remap_and_quantize_qint8(t_Wp);
+        t_Wg = remap_and_quantize_qint8(t_Wg);
+        t_Wu = remap_and_quantize_qint8(t_Wu);
+        t_Wd = remap_and_quantize_qint8(t_Wd);
       }
-      t_Wq = remap_and_quantize_qint8(t_Wq);
-      t_Wk = remap_and_quantize_qint8(t_Wk);
-      t_Wv = remap_and_quantize_qint8(t_Wv);
-      t_Wp = remap_and_quantize_qint8(t_Wp);
-      t_Wg = remap_and_quantize_qint8(t_Wg);
-      t_Wu = remap_and_quantize_qint8(t_Wu);
-      t_Wd = remap_and_quantize_qint8(t_Wd);
     }
 
     Nq = t_Wq.size(0) * t_Wq.size(3) / H;
