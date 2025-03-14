@@ -23,8 +23,8 @@ int64_t act_dim = act.size(2);
 
 int64_t num_intermediate_channel = projection_weight.size(0) / 2;
 
-// act = at::layer_norm(act, act_dim, layer_norm_input_weight,
-// layer_norm_input_bias).contiguous();
+act = at::layer_norm(act, act_dim, layer_norm_input_weight,
+layer_norm_input_bias).contiguous();
 
 int64_t S_t = Sp_t;
 if (Sp_t % TRI_BLOCKSIZE != 0) {
@@ -50,29 +50,6 @@ auto act_a = GetVLAPtr<T>(act, {S_t, act_dim});
 
 auto layernorm =
     SCOPEIT(LayerNormFwdTPP<T>(1, TRI_BLOCKSIZE, act_dim, 0.00001), LAYER_NORM);
-auto input_gamma_a = GetVLAPtr<T>(left_norm_input_weight, {1L});
-auto input_beta_a = GetVLAPtr<T>(left_norm_input_bias, {1L});
-
-{
-  RECORD_SCOPE(left_norm_input, {act, left_norm_input_weight});
-  {
-    RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#pragma omp parallel for collapse(2)
-    for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += TRI_BLOCKSIZE) {
-        T tmp_mean[act_dim];
-        T tmp_var[act_dim];
-        layernorm(
-            &act_a[i][j][0],
-            &input_gamma_a[0][0],
-            &input_beta_a[0][0],
-            &tmp_mean[0],
-            &tmp_var[0],
-            &act_a[i][j][0]);
-      }
-    }
-  }
-}
 
 auto input_act = act;
 
