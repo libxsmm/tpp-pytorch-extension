@@ -23,8 +23,8 @@ int64_t act_dim = act.size(2);
 
 int64_t num_intermediate_channel = projection_weight.size(0) / 2;
 
-act = at::layer_norm(act, act_dim, layer_norm_input_weight,
-layer_norm_input_bias).contiguous();
+act = at::layer_norm(act, act_dim, left_norm_input_weight, left_norm_input_bias)
+          .contiguous();
 
 int64_t S_t = Sp_t;
 if (Sp_t % TRI_BLOCKSIZE != 0) {
@@ -45,6 +45,8 @@ if (Bp_t % TRI_BLOCKSIZE != 0) {
   act = at::cat({act, act_pad}, 0);
   mask = at::cat({mask, mask_pad}, 0);
 }
+
+auto act_a = GetVLAPtr<T>(act, {S_t, act_dim});
 
 auto layernorm =
     SCOPEIT(LayerNormFwdTPP<T>(1, TRI_BLOCKSIZE, act_dim, 0.00001), LAYER_NORM);
