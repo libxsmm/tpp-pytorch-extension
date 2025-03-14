@@ -405,86 +405,115 @@ if (S_t < 2560) {
 
   auto a_softmax_online_edge_tpp = SCOPEIT(
       (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
-  // }
-
-  // {
-    // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
-    // {
-      // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-
-//#pragma omp parallel for collapse(3)
 
   int max_threads = omp_get_max_threads();
   auto barriers = std::vector<Barrier>(max_threads/Barrier::size);
   #pragma omp parallel
   {
-    int start = 0;
+    int thread_start = 0;
     int tid = omp_get_thread_num();
     int cid = tid / Barrier::size;
     tid = tid % Barrier::size;
-    #pragma omp for collapse(3)
+
+    int64_t a_gemm_ticks = 0;
+    int64_t bias_ticks = 0;
+    int64_t add_nbbias_ticks = 0;
+    int64_t softmax_ticks = 0;
+    int64_t c_gemm_ticks = 0;
+    int64_t sf_fixup_ticks = 0;
+    int64_t write_results_ticks = 0;
+    int64_t starting_ticks = 0;
+    int64_t first_barrier_ticks = 0;
+    int64_t second_barrier_ticks = 0;
+    int64_t third_barrier_ticks = 0;
+
+    LIBXSMM_ALIGNED(float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
+    LIBXSMM_ALIGNED(T tmp_S_bf16[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
+    LIBXSMM_ALIGNED(float tmp_o1[A_BLOCKSIZE * H_t], 64);
+    LIBXSMM_ALIGNED(float tmp_o2[A_BLOCKSIZE * H_t], 64);
+    LIBXSMM_ALIGNED(float omax[A_BLOCKSIZE], 64);
+    LIBXSMM_ALIGNED(float osum[A_BLOCKSIZE], 64);
+    LIBXSMM_ALIGNED(float cmax[A_BLOCKSIZE], 64);
+    LIBXSMM_ALIGNED(float csum[A_BLOCKSIZE], 64);
+
+    int64_t start_full = rdtsc_ordered();
+
+    #pragma omp for collapse(3) nowait
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            float tmp_o1[A_BLOCKSIZE * H_t];
-            float tmp_o2[A_BLOCKSIZE * H_t];
-            float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE];
-            T tmp_S_bf16[A_BLOCKSIZE * Ak_BLOCKSIZE];
-            float omax[A_BLOCKSIZE], osum[A_BLOCKSIZE], cmax[A_BLOCKSIZE],
-                csum[A_BLOCKSIZE];
-
+            int64_t start;
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
-              if (tid==1 && start == 0){
-                barriers[cid].wait(tid);
-                start = 1;
-              }
+              // start = rdtsc_ordered();
+              // if (tid==1 && thread_start == 0){
+              //   barriers[cid].wait(tid);
+              //   thread_start = 1;
+              // }
+              // starting_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
               a_brgemm_tpp(
                   &q_a[i][j1][n][0],
                   &k_a[i][n * H_t * S_t + 2 * j2],
                   tmp_S,
                   1,
                   false);
+              // a_gemm_ticks += rdtsc_ordered() - start;
 
-              if (tid==0 && start == 0){
-                barriers[cid].wait(tid);
-                start = 1;
-              }
-
+              // start = rdtsc_ordered();
+              // if (tid==0 && thread_start == 0){
+              //   barriers[cid].wait(tid);
+              //   thread_start = 1;
+              // }
+              // first_barrier_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
               if (bias_flag)
                 a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
+              // bias_ticks += rdtsc_ordered() - start;
 
+              // start = rdtsc_ordered();
               if (flag) {
                 a_add_nbbias_online_tpp(
                     &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
               }
-              if (tid == 1)
-                barriers[cid].wait(tid);
+              // add_nbbias_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
+              // if (tid == 1)
+              //   barriers[cid].wait(tid);
+              // second_barrier_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
               if (j2 == 0) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, omax, osum, nullptr);
               } else {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, cmax, csum, omax);
               }
-              if (tid == 0)
-                barriers[cid].wait(tid);
+              // softmax_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
+              // if (tid == 0)
+              //   barriers[cid].wait(tid);
+              // third_barrier_ticks += rdtsc_ordered() - start;
 
+              // start = rdtsc_ordered();
               c_brgemm_online_tpp(
                   tmp_S_bf16,
                   &v_a[i][j2 * N_t * H_t + n * H_t * 2],
                   tmp_o1,
                   1,
                   false); // O = P*V
+              // c_gemm_ticks += rdtsc_ordered() - start;
 
+              // start = rdtsc_ordered();
               if (j2 == 0) {
                 a_cpy2_tpp(tmp_o1, tmp_o2);
               } else {
                 a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               }
+              // sf_fixup_ticks += rdtsc_ordered() - start;
             }
 
             if (S_t % Ak_BLOCKSIZE != 0) {
-              float* tmp_S_edge = new float[A_BLOCKSIZE * lastBlockSize];
-              T* tmp_S_bf16_edge = new T[A_BLOCKSIZE * lastBlockSize];
+              float* tmp_S_edge = new (std::align_val_t(64)) float[A_BLOCKSIZE * lastBlockSize];
+              T* tmp_S_bf16_edge = new (std::align_val_t(64)) T[A_BLOCKSIZE * lastBlockSize];
               int j2 = (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
               a_brgemm_edge_tpp(
                   &q_a[i][j1][n][0],
@@ -517,10 +546,13 @@ if (S_t < 2560) {
           }
         }
       }
+      int64_t end = rdtsc_ordered();
+      printf( "Time taken by thread %d is %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf\n", omp_get_thread_num(), starting_ticks/(double)1e9,
+      a_gemm_ticks/(double)1e9, first_barrier_ticks/(double)1e9,
+      bias_ticks/(double)1e9, add_nbbias_ticks/(double)1e9, second_barrier_ticks/(double)1e9, softmax_ticks/(double)1e9, third_barrier_ticks/(double)1e9, c_gemm_ticks/(double)1e9, 
+      sf_fixup_ticks/(double)1e9, (end - start_full)/(double)1e9 );
     }
   }
-//   }
-// }
 
 lda = HS_t;
 ldb = N_t * H_t;

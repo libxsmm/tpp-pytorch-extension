@@ -345,41 +345,33 @@ if (S_t < 2048) {
   //   // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
   //   {
   //     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-
-  #pragma omp parallel
-  {
-    printf("Hello from thread %d\n", omp_get_thread_num());
-    unsigned csr = __builtin_ia32_stmxcsr();
-    printf("csr first : %u, tid %d\n", csr, omp_get_thread_num());
-  }
-
+#ifdef __x86_64__
   _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
   _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+  _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST);
+#endif
 
   #pragma omp parallel
   {
-    unsigned csr = __builtin_ia32_stmxcsr();
-    printf("csr second : %u, tid %d\n", csr, omp_get_thread_num());
-    // double wtime = omp_get_wtime();
+    // unsigned csr = __builtin_ia32_stmxcsr();
+    // printf("csr : %u, tid %d\n", csr, omp_get_thread_num());
     int64_t a_gemm_ticks = 0;
     int64_t bias_ticks = 0;
     int64_t add_nbbias_ticks = 0;
     int64_t softmax_ticks = 0;
     int64_t c_gemm_ticks = 0;
     int64_t sf_fixup_ticks = 0;
-    int64_t start_full = rdtsc_ordered();
-    // T tmp_o1[A_BLOCKSIZE * H_t];
-    // T tmp_o2[A_BLOCKSIZE * H_t];
-    // T tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE];
+    int64_t write_results_ticks = 0;
+
     LIBXSMM_ALIGNED(float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float tmp_o1[A_BLOCKSIZE * H_t], 64);
     LIBXSMM_ALIGNED(float tmp_o2[A_BLOCKSIZE * H_t], 64);
-    // float omax[A_BLOCKSIZE], osum[A_BLOCKSIZE], cmax[A_BLOCKSIZE],
-    //     csum[A_BLOCKSIZE];
     LIBXSMM_ALIGNED(float omax[A_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float osum[A_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float cmax[A_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float csum[A_BLOCKSIZE], 64);
+
+    int64_t start_full = rdtsc_ordered();
       #pragma omp for collapse(3) nowait
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
@@ -388,55 +380,47 @@ if (S_t < 2048) {
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
 
-              start = rdtsc_ordered();
+              // start = rdtsc_ordered();
               a_brgemm_tpp(
                   &q_a[i][j1][n][0], &k_a[i][n * H_t * S_t + j2], tmp_S, 1);
-              // memset(tmp_S, 0, A_BLOCKSIZE * Ak_BLOCKSIZE * sizeof(float));
-              a_gemm_ticks += rdtsc_ordered() - start;
+              // a_gemm_ticks += rdtsc_ordered() - start;
 
-              start = rdtsc_ordered();
+              // start = rdtsc_ordered();
               // if (bias_flag)
               //   a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
-              bias_ticks += rdtsc_ordered() - start;
+              // bias_ticks += rdtsc_ordered() - start;
 
-              start = rdtsc_ordered();
+              // start = rdtsc_ordered();
               // if (flag)
               //   a_add_nbbias_online_tpp(
               //       &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
-              add_nbbias_ticks += rdtsc_ordered() - start;
+              // add_nbbias_ticks += rdtsc_ordered() - start;
 
-              start = rdtsc_ordered();
+              // start = rdtsc_ordered();
               if (j2 == 0) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S, omax, osum, nullptr);
               } else {
                 a_softmax_online_tpp(1, tmp_S, tmp_S, cmax, csum, omax);
               }
   
-              softmax_ticks += rdtsc_ordered() - start;
+              // softmax_ticks += rdtsc_ordered() - start;
 
-              // for (int i = 0; i < A_BLOCKSIZE * Ak_BLOCKSIZE; i++) {
-              //   // tmp_S[i] = (rand()%10)*0.1;
-              //   if(isnan(tmp_S[i]) || isinf(tmp_S[i])) {
-              //     printf("NAN detected in tmp_S\n");
-              //   }
-              // }
-
-              start = rdtsc_ordered();
+              // start = rdtsc_ordered();
               c_brgemm_tpp(tmp_S, &v_a[i][j2][n][0], tmp_o1,
                            1); // O = P*V
-              c_gemm_ticks += rdtsc_ordered() - start;
+              // c_gemm_ticks += rdtsc_ordered() - start;
 
-              start = rdtsc_ordered();
-              // if (j2 == 0) {
-              //   a_cpy2_tpp(tmp_o1, tmp_o2);
-              // } else {
-              //   a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
-              // }
-              sf_fixup_ticks += rdtsc_ordered() - start;
+              // start = rdtsc_ordered();
+              if (j2 == 0) {
+                a_cpy2_tpp(tmp_o1, tmp_o2);
+              } else {
+                a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
+              }
+              // sf_fixup_ticks += rdtsc_ordered() - start;
             }
 
             if (S_t % Ak_BLOCKSIZE != 0) {
-              T* tmp_S_edge = new T[A_BLOCKSIZE * lastBlockSize];
+              T* tmp_S_edge = new (std::align_val_t(64)) T[A_BLOCKSIZE * lastBlockSize];
               int j2 = (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
               a_brgemm_edge_tpp(
                   &q_a[i][j1][n][0],
@@ -459,21 +443,17 @@ if (S_t < 2048) {
               delete[] tmp_S_edge;
             }
 
-            // a_softmax_scale_online(&tmp_o2[0], osum);
-            a_cpy_tpp(&tmp_o1[0], &weighted_avg_a[i][j1][n][0]);
+            start = rdtsc_ordered();
+            a_softmax_scale_online(&tmp_o2[0], osum);
+            a_cpy_tpp(&tmp_o2[0], &weighted_avg_a[i][j1][n][0]);
+            write_results_ticks += rdtsc_ordered() - start;
           }
         }
       }
 
-    
-    // wtime = omp_get_wtime() - wtime;
-    // printf( "Time taken by thread %d is %f\n", omp_get_thread_num(), wtime );
-
     int64_t end = rdtsc_ordered();
-    printf( "Time taken by thread %d is %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf\n", omp_get_thread_num(), a_gemm_ticks/(double)1e9, 
-    bias_ticks/(double)1e9, add_nbbias_ticks/(double)1e9, softmax_ticks/(double)1e9, c_gemm_ticks/(double)1e9, sf_fixup_ticks/(double)1e9, (end - start_full)/(double)1e9 );
-    
-    // printf( "Overall Time taken by thread %d is %ld\n", omp_get_thread_num(), end - start_full);
+    printf( "Time taken by thread %d is %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf\n", omp_get_thread_num(), a_gemm_ticks/(double)1e9, 
+    bias_ticks/(double)1e9, add_nbbias_ticks/(double)1e9, softmax_ticks/(double)1e9, c_gemm_ticks/(double)1e9, sf_fixup_ticks/(double)1e9, write_results_ticks/(double)1e9, (end - start_full)/(double)1e9 );
   }
 //   }
 }

@@ -149,21 +149,6 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
   float** output_b = new float*[num_layer];
   T** output = new T*[num_layer];
 
-
-  // // Allocate memory for input tensors
-  // T* q_data = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
-  // T* m_data = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
-  // float* bias = new (std::align_val_t(64)) float[batch_size * seq_len];
-  // float* nonbatched_bias = new (std::align_val_t(64)) float[1 * num_heads * seq_len * seq_len];
-  // T* query_w = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
-  // T* key_w = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
-  // T* value_w = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
-  // T* gating_w = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
-  // float* gating_b = new (std::align_val_t(64)) float[num_heads * head_size];
-  // T* output_w = new (std::align_val_t(64)) T[num_heads * head_size * embedding_dim];
-  // float* output_b = new (std::align_val_t(64)) float[embedding_dim];
-  // T* output = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
-
   // Initialize input tensors with random values
   for (int l = 0; l < num_layer; l++) {
     q_data[l] = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
@@ -182,8 +167,6 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
     for (int i = 0; i < batch_size*seq_len*embedding_dim; ++i) {
       q_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
       m_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
-      // q_data[l][i] = 1;
-      // m_data[l][i] = 2;
     }
     for (int i = 0; i < batch_size*seq_len; ++i) {
       bias[l][i] = static_cast<float>(rand()) / RAND_MAX;
@@ -196,10 +179,6 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
           key_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
           value_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
           gating_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
-          // query_w[l][i] = 1;
-          // key_w[l][i] = 2;
-          // value_w[l][i] = 3;
-          // gating_w[l][i] = 4;
     }
     for (int i = 0; i < num_heads * head_size; ++i) {
       gating_b[l][i] = static_cast<float>(rand()) / RAND_MAX;
