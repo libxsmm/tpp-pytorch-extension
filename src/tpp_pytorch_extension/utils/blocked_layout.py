@@ -327,6 +327,7 @@ class BlockedModule(torch.nn.Module):
         error_msgs,
     ):
         blocked_params = []
+        local_metadata["assign_to_params_buffers"] = False
         for p in self.parameters(recurse=False):
             if isinstance(p, BlockedParameter) and p.is_blocked():
                 p.unblock()

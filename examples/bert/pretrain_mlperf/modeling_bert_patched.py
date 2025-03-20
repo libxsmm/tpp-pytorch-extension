@@ -17,8 +17,20 @@
 """PyTorch BERT model. """
 
 import transformers
+import torch
 from transformers.models.bert.modeling_bert import *
 from transformers.models.bert.modeling_bert import _CONFIG_FOR_DOC
+
+from transformers.models.bert.modeling_bert import (
+    BERT_START_DOCSTRING,
+    BERT_INPUTS_DOCSTRING,
+    BertPreTrainingHeads,
+    BertForPreTrainingOutput,
+    CrossEntropyLoss,
+    add_start_docstrings,
+    add_start_docstrings_to_model_forward,
+    replace_return_docstrings,
+)
 
 
 def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
