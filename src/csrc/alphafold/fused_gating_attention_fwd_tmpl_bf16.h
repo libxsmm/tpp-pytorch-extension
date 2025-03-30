@@ -114,7 +114,7 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          float tmp[QKV_BLOCKSIZE][N_t][H_t];
+          LIBXSMM_ALIGNED(float tmp[QKV_BLOCKSIZE][N_t][H_t], 64);
           zero_tpp(&tmp[0][0][0]);
           q_brgemm_tpp(
               &q_data_a[i][j][0],
@@ -170,7 +170,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
           k_trans_tpp(&tmp[0], &k_a[i][2 * j]);
@@ -195,7 +195,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
           v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t]);
@@ -258,9 +258,9 @@ if (S_t < 2560) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            T tmp_o[A_BLOCKSIZE * H_t];
-            T tmp_logits_bf16[A_BLOCKSIZE][S_t];
-            float tmp_logits[A_BLOCKSIZE][S_t];
+            LIBXSMM_ALIGNED(T tmp_o[A_BLOCKSIZE * H_t], 64);
+            LIBXSMM_ALIGNED(T tmp_logits_bf16[A_BLOCKSIZE][S_t], 64);
+            LIBXSMM_ALIGNED(float tmp_logits[A_BLOCKSIZE][S_t], 64);
 
             a_brgemm_tpp.config();
             for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
@@ -399,12 +399,14 @@ if (S_t < 2560) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            float tmp_o1[A_BLOCKSIZE * H_t];
-            float tmp_o2[A_BLOCKSIZE * H_t];
-            float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE];
-            T tmp_S_bf16[A_BLOCKSIZE * Ak_BLOCKSIZE];
-            float omax[A_BLOCKSIZE], osum[A_BLOCKSIZE], cmax[A_BLOCKSIZE],
-                csum[A_BLOCKSIZE];
+            LIBXSMM_ALIGNED(float tmp_o1[A_BLOCKSIZE * H_t], 64);
+            LIBXSMM_ALIGNED(float tmp_o2[A_BLOCKSIZE * H_t], 64);
+            LIBXSMM_ALIGNED(float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(T tmp_S_bf16[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(float omax[A_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(float osum[A_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(float cmax[A_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(float csum[A_BLOCKSIZE], 64);
 
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
@@ -532,9 +534,9 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-          float tmp[C_BLOCKSIZE * N_t * H_t]; // Should be in float for bf16
-          float tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
-          T tmp_bf16[C_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(float tmp[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(float tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(T tmp_bf16[C_BLOCKSIZE * N_t * H_t], 64);
 
           g_brgemm_tpp(
               &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
