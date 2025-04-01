@@ -181,13 +181,14 @@ auto sigmoid_tpp = SCOPEIT(
     weight_trans_tpp(&gate_weight_a[0][0], &trans_gate_weight_a[0][0]);
 
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-// for (int i = 0; i < B_t; i++) {
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i += TRI_BLOCKSIZE) {
       for (int j = 0; j < S_t; j += TRI_BLOCKSIZE) {
-        T tmp[TRI_BLOCKSIZE][2 * num_intermediate_channel];
-        T tmp_gate_values[TRI_BLOCKSIZE][2 * num_intermediate_channel];
-        T tmp_proj[TRI_BLOCKSIZE][2 * num_intermediate_channel];
+        LIBXSMM_ALIGNED(T tmp[TRI_BLOCKSIZE][2 * num_intermediate_channel], 64);
+        LIBXSMM_ALIGNED(
+            T tmp_gate_values[TRI_BLOCKSIZE][2 * num_intermediate_channel], 64);
+        LIBXSMM_ALIGNED(
+            T tmp_proj[TRI_BLOCKSIZE][2 * num_intermediate_channel], 64);
 
         for (int ib = 0; ib < TRI_BLOCKSIZE; ib++) {
           proj_brgemm_tpp(
@@ -276,7 +277,8 @@ if (equation_flag == 0) { // "Outgoing" edges equation = 'ikc,jkc->ijc'
       for (int a = 0; a < num_intermediate_channel; a++) {
         for (int i = 0; i < B_t; i += TRI_BLOCKSIZE) {
           for (int j = 0; j < B_t; j += TRI_BLOCKSIZE) {
-            T tmp[S_t / TRI_BLOCKSIZE][TRI_BLOCKSIZE][TRI_BLOCKSIZE];
+            LIBXSMM_ALIGNED(
+                T tmp[S_t / TRI_BLOCKSIZE][TRI_BLOCKSIZE][TRI_BLOCKSIZE], 64);
             for (int ib = 0; ib < S_t / TRI_BLOCKSIZE; ib++)
               equation_trans_tpp(
                   &right_proj_act_a[a][j / TRI_BLOCKSIZE][ib][0][0],
@@ -390,9 +392,9 @@ act_a = GetVLAPtr<T>(act, {S_t, act_dim});
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += TRI_BLOCKSIZE) {
-        T tmp[TRI_BLOCKSIZE][act_dim];
-        T tmp_mean[act_dim];
-        T tmp_var[act_dim];
+        LIBXSMM_ALIGNED(T tmp[TRI_BLOCKSIZE][act_dim], 64);
+        LIBXSMM_ALIGNED(T tmp_mean[act_dim], 64);
+        LIBXSMM_ALIGNED(T tmp_var[act_dim], 64);
 
         layernorm(
             &act_a[i][j][0],
@@ -422,8 +424,8 @@ act_a = GetVLAPtr<T>(act, {S_t, act_dim});
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += TRI_BLOCKSIZE) {
-        T tmp[TRI_BLOCKSIZE][act_dim];
-        T tmp_gate_values[TRI_BLOCKSIZE][act_dim];
+        LIBXSMM_ALIGNED(T tmp[TRI_BLOCKSIZE][act_dim], 64);
+        LIBXSMM_ALIGNED(T tmp_gate_values[TRI_BLOCKSIZE][act_dim], 64);
 
         outgate_brgemm_tpp(
             &input_act_a[i][j][0],

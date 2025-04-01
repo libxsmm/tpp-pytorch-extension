@@ -130,31 +130,31 @@ class Net2(nn.Module):  # Second network containing optimized attention layer
         return x
 
 
-net1 = Net1()
-net2 = Net2()
+net1 = Net1().to(torch.bfloat16)
+net2 = Net2().to(torch.bfloat16)
 
 torch.manual_seed(11)  # Set random seed for reproducibility
 
-act = torch.randn(B, S, HS, requires_grad=False)
-mask = torch.rand(B, S, requires_grad=False)
+act = 0.1 * torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
+mask = (torch.rand(B, S, requires_grad=False) > 0.5).to(torch.bfloat16)
 
-layer_norm_input_weight = torch.randn(HS)
-layer_norm_input_bias = torch.randn(HS)
-left_projection_weight = torch.randn(num_intermediate_channel, HS)
-left_projection_bias = torch.randn(num_intermediate_channel)
-right_projection_weight = torch.randn(num_intermediate_channel, HS)
-right_projection_bias = torch.randn(num_intermediate_channel)
-left_gate_weight = torch.randn(num_intermediate_channel, HS)
-left_gate_bias = torch.randn(num_intermediate_channel)
-right_gate_weight = torch.randn(num_intermediate_channel, HS)
-right_gate_bias = torch.randn(num_intermediate_channel)
+layer_norm_input_weight = 0.1 * torch.randn(HS).to(torch.bfloat16)
+layer_norm_input_bias = 0.1 * torch.randn(HS).to(torch.bfloat16)
+left_projection_weight = 0.1 * torch.randn(num_intermediate_channel, HS).to(torch.bfloat16)
+left_projection_bias = 0.1 * torch.randn(num_intermediate_channel).to(torch.bfloat16)
+right_projection_weight = 0.1 * torch.randn(num_intermediate_channel, HS).to(torch.bfloat16)
+right_projection_bias = 0.1 * torch.randn(num_intermediate_channel).to(torch.bfloat16)
+left_gate_weight = 0.1 * torch.randn(num_intermediate_channel, HS).to(torch.bfloat16)
+left_gate_bias = 0.1 * torch.randn(num_intermediate_channel).to(torch.bfloat16)
+right_gate_weight = 0.1 * torch.randn(num_intermediate_channel, HS).to(torch.bfloat16)
+right_gate_bias = 0.1 * torch.randn(num_intermediate_channel).to(torch.bfloat16)
 
-output_projection_weight = torch.randn(HS, HS)
-output_projection_bias = torch.randn(HS)
-center_layer_norm_weight = torch.randn(HS)
-center_layer_norm_bias = torch.randn(HS)
-gating_linear_weight = torch.randn(HS, HS)
-gating_linear_bias = torch.randn(HS)
+output_projection_weight = 0.1 * torch.randn(HS, HS).to(torch.bfloat16)
+output_projection_bias = 0.1 * torch.randn(HS).to(torch.bfloat16)
+center_layer_norm_weight = 0.1 * torch.randn(HS).to(torch.bfloat16)
+center_layer_norm_bias = 0.1 * torch.randn(HS).to(torch.bfloat16)
+gating_linear_weight = 0.1 * torch.randn(HS, HS).to(torch.bfloat16)
+gating_linear_bias = 0.1 * torch.randn(HS).to(torch.bfloat16)
 
 net1.triangle_multiplication.layer_norm_input.weight = torch.nn.Parameter(
     layer_norm_input_weight
@@ -234,26 +234,18 @@ net2.triangle_multiplication.gating_linear.weight = torch.nn.Parameter(
 )
 net2.triangle_multiplication.gating_linear.bias = torch.nn.Parameter(gating_linear_bias)
 
-# net1.eval()
-# net2.eval()
-# net1 = ipex.optimize(net1)
-# net2 = ipex.optimize(net2, dtype=torch.bfloat16)
-
 Y1 = net1(act, mask)
-Y2 = net2(act.to(torch.bfloat16), mask.to(torch.bfloat16))
+Y2 = net2(act, mask)
 
-# print(Y1[1, 1, :10])
-# print(Y2[1, 1, :10])
-r = Y1.max() - Y1.min()
-# print((torch.abs(Y1 - Y2) / r > 0.1)[:, :, :].sum())
+r = Y1.max().to(torch.float32) - Y1.min().to(torch.float32)
 print(
     "    Foward pass check: ",
-    ((torch.abs(Y1 - Y2.type(torch.float32)) / r < 0.1).sum() == B * S * HS).item(),
+    ((torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.01).sum() == B * S * HS).item(),
 )
 # print("diff: ", r)
 print(
     " Number of errors: ",
-    B * S * HS - (torch.abs(Y1 - Y2.type(torch.float32)) / r < 0.1).sum(),
+    B * S * HS - (torch.abs(Y1.to(torch.float32) - Y2.to(torch.float32)) / r < 0.01).sum(),
 )
 
 
@@ -287,7 +279,7 @@ tpp_pytorch_extension.reset_debug_timers()
 #     ) as prof:
 for _ in range(N):  # Optimized PyTorch layer Forward and Backward pass timing
     start = time.time()
-    Y2 = net2(act.to(torch.bfloat16), mask.to(torch.bfloat16))
+    Y2 = net2(act, mask)
     forward2 += time.time() - start
     # prof.step()
 tpp_pytorch_extension.print_debug_timers()

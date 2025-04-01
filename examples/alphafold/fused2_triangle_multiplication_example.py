@@ -119,22 +119,22 @@ net2 = Net2()
 
 torch.manual_seed(11)  # Set random seed for reproducibility
 
-act = torch.randn(B, S, HS, requires_grad=False)
-mask = torch.rand(B, S, requires_grad=False)
+act = 0.1 * torch.randn(B, S, HS, requires_grad=False)
+mask = (torch.rand(B, S, requires_grad=False) > 0.5).to(torch.float32)
 
-left_norm_input_weight = torch.randn(HS)
-left_norm_input_bias = torch.randn(HS)
-projection_weight = torch.randn(2 * num_intermediate_channel, HS)
-projection_bias = torch.randn(2 * num_intermediate_channel)
-gate_weight = torch.randn(2 * num_intermediate_channel, num_intermediate_channel)
-gate_bias = torch.randn(2 * num_intermediate_channel)
+left_norm_input_weight = 0.1 * torch.randn(HS)
+left_norm_input_bias = 0.1 * torch.randn(HS)
+projection_weight = 0.1 * torch.randn(2 * num_intermediate_channel, HS)
+projection_bias = 0.1 * torch.randn(2 * num_intermediate_channel)
+gate_weight = 0.1 * torch.randn(2 * num_intermediate_channel, num_intermediate_channel)
+gate_bias = 0.1 * torch.randn(2 * num_intermediate_channel)
 
-output_projection_weight = torch.randn(HS, num_intermediate_channel)
-output_projection_bias = torch.randn(HS)
-center_norm_weight = torch.randn(num_intermediate_channel)
-center_norm_bias = torch.randn(num_intermediate_channel)
-gating_linear_weight = torch.randn(HS, HS)
-gating_linear_bias = torch.randn(HS)
+output_projection_weight = 0.1 * torch.randn(HS, num_intermediate_channel)
+output_projection_bias = 0.1 * torch.randn(HS)
+center_norm_weight = 0.1 * torch.randn(num_intermediate_channel)
+center_norm_bias = 0.1 * torch.randn(num_intermediate_channel)
+gating_linear_weight = 0.1 * torch.randn(HS, HS)
+gating_linear_bias = 0.1 * torch.randn(HS)
 
 net1.fused_triangle_multiplication.left_norm_input.weight = torch.nn.Parameter(
     left_norm_input_weight
@@ -203,10 +203,7 @@ net2.fused_triangle_multiplication.gating_linear.bias = torch.nn.Parameter(
 Y1 = net1(act, mask)
 Y2 = net2(act, mask)
 
-# print(Y1[1, 1, :10])
-# print(Y2[1, 1, :10])
 r = Y1.max() - Y1.min()
-# print((torch.abs(Y1 - Y2) / r > 0.0001)[:, 0:4, :].sum())
 print(
     "    Foward pass check: ",
     ((torch.abs(Y1 - Y2) / r < 0.0001).sum() == B * S * HS).item(),

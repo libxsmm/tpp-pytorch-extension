@@ -214,7 +214,6 @@ tpp_pytorch_extension.reset_debug_timers()
 for _ in range(N):  # Optimized PyTorch layer Forward and Backward pass timing
     start = time.time()
     Y2 = net2(q_data, m_data, bias, nonbatched_bias)
-    # Y2 = net2(q_data.type(torch.bfloat16), m_data, bias, nonbatched_bias)
     forward2 += time.time() - start
 tpp_pytorch_extension.print_debug_timers()
 
