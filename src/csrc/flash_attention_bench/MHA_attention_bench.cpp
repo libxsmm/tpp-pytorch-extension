@@ -48,39 +48,6 @@ unsigned long long rdtsc_ordered() {
   // return ((unsigned long long)hi << 32) | lo;
 }
 
-class Barrier {
-
-  public:
-    static constexpr int size = 2; 
-
-  volatile int bar1;
-  volatile int bar2;
-  int count[size];
-  int pad[12];
-  Barrier() {
-    bar1 = 0;
-    bar2 = 0;
-    for (int i = 0; i < size; i++) {
-      count[i] = 0;
-    }
-  }
-  void wait(int tid) {
-      if (size == 1) {
-        return;
-      }
-      if (count[tid] % 2) {
-        __sync_fetch_and_add(&bar1, 1);
-        while ((bar1 % size) != 0)
-          ;
-      } else {
-        __sync_fetch_and_add(&bar2, 1);
-        while ((bar2 % size) != 0)
-          ;
-      }
-      count[tid]++;
-    }
-};
-
 void fused_gating_attention_fwd_bf16(
     bfloat16* q_data,
     bfloat16* m_data,
@@ -244,7 +211,6 @@ int main(int argc, char* argv[]) {
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }
-    // delete[] q_data; delete[] m_data; delete[] bias; delete[] nonbatched_bias; delete[] query_w; delete[] key_w; delete[] value_w; delete[] gating_w; delete[] gating_b; delete[] output_w; delete[] output_b; delete[] output;
   } else {
     printf("Running with FP32\n");
     typedef float T;
@@ -274,7 +240,6 @@ int main(int argc, char* argv[]) {
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }
-    // delete[] q_data; delete[] m_data; delete[] bias; delete[] nonbatched_bias; delete[] query_w; delete[] key_w; delete[] value_w; delete[] gating_w; delete[] gating_b; delete[] output_w; delete[] output_b; delete[] output;
   }
 
   return 0;

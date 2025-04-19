@@ -12,43 +12,9 @@
 //     "Gating attention forward",
 //     std::vector<c10::IValue>({q_data, m_data})); // For recording time
 
-// int64_t B_t = q_data.size(0); /* Batch (512) */
-// int64_t Sp_t = q_data.size(1); /* Query (764) */
-// int64_t HS_t = q_data.size(2); /* Channels (256) */
-
-// int64_t N_t = query_w.size(1); /* number of heads (8) */
-// int64_t H_t = query_w.size(2); /* head size (32) */
-
-// auto flag = nonbatched_bias.size(0) > 0;
 int64_t Sp_t = S_t;
 
-// int64_t S_t = Sp_t;
-// if (Sp_t % QKV_BLOCKSIZE != 0) {
-//   S_t = (Sp_t / QKV_BLOCKSIZE + 1) * QKV_BLOCKSIZE; // 768
-
-//   auto q_data_pad = q_data.new_zeros({B_t, S_t - Sp_t, HS_t});
-//   auto m_data_pad = m_data.new_zeros({B_t, S_t - Sp_t, HS_t});
-//   auto bias_pad = bias.new_zeros({B_t, 1, 1, S_t - Sp_t});
-//   auto nonbatched_bias_pad1 =
-//       nonbatched_bias.new_zeros({N_t, Sp_t, S_t - Sp_t});
-//   auto nonbatched_bias_pad2 = nonbatched_bias.new_zeros({N_t, S_t - Sp_t, S_t});
-
-//   q_data = at::cat({q_data, q_data_pad}, 1);
-//   m_data = at::cat({m_data, m_data_pad}, 1);
-//   bias = at::cat({bias, bias_pad}, 3);
-//   if (flag) {
-//     nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad1}, 2);
-//     nonbatched_bias = at::cat({nonbatched_bias, nonbatched_bias_pad2}, 1);
-//   }
-// }
-
-// _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-// _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-
-// bias = bias.contiguous();
-// nonbatched_bias = nonbatched_bias.contiguous();
-// auto sfmask = -30000 * q_data.new_ones(S_t - Sp_t);
-T* sfmask = new T[S_t - Sp_t];
+T* sfmask = new (std::align_val_t(64)) T[S_t - Sp_t];     /* create mask */
 for (int i = 0; i < S_t - Sp_t; i++) {
   sfmask[i] = -30000;
 }
@@ -67,24 +33,18 @@ auto gating_b_a = GetVLAPtr<float>(gating_b, {H_t});
 auto output_w_a = GetVLAPtr<T>(output_w, {H_t, HS_t});
 auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
-T* q = new T[B_t * S_t * N_t *H_t];
-// auto q = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
+T* q = new (std::align_val_t(64)) T[B_t * S_t * N_t *H_t];
 auto q_a = GetVLAPtr<T>(q, {S_t, N_t, H_t});
 
-T* k = new T[B_t * S_t * N_t * H_t];
-// auto k = q_data.new_empty({B_t, S_t* N_t* H_t}); /* [512, 764, 8, 32] */
+T* k = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
 auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});
 
-T* v = new T[B_t *S_t * N_t *H_t];
-// auto v = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
+T* v = new (std::align_val_t(64)) T[B_t *S_t * N_t *H_t];
 auto v_a = GetVLAPtr<T>(v, {S_t, N_t, H_t});
 
-T* weighted_avg = new T[B_t * S_t * N_t * H_t];
-// auto weighted_avg =
-//     q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
+T* weighted_avg = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
 auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t, H_t});
 
-// auto output = q_data.new_empty({B_t, S_t, HS_t}); /* [512, 764, 256] */
 auto output_a = GetVLAPtr<T>(output, {S_t, HS_t});
 
 
@@ -110,7 +70,6 @@ auto k_trans_tpp = SCOPEIT(
 
 auto scale_tpp = SCOPEIT((ScaleTPP<T, T>(QKV_BLOCKSIZE * HS_t)), EW_SCL);
 auto zero_tpp = SCOPEIT(SetZeroTPP<T>(QKV_BLOCKSIZE * HS_t), EW_ZERO);
-// float alpha = (1.0 / sqrt(key_dim));
 float alpha = (1.0 / sqrt(H_t));
 
 // auto q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
@@ -217,8 +176,10 @@ if (S_t < 2048) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            T tmp_o[A_BLOCKSIZE * H_t];
-            T tmp_logits[A_BLOCKSIZE][S_t];
+            // T tmp_o[A_BLOCKSIZE * H_t];
+            // T tmp_logits[A_BLOCKSIZE][S_t];
+            LIBXSMM_ALIGNED(T tmp_o[A_BLOCKSIZE * H_t], 64);
+            LIBXSMM_ALIGNED(T tmp_logits[A_BLOCKSIZE][S_t], 64);
 
             for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
               a_brgemm_tpp(
@@ -341,28 +302,9 @@ if (S_t < 2048) {
       (VarSoftMaxFwdTPP<float, T>(A_BLOCKSIZE, lastBlockSize, true)), SOFTMAX);
   // }
 
-  // {
-  //   // RECORD_SCOPE(alpha_ac_gemm, {q, k, bias});
-  //   {
-  //     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
-#ifdef __x86_64__
-  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
-  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
-  _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST);
-#endif
 
   #pragma omp parallel
   {
-    // unsigned csr = __builtin_ia32_stmxcsr();
-    // printf("csr : %u, tid %d\n", csr, omp_get_thread_num());
-    int64_t a_gemm_ticks = 0;
-    int64_t bias_ticks = 0;
-    int64_t add_nbbias_ticks = 0;
-    int64_t softmax_ticks = 0;
-    int64_t c_gemm_ticks = 0;
-    int64_t sf_fixup_ticks = 0;
-    int64_t write_results_ticks = 0;
-
     LIBXSMM_ALIGNED(float tmp_S[A_BLOCKSIZE * Ak_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float tmp_o1[A_BLOCKSIZE * H_t], 64);
     LIBXSMM_ALIGNED(float tmp_o2[A_BLOCKSIZE * H_t], 64);
@@ -376,47 +318,33 @@ if (S_t < 2048) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            int64_t start;
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
 
-              // start = rdtsc_ordered();
               a_brgemm_tpp(
                   &q_a[i][j1][n][0], &k_a[i][n * H_t * S_t + j2], tmp_S, 1);
-              // a_gemm_ticks += rdtsc_ordered() - start;
 
-              // start = rdtsc_ordered();
-              // if (bias_flag)
-              //   a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
-              // bias_ticks += rdtsc_ordered() - start;
+              if (bias_flag)
+                a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
 
-              // start = rdtsc_ordered();
-              // if (flag)
-              //   a_add_nbbias_online_tpp(
-              //       &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
-              // add_nbbias_ticks += rdtsc_ordered() - start;
+              if (flag)
+                a_add_nbbias_online_tpp(
+                    &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
 
-              // start = rdtsc_ordered();
               if (j2 == 0) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S, omax, osum, nullptr);
               } else {
                 a_softmax_online_tpp(1, tmp_S, tmp_S, cmax, csum, omax);
               }
-  
-              // softmax_ticks += rdtsc_ordered() - start;
 
-              // start = rdtsc_ordered();
               c_brgemm_tpp(tmp_S, &v_a[i][j2][n][0], tmp_o1,
                            1); // O = P*V
-              // c_gemm_ticks += rdtsc_ordered() - start;
 
-              // start = rdtsc_ordered();
               if (j2 == 0) {
                 a_cpy2_tpp(tmp_o1, tmp_o2);
               } else {
                 a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               }
-              // sf_fixup_ticks += rdtsc_ordered() - start;
             }
 
             if (S_t % Ak_BLOCKSIZE != 0) {
@@ -443,17 +371,14 @@ if (S_t < 2048) {
               delete[] tmp_S_edge;
             }
 
-            start = rdtsc_ordered();
             a_softmax_scale_online(&tmp_o2[0], osum);
             a_cpy_tpp(&tmp_o2[0], &weighted_avg_a[i][j1][n][0]);
-            write_results_ticks += rdtsc_ordered() - start;
           }
         }
       }
 
     int64_t end = rdtsc_ordered();
-    printf( "Time taken by thread %d is %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf, %0.2lf\n", omp_get_thread_num(), a_gemm_ticks/(double)1e9, 
-    bias_ticks/(double)1e9, add_nbbias_ticks/(double)1e9, softmax_ticks/(double)1e9, c_gemm_ticks/(double)1e9, sf_fixup_ticks/(double)1e9, write_results_ticks/(double)1e9, (end - start_full)/(double)1e9 );
+    printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
   }
 //   }
 }
@@ -516,52 +441,3 @@ delete[] q;
 delete[] k;
 delete[] v;
 delete[] weighted_avg;
-
-// if (S_t != Sp_t) {
-//   output = output.narrow(1, 0, Sp_t);
-// }
-
-// return output_a;
-
-// int64_t b_t = q_data.size(0);                    /* Batch (512) */
-// int64_t q_t = q_data.size(1);                    /* Query (764) */
-// int64_t k_t = m_data.size(1);                    /* Key (764) */
-// int64_t a_t = q_data.size(2);                  /* Channels (256) */
-
-// int64_t h_t = query_w.size(1);                  /* number of heads (8) */
-// int64_t c_t = query_w.size(2);                  /* head channels (32) */
-
-// auto output = q_data.new_empty({b_t,q_t,a_t});
-
-// auto q = q_data.new_empty({b_t,q_t,h_t,c_t});
-// auto k = q_data.new_empty({b_t,k_t,h_t,c_t});
-// auto v = q_data.new_empty({b_t,k_t,h_t,c_t});
-
-// auto logits = q_data.new_empty({b_t,h_t,q_t,k_t});
-// auto weights = q_data.new_empty({b_t,h_t,q_t,k_t});
-// auto weighted_avg = q_data.new_empty({b_t,q_t,h_t,c_t});
-
-// auto gate_values = q_data.new_empty({b_t,q_t,h_t,value_dim});
-
-// q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
-// (1.0/sqrt(key_dim))) ; k = at::einsum("bka,ahc->bkhc", {m_data, key_w}); v =
-// at::einsum("bka,ahc->bkhc", {m_data, value_w});
-
-// logits = at::add(at::einsum("bqhc,bkhc->bhqk", {q, k}), bias);
-
-// if (nonbatched_bias.size(0) > 0)
-//     logits = at::add(logits, at::unsqueeze(nonbatched_bias, 0));
-
-// weights = at::_softmax(logits, -1, false);
-
-// weighted_avg = at::einsum("bhqk,bkhc->bqhc", {weights, v});
-
-// gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
-// gating_w}), gating_b));
-
-// weighted_avg = at::mul(weighted_avg, gate_values);
-
-// output = at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}),
-// output_b);
-
-// return output;
