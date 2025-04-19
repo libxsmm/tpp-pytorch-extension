@@ -83,7 +83,8 @@ float alpha = (1.0 / sqrt(H_t));
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        T tmp[QKV_BLOCKSIZE * N_t * H_t];
+        // T tmp[QKV_BLOCKSIZE * N_t * H_t];
+        LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t *H_t], 64);
         qkv_brgemm_tpp(&q_data_a[i][j][0], &query_w_a[0][0][0], &tmp[0], 1);
         scale_tpp(&tmp[0], &q_a[i][j][0][0], alpha);
       }
@@ -101,7 +102,8 @@ float alpha = (1.0 / sqrt(H_t));
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        T tmp[QKV_BLOCKSIZE * N_t * H_t];
+        // T tmp[QKV_BLOCKSIZE * N_t * H_t];
+        LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
         qkv_brgemm_tpp(&m_data_a[i][j][0], &key_w_a[0][0][0], &tmp[0], 1);
         k_trans_tpp(&tmp[0], &k_a[i][j]); // [ 0*H_t*S_t + 0*S_t + j]
       }
@@ -417,8 +419,10 @@ auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-        T tmp[C_BLOCKSIZE * N_t * H_t];
-        T tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
+        // T tmp[C_BLOCKSIZE * N_t * H_t];
+        // T tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
+        LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * N_t * H_t], 64);
+        LIBXSMM_ALIGNED(T tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
 
         g_brgemm_tpp(&q_data_a[i][j][0], &gating_w_a[0][0][0], &tmp[0], 1);
         g_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
