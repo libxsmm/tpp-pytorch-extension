@@ -11,6 +11,7 @@
 import math
 import torch
 from torch import nn
+from typing import List, Tuple, Dict, Any
 from tpp_pytorch_extension.utils.blocked_layout import (
     BlockedParameter,
     BlockedModule,
@@ -19,6 +20,8 @@ from tpp_pytorch_extension.utils.blocked_layout import (
 )
 from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
 from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
+from tpp_pytorch_extension._C import _qtype as qtype
+import tpp_pytorch_extension
 import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
@@ -26,23 +29,19 @@ import numpy as np
 import os
 import time
 import inspect
-from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers import (
     GenerationMixin,
 )
+from transformers.cache_utils import Cache, DynamicCache
 import tpp_pytorch_extension as tpx
 
 USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
 global_layer_dtype = torch.float32
 
-BATCH_DIM_IN_KV_CACHE = fused_llm_cpp.get_batch_dim_in_kv_cache()
-
 tensor_parallel_enabled = True
-
-use_discrete_kv = int(os.environ.get("USE_DISCRETE_KV_CACHE", 1))
 
 
 def compare(ref, opt, name=""):
@@ -68,152 +67,118 @@ def shm_allreduce(t):
     fused_llm_cpp.allreduce(t)
 
 
-def sparse_model_config(model_config):
-    embedding_size = None
-    if hasattr(model_config, "hidden_size"):
-        embedding_size = model_config.hidden_size
-    elif hasattr(model_config, "n_embed"):
-        embedding_size = model_config.n_embed
-    elif hasattr(model_config, "n_embd"):
-        embedding_size = model_config.n_embd
-
-    num_head = None
-    if hasattr(model_config, "num_attention_heads"):
-        num_head = model_config.num_attention_heads
-    elif hasattr(model_config, "n_head"):
-        num_head = model_config.n_head
-
-    if embedding_size is None or num_head is None or num_head == 0:
-        raise ValueError("Check the model config")
-
-    num_embedding_size_per_head = int(embedding_size / num_head)
-    if hasattr(model_config, "n_layer"):
-        num_layer = model_config.n_layer
-    elif hasattr(model_config, "num_hidden_layers"):
-        num_layer = model_config.num_hidden_layers
-    else:
-        raise ValueError(
-            "Number of hidden layers couldn't be determined from the model config"
-        )
-
-    return num_layer, num_head, num_embedding_size_per_head
+def print_line_info():
+    cf = inspect.currentframe().f_back
+    ln = cf.f_lineno
+    fn = cf.f_code.co_name
+    pfn = cf.f_back.f_code.co_name
+    pf = cf.f_back.f_code.co_filename
+    pfl = cf.f_back.f_lineno
+    print(f"Running At {fn}():{ln}  from {pf}:{pfl}:{pfn}()")
 
 
-def generate_past_key_values(model, batch_size, seq_len, num_beams=1, indirect_kv=True):
-    (
-        num_block_layers,
-        num_attention_heads,
-        num_embedding_size_per_head,
-    ) = sparse_model_config(model.config)
-    if model.config.model_type == "bloom":
-        past_key_values = tuple(
-            (
-                torch.empty(
-                    int(num_attention_heads * batch_size),
-                    num_embedding_size_per_head,
-                    seq_len,
-                )
-                .to(model.dtype)
-                .to(model.device),
-                torch.empty(
-                    int(num_attention_heads * batch_size),
-                    seq_len,
-                    num_embedding_size_per_head,
-                )
-                .to(model.dtype)
-                .to(model.device),
-            )
-            for _ in range(num_block_layers)
-        )
-    else:
-        if indirect_kv == True:
-            num_tensors = 7 if num_beams > 1 else 6
-            past_key_values = tuple(
-                (
-                    torch.empty(
-                        batch_size, num_attention_heads, 0, num_embedding_size_per_head
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(
-                        batch_size, num_attention_heads, 0, num_embedding_size_per_head
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty([seq_len, batch_size * num_beams], dtype=torch.long).to(
-                        model.device
-                    ),
-                    torch.tensor(0),
-                    torch.empty(
-                        batch_size,
-                        num_attention_heads,
-                        seq_len,
-                        num_embedding_size_per_head,
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(
-                        batch_size,
-                        num_attention_heads,
-                        seq_len,
-                        num_embedding_size_per_head,
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(batch_size, 1, dtype=torch.int64).to(model.device),
-                )[:num_tensors]
-                for _ in range(num_block_layers)
+class TppCache(DynamicCache):
+    """
+    A cache that grows dynamically as more tokens are generated. This is the default for generative models.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        print_line_info()
+        self.tpp_cache = torch.classes.tpp_llm.TppCache()
+
+    def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
+        raise NotImplementedError
+
+    def __iter__(self):
+        raise NotImplementedError
+
+    def __len__(self):
+        """
+        Support for backwards-compatible `past_key_value` length, e.g. `len(past_key_value)`. This value corresponds
+        to the number of layers in the model.
+        """
+        # print_line_info()
+        return self.tpp_cache.size()
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Updates the cache with the new `key_states` and `value_states` for the layer `layer_idx`.
+
+        Parameters:
+            key_states (`torch.Tensor`):
+                The new key states to cache.
+            value_states (`torch.Tensor`):
+                The new value states to cache.
+            layer_idx (`int`):
+                The index of the layer to cache the states for.
+            cache_kwargs (`Dict[str, Any]`, `optional`):
+                Additional arguments for the cache subclass. No additional arguments are used in `DynamicCache`.
+
+        Return:
+            A tuple containing the updated key and value states.
+        """
+        # Update the number of seen tokens
+        print_line_info()
+        # Update the cache
+        ret = self.tpp_cache.update(key_states, value_states, layer_idx)
+        return ret
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """Returns the sequence length of the cached states. A layer index can be optionally passed."""
+        # print_line_info()
+        return self.tpp_cache.get_seq_length(layer_idx)
+
+    def get_max_length(self) -> Optional[int]:
+        """Returns the maximum sequence length of the cached states. DynamicCache does not have a maximum length."""
+        print_line_info()
+        return None
+
+    def crop(self, max_length: int):
+        """Crop the past key values up to a new `max_length` in terms of tokens. `max_length` can also be
+        negative to remove `max_length` tokens. This is used in assisted decoding and contrastive search."""
+        # In case it is negative
+        seq_len = self.get_seq_length()
+        if max_length < 0:
+            max_length = seq_len - abs(max_length)
+
+        if seq_len <= max_length:
+            return
+
+        print(f"seq_len = {seq_len}, max_length = {max_length} size = {len(self)}")
+        self.tpp_cache.crop(max_length)
+
+    def align_and_invert_mask(
+        self, mask: torch.Tensor, inputs_embeds: torch.Tensor
+    ) -> torch.Tensor:
+        if mask is None:
+            mask = torch.ones(
+                (inputs_embeds.shape[0], inputs_embeds.shape[1]),
+                device=inputs_embeds.device,
+                dtype=inputs_embeds.dtype,
             )
         else:
-            past_key_values = tuple(
-                (
-                    torch.empty(
-                        batch_size,
-                        num_attention_heads,
-                        seq_len,
-                        num_embedding_size_per_head,
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.empty(
-                        batch_size,
-                        num_attention_heads,
-                        seq_len,
-                        num_embedding_size_per_head,
-                    )
-                    .to(model.dtype)
-                    .to(model.device),
-                    torch.zeros([batch_size * num_beams], dtype=torch.long).to(
-                        model.device
-                    ),
-                )
-                for _ in range(num_block_layers)
-            )
-    return past_key_values
+            mask = mask.to(inputs_embeds.dtype)
+
+        min_val = torch.finfo(inputs_embeds.dtype).min
+        return self.tpp_cache.align_and_invert_mask(mask, min_val)
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        """Reorders the cache for beam search, given the selected beam indices."""
+        # print_line_info()
+        self.tpp_cache.reorder_cache(beam_idx)
+
+    def get_cpp(self):
+        return self.tpp_cache
 
 
-def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
-    batch_size = len(inputs)
-    dummy_input = tokenizer.batch_encode_plus(inputs, return_tensors="pt")
-    dummy_input = dummy_input.to(model.device)
-    if model.config.use_cache:
-        assert (
-            use_discrete_kv == 1
-        ), "Using TorchScript JIT requires use_discrete_kv = 1"
-        dummy_input["past_key_values"] = generate_past_key_values(
-            model, batch_size, 1, num_beams=num_beams, indirect_kv=use_discrete_kv
-        )
-    if len(dummy_input["past_key_values"][0]) < 4:
-        dummy_input["attention_mask"] = torch.cat(
-            [
-                torch.zeros(dummy_input["attention_mask"].shape[0], 1)
-                .to(dummy_input["attention_mask"].dtype)
-                .to(model.device),
-                dummy_input["attention_mask"],
-            ],
-            -1,
-        )
-    return dummy_input
+def generate_past_key_values(model, batch_size, seq_len, num_beams=1):
+    return TppCache()
 
 
 class _ModelFallbackWrapper(GenerationMixin):
@@ -239,18 +204,16 @@ class _ModelFallbackWrapper(GenerationMixin):
             kwargs["input_ids"] = args[0]
             assert len(args) == 1, "More than 1 positional arguments not supported"
         first_token = True if kwargs["past_key_values"] is None else False
+        if isinstance(kwargs["past_key_values"], Cache):
+            first_token = (
+                True if kwargs["past_key_values"].get_seq_length() == 0 else False
+            )
         if (
             kwargs["past_key_values"] is None
             and self._default.config.use_cache
             and not self.default_kv
         ):
-            kwargs["past_key_values"] = generate_past_key_values(
-                self._default,
-                kwargs["input_ids"].shape[0],
-                0,
-                num_beams=self.num_beams,
-                indirect_kv=use_discrete_kv,
-            )
+            kwargs["past_key_values"] = TppCache()
         # kwargs.pop("position_ids", None)
         if first_token == True and self.num_beams > 1:
             for k, v in kwargs.items():
@@ -354,11 +317,24 @@ class _ModelFallbackWrapper(GenerationMixin):
         return self._default._reorder_cache(past_key_values, beam_idx)
 
 
+def prepare_jit_inputs(inputs, model, tokenizer, num_beams):
+    batch_size = len(inputs)
+    dummy_input = tokenizer.batch_encode_plus(inputs, return_tensors="pt")
+    dummy_input = dummy_input.to(model.device)
+    if model.config.use_cache:
+        dummy_input["past_key_values"] = generate_past_key_values(
+            model,
+            batch_size,
+            1,
+            num_beams=num_beams,
+        )
+    return dummy_input
+
+
 def jit_trace_model(
     model,
     tokenizer,
     num_beams,
-    indirect_kv=True,
     enable_profile=False,
     only_last_logit=False,
 ):
@@ -406,7 +382,8 @@ def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]
 
 class BlockedLinear(BlockedModule, torch.nn.Linear):
     def maybe_block_params(self):
-        self.weight.block()
+        if hasattr(self.weight, "block"):
+            self.weight.block()
         if self.bias is not None:
             self.bias.block()
 
@@ -469,6 +446,18 @@ def FixLinear(
         self.parallelize(parallel_dim, get_rank(), get_size(), block_size=block_size)
     if weight_dtype is None:
         weight_dtype = layer_dtype
+    elif isinstance(weight_dtype, str):
+        if weight_dtype not in ["mxfp4", "qint8"]:
+            try:
+                weight_dtype = getattr(torch, weight_dtype)
+            except:
+                raise ValueError(f"Unknown weight_dtype {weight_dtype}")
+    else:
+        if not isinstance(weight_dtype, torch.dtype):
+            raise ValueError(
+                f"weight_dtype must be either str or torch.dtype but is {type(weight_dtype)}"
+            )
+
     self.weight = BlockedParameter(self.weight.data)
     self.weight.set_blocking_param(
         (
@@ -489,13 +478,27 @@ def FixLinear(
                     ],
                 ],
                 [0, 2, 3, 1, 4],
-                weight_dtype,
+                layer_dtype,
             )
         )
 
     if self.bias is not None:
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
+    block(self)
+    if isinstance(weight_dtype, str):
+        if weight_dtype == "mxfp4":
+            self.weight = torch.nn.Parameter(
+                qtype.remap_and_quantize_mxfp4(self.weight), requires_grad=False
+            )
+        elif weight_dtype == "qint8":
+            self.weight = torch.nn.Parameter(
+                qtype.remap_and_quantize_qint8(self.weight), requires_grad=False
+            )
+    else:
+        self.weight = torch.nn.Parameter(
+            self.weight.data.to(weight_dtype), requires_grad=False
+        )
 
 
 def ShardLinear(m, dim, rank, size, block_size=1):
@@ -560,181 +563,6 @@ def set_pg():
         return
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         fused_llm_cpp.set_pg(torch.distributed.distributed_c10d._get_default_group())
-
-
-def get_layer_past_and_offset(
-    layer_past: Optional[Tuple[torch.Tensor]], discrete_kv: bool
-):
-    if layer_past is None:
-        return ([], 0)
-    n = len(layer_past)
-    B_DIM = BATCH_DIM_IN_KV_CACHE
-    if n < 4:  # cache with beam_idx
-        if discrete_kv == True and use_discrete_kv == 1:
-            B1, N, S, H = layer_past[0].shape
-            if n == 3:
-                B2 = layer_past[2].shape[0]
-            else:
-                B2 = B1
-            inc_size = int(os.environ.get("KV_CACHE_INC_SIZE", "128"))
-            capacity = S + inc_size
-            if B_DIM == 1:
-                new_key = layer_past[0].new_zeros([capacity, B2, N, H])
-                new_value = layer_past[1].new_zeros([capacity, B2, N, H])
-            else:
-                new_key = layer_past[0].new_zeros([B2, N, capacity, H])
-                new_value = layer_past[1].new_zeros([B2, N, capacity, H])
-            if B1 == B2:
-                if B_DIM == 1:
-                    new_key[:S, :, :, :].copy_(layer_past[0].permute([2, 0, 1, 3]))
-                    new_value[:S, :, :, :].copy_(layer_past[1].permute([2, 0, 1, 3]))
-                else:
-                    new_key[:, :, :S, :].copy_(layer_past[0])
-                    new_value[:, :, :S, :].copy_(layer_past[1])
-                new_beam_idx = (
-                    torch.arange(B2).unsqueeze(0).expand([capacity, B2]).contiguous()
-                )
-                if n == 3:
-                    new_beam_idx[S - 1] = layer_past[2]
-            else:
-                assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
-                assert n == 3, f"Must use lazy kv cache reorder but n = {n}"
-                num_beams = B2 // B1
-                if B_DIM == 1:
-                    new_key[:S, ::num_beams, :, :] = layer_past[0].permute([2, 0, 1, 3])
-                    new_value[:S, ::num_beams, :, :] = layer_past[1].permute(
-                        [2, 0, 1, 3]
-                    )
-                else:
-                    new_key[::num_beams, :, :S, :] = layer_past[0]
-                    new_value[::num_beams, :, :S, :] = layer_past[1]
-                new_beam_idx = layer_past[2].new_zeros([capacity, B2]).contiguous()
-                # beam_idx was adjusted in reorder_cache by num_beams, so fit it back
-                new_beam_idx[:S] = layer_past[2] * num_beams
-            offset = torch.tensor(S)
-            if B_DIM == 1:
-                key = new_key[:S, :, :, :].permute([1, 2, 0, 3])
-                value = new_value[:S, :, :, :].permute([1, 2, 0, 3])
-            else:
-                key = new_key[:, :, :S, :]
-                value = new_value[:, :, :S, :]
-            layer_past = (
-                key,
-                value,
-                new_beam_idx,
-                offset,
-                new_key,
-                new_value,
-            )
-            return (layer_past, offset)
-        else:
-            return (layer_past, layer_past[0].shape[2])
-
-    else:
-        # B1, N, S, H = layer_past[0].shape
-        # B2 = layer_past[2].shape[0]
-        # print(f"pkv{n} B1: {B1}  B2: {B2} t_offset: {layer_past[3]}")
-        # print(f"pkv{n} : layer_past[3]{layer_past[3]}")
-        return (layer_past, layer_past[3])
-
-
-def _reorder_cache(
-    past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
-) -> Tuple[Tuple[torch.Tensor]]:
-    """
-    This function is used to re-order the `past_key_values` cache if [`~PretrainedModel.beam_search`] or
-    [`~PretrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
-    beam_idx at every generation step.
-    """
-    # print(f"_reorder_cache: len(pkv) = {len(past[0])}, {past[0][0].shape}  beam_idx = {beam_idx}")
-    if len(past[0]) >= 4:  # discrete kv_cache
-        assert (
-            len(past[0]) >= 6
-        ), f"Invalid past key_value tuple length ({len(past[0])})"
-        B_DIM = BATCH_DIM_IN_KV_CACHE
-        B1 = past[0][4].shape[B_DIM]
-        B2 = beam_idx.shape[0]
-        # print(f"_reorder_cache: B1: {past[0][0].shape}, beam_idx: {beam_idx}")
-        # print(f"B1 = {B1}, B2 = {B2}")
-        if B1 != B2:
-            assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
-            num_beams = B2 // B1
-            tmp = (
-                past[0][2]
-                .repeat_interleave(num_beams, dim=1)
-                .mul(num_beams)
-                .contiguous()
-            )
-            tmp[past[0][3] - 1] = beam_idx
-            remapped_ind = fused_llm_cpp.remap_indices(tmp, past[0][3])
-            new_past = []
-            S = past[0][0].shape[2]
-            for layer_past in past:
-                layer_past_4 = (
-                    layer_past[4].repeat_interleave(num_beams, dim=B_DIM).contiguous()
-                )
-                layer_past_5 = (
-                    layer_past[5].repeat_interleave(num_beams, dim=B_DIM).contiguous()
-                )
-                layer_past_2 = (
-                    layer_past[2]
-                    .repeat_interleave(num_beams, dim=1)
-                    .mul(num_beams)
-                    .contiguous()
-                )
-                layer_past_2[layer_past[3] - 1] = beam_idx
-                if B_DIM == 1:
-                    layer_past_0 = layer_past_4[:S].permute([1, 2, 0, 3])
-                    layer_past_1 = layer_past_5[:S].permute([1, 2, 0, 3])
-                else:
-                    layer_past_0 = layer_past_4[:, :, :S, :]
-                    layer_past_1 = layer_past_5[:, :, :S, :]
-                new_past.append(
-                    (
-                        layer_past_0,
-                        layer_past_1,
-                        layer_past_2,
-                        layer_past[3],
-                        layer_past_4,
-                        layer_past_5,
-                        remapped_ind,
-                    )
-                )
-
-            return tuple(new_past)
-        else:
-            for layer_past in past:
-                layer_past[2][layer_past[3] - 1] = beam_idx
-            remapped_ind = fused_llm_cpp.remap_indices(past[0][2], past[0][3])
-            new_past = []
-            for layer_past in past:
-                l_layer_past = list(layer_past)
-                if len(layer_past) == 6:
-                    l_layer_past.append(remapped_ind)
-                else:
-                    l_layer_past[6] = remapped_ind
-                new_past.append(tuple(l_layer_past))
-            past = tuple(new_past)
-            return past
-    else:
-        B1 = past[0][0].shape[0]
-        B2 = beam_idx.shape[0]
-        if B1 != B2:
-            assert B2 % B1 == 0, f"B1 = {B1}, B2 = {B2}"
-            num_beams = B2 // B1
-            beam_idx = beam_idx // num_beams
-            # print(f"B1 = {B1}, B2 = {B2}, beam_idx: {beam_idx}")
-        return tuple(tuple(layer_past) + (beam_idx,) for layer_past in past)
-
-    # ret = fused_llm_cpp.reorder_cache(past, beam_idx)
-    # return tuple(
-    #     tuple(p for p in layer_past) for layer_past in ret
-    # )
-
-    # return tuple(
-    #     tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
-    #     for layer_past in past
-    # )
 
 
 try:

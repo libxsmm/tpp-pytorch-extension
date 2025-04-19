@@ -20,12 +20,13 @@ from tpp_pytorch_extension.utils.blocked_layout import (
     get_blocking_signature,
 )
 from tpp_pytorch_extension.utils.xsmm import get_vnni_blocking
-from tpp_pytorch_extension._C import _fused_llm_infer as fused_llm_cpp
 import time
 from contextlib import contextmanager
 from typing import Optional, Tuple, Union
 import transformers
 from transformers.modeling_outputs import CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers.cache_utils import Cache
 
 from .llm_common import (
     BlockedLinear,
@@ -35,11 +36,10 @@ from .llm_common import (
     get_rank,
     get_size,
     set_pg,
-    _reorder_cache,
     block,
     compare,
     global_layer_dtype,
-    get_layer_past_and_offset,
+    TppCache,
 )
 
 
@@ -52,85 +52,55 @@ def create_sinusoidal_positions(num_pos: int, dim: int) -> torch.Tensor:
 
 
 class GPTJBlock(BlockedModule):
-    def __init__(self, config):
-        super().__init__()
-        inner_dim = config.n_inner if config.n_inner is not None else 4 * config.n_embd
-        self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config)
-        self.mlp = GPTJMLP(inner_dim, config)
+    # def __init__(self, config):
+    #     super().__init__()
+    #     inner_dim = config.n_inner if config.n_inner is not None else 4 * config.n_embd
+    #     self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+    #     self.attn = GPTJAttention(config)
+    #     self.mlp = GPTJMLP(inner_dim, config)
 
     def forward(
         self,
         hidden_states: Optional[torch.FloatTensor],
-        layer_past: Optional[Tuple[torch.Tensor]] = None,
+        layer_past: Optional[Cache] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[
         Tuple[torch.Tensor],
         Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]],
     ]:
-        # print("HS:", hidden_states.shape, hidden_states.device, hidden_states.dtype)
-        # print("layer_past:", layer_past[0].shape if layer_past is not None else layer_past)
-        # print("attention_mask:", attention_mask.shape if attention_mask is not None else attention_mask)
-        # print("position_ids:", position_ids.shape if position_ids is not None else position_ids)
         if not hasattr(self, "cpp_block"):
-            raise
+            raise ValueError("cpp_block is not initialized")
         orig_hidden_states = hidden_states
-        S = hidden_states.size(-2)
-        hidden_states = self.get_blocked_tensor(
-            hidden_states,
-            self.blocked_input_signature,
-            [None, None, self.features_block_size],
-        )
         inputs = [hidden_states]
         dummy_tensor = torch.Tensor().to(self.layer_dtype)
-        dummy_tensor_int = torch.Tensor().to(torch.long)
 
         def add_tensor_or_empty(t):
             inputs.append(t.contiguous() if t is not None else dummy_tensor)
 
         add_tensor_or_empty(attention_mask)
-        discrete_kv = getattr(self, "discrete_kv", True)
-        layer_past, offset = get_layer_past_and_offset(layer_past, discrete_kv)
         # print("position_ids:", position_ids)
         if position_ids is None:
-            seq_len = hidden_states.shape[1]
-            position_ids = torch.arange(offset, offset + seq_len).repeat(
-                hidden_states.shape[0], 1
-            )
-        add_tensor_or_empty(position_ids)
+            raise ValueError("position_ids is required")
+
+        inputs.append(position_ids)
         inputs = [
             i.to(self.layer_dtype) if i.is_floating_point() else i for i in inputs
         ]
-        # print("AM: ", inputs[-2].shape, inputs[-2].dtype)
 
-        # print("PHS:", hidden_states.shape)
-        layer_past = [
-            i.to(self.layer_dtype) if i.is_floating_point() else i for i in layer_past
-        ]
-
-        # print(f"attention_mask: {attention_mask.shape} {attention_mask}")
-        outputs = self.cpp_block.forward(inputs, layer_past, use_cache)
+        outputs = self.cpp_block.forward(inputs, layer_past.get_cpp(), use_cache)
         hs = outputs[0]
-        # print("hs: ", hs.sum().item(), hs.shape)
-        # print("HS: ", hs[:2,:2,:2])
-        present = tuple(outputs[1:])
-        # print("K: ", k.shape)
-        # print("V: ", v.shape)
 
-        hs = BlockedTensor(hs, self.blocked_input_signature, orig_hidden_states.dtype)
-        # k = BlockedTensor(k, self.blocked_input_signature).unblocked_tensor()
-        # v = BlockedTensor(v, self.blocked_input_signature).unblocked_tensor()
+        outputs = (hs,)
 
         if use_cache:
-            outputs = (hs, present)
-        else:
-            outputs = (hs,)
+            outputs += (layer_past,)
 
-        return outputs  # hidden_states, present, (attentions)
+        return outputs
 
 
 def FixGPTJBlock(
@@ -170,6 +140,7 @@ def FixGPTJBlock(
         if isinstance(m, torch.nn.Linear):
             FixLinear(m, bk, bc, layer_dtype, weight_dtype=weight_dtype)
     block(self)
+
     if not hasattr(self, "cpp_block"):
         params = [self.ln_1.weight, self.ln_1.bias]
         params += [
@@ -183,15 +154,17 @@ def FixGPTJBlock(
         if hasattr(self.attn, "embed_positions"):
             embed_positions = self.attn.embed_positions
         else:
+            raise ValueError("embed_positions not created")
             max_positions = self.attn.bias.size(-1)
             pos_embd_dim = self.attn.rotary_dim or self.attn.embed_dim
             embed_positions = create_sinusoidal_positions(max_positions, pos_embd_dim)
         params += [embed_positions]
         self.cpp_block = torch.classes.tpp_llm.GPTJBlock(
             params,
+            self.attn.layer_idx,
             self.ln_1.eps,
             self.attn.head_dim,
-            self.attn.bias.size(-1),
+            self.attn.embed_positions.size(0),
             self.attn.rotary_dim,
         )
         self.blocked_input_signature = get_blocking_signature("BSF", "BSF")
@@ -220,9 +193,117 @@ def OptimizeModelForGPTJ(model, dtype, device="cpu", weight_dtype=None):
             )
 
 
-transformers.models.gptj.modeling_gptj.GPTJForCausalLM._reorder_cache = staticmethod(
-    _reorder_cache
-)
+def GPTJModel_forward(
+    self,
+    input_ids: Optional[torch.LongTensor] = None,
+    past_key_values: Optional[Union[Cache, Tuple[Tuple[torch.Tensor]]]] = None,
+    attention_mask: Optional[torch.FloatTensor] = None,
+    token_type_ids: Optional[torch.LongTensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    head_mask: Optional[torch.FloatTensor] = None,
+    inputs_embeds: Optional[torch.FloatTensor] = None,
+    use_cache: Optional[bool] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+    cache_position: Optional[torch.LongTensor] = None,
+) -> Union[Tuple, BaseModelOutputWithPast]:
+    output_attentions = False
+    output_hidden_states = False
+    use_cache = use_cache if use_cache is not None else self.config.use_cache
+    return_dict = (
+        return_dict if return_dict is not None else self.config.use_return_dict
+    )
+
+    if (input_ids is None) ^ (inputs_embeds is not None):
+        raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+    if inputs_embeds is None:
+        inputs_embeds = self.wte(input_ids)
+
+    if use_cache and not isinstance(past_key_values, TppCache):
+        if past_key_values is None:
+            past_key_values = TppCache()
+        else:
+            if past_key_values.get_seq_length() == 0:
+                past_key_values = TppCache()
+            else:
+                raise ValueError("past_key_values must be of TppCache type")
+
+    seq_length = inputs_embeds.shape[1]
+    if cache_position is None:
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+        cache_position = torch.arange(
+            past_seen_tokens,
+            past_seen_tokens + seq_length,
+            device=inputs_embeds.device,
+        )
+
+    if position_ids is None:
+        position_ids = cache_position.unsqueeze(0)
+
+    # create causal mask
+    causal_mask = past_key_values.align_and_invert_mask(attention_mask, inputs_embeds)
+    # causal_mask = self._update_causal_mask(
+    #     attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+    # )
+
+    # embed positions
+    hidden_states = inputs_embeds
+
+    if token_type_ids is not None:
+        token_type_ids = token_type_ids.view(-1, seq_length)
+        token_type_embeds = self.wte(token_type_ids)
+        hidden_states = hidden_states + token_type_embeds
+
+    output_shape = (-1, seq_length, hidden_states.size(-1))
+
+    next_decoder_cache = None
+    all_self_attentions = () if output_attentions else None
+    all_hidden_states = () if output_hidden_states else None
+    for i, block in enumerate(self.h):
+        outputs = block(
+            hidden_states=hidden_states,
+            layer_past=past_key_values,
+            attention_mask=causal_mask,
+            position_ids=position_ids,
+            # head_mask=head_mask[i],
+            use_cache=use_cache,
+            # output_attentions=output_attentions,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        if use_cache is True:
+            next_decoder_cache = outputs[1]
+
+    hidden_states = self.ln_f(hidden_states)
+
+    hidden_states = hidden_states.view(output_shape)
+
+    next_cache = next_decoder_cache if use_cache else None
+
+    if not return_dict:
+        return tuple(
+            v
+            for v in [
+                hidden_states,
+                next_cache,
+            ]
+            if v is not None
+        )
+
+    return BaseModelOutputWithPast(
+        last_hidden_state=hidden_states,
+        past_key_values=next_cache,
+        hidden_states=all_hidden_states,
+        attentions=all_self_attentions,
+    )
+
+
+transformers.models.gptj.modeling_gptj.GPTJModel.forward = GPTJModel_forward
 
 GPTJForCausalLM_forward = transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward
 
@@ -234,6 +315,7 @@ def GPTJForCausalLM_forward_patched(
     attention_mask: Optional[torch.FloatTensor] = None,
     position_ids: Optional[torch.LongTensor] = None,
     token_type_ids: Optional[torch.LongTensor] = None,
+    cache_position: Optional[torch.LongTensor] = None,
     head_mask: Optional[torch.FloatTensor] = None,
     inputs_embeds: Optional[torch.FloatTensor] = None,
     labels: Optional[torch.LongTensor] = None,
@@ -241,6 +323,7 @@ def GPTJForCausalLM_forward_patched(
     output_attentions: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
+    logits_to_keep: int = 0,
 ) -> Union[Tuple, CausalLMOutputWithPast]:
     r"""
     labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -248,15 +331,17 @@ def GPTJForCausalLM_forward_patched(
         `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
         are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
     """
+    output_attentions = False
+    output_hidden_states = False
     return_dict = (
         return_dict if return_dict is not None else self.config.use_return_dict
     )
 
-    only_last_logit = (
-        self.config.only_last_logit
-        if hasattr(self.config, "only_last_logit")
-        else False
-    )
+    # only_last_logit = (
+    #     self.config.only_last_logit
+    #     if hasattr(self.config, "only_last_logit")
+    #     else False
+    # )
 
     transformer_outputs = self.transformer(
         input_ids,
@@ -264,6 +349,7 @@ def GPTJForCausalLM_forward_patched(
         attention_mask=attention_mask,
         token_type_ids=token_type_ids,
         position_ids=position_ids,
+        cache_position=cache_position,
         head_mask=head_mask,
         inputs_embeds=inputs_embeds,
         use_cache=use_cache,
@@ -273,20 +359,20 @@ def GPTJForCausalLM_forward_patched(
     )
     hidden_states = transformer_outputs[0]
 
-    # Set device for model parallelism
-    if self.model_parallel:
-        torch.cuda.set_device(self.transformer.first_device)
-        hidden_states = hidden_states.to(self.lm_head.weight.device)
-
     # make sure sampling in fp16 works correctly and
     # compute loss in fp32 to match with mesh-tf version
     # https://github.com/EleutherAI/gpt-neo/blob/89ce74164da2fb16179106f54e2269b5da8db333/models/gpt2/gpt2.py#L179
 
     # We only need logits for last token doing text generation
-    if only_last_logit == True and labels is None:
-        hidden_states = hidden_states[:, -1:, :]
+    # if only_last_logit == True and labels is None:
+    #    hidden_states = hidden_states[:, -1:, :]
 
-    lm_logits = self.lm_head(hidden_states).to(torch.float32)
+    slice_indices = (
+        slice(-logits_to_keep, None)
+        if isinstance(logits_to_keep, int)
+        else logits_to_keep
+    )
+    lm_logits = self.lm_head(hidden_states[:, slice_indices, :]).to(torch.float32)
 
     loss = None
     if labels is not None:
@@ -314,21 +400,6 @@ def GPTJForCausalLM_forward_patched(
         hidden_states=transformer_outputs.hidden_states,
         attentions=transformer_outputs.attentions,
     )
-    # return GPTJForCausalLM_forward(
-    #         self,
-    #         input_ids=input_ids,
-    #         past_key_values=past_key_values,
-    #         attention_mask=attention_mask,
-    #         position_ids=position_ids,
-    #         token_type_ids=token_type_ids,
-    #         head_mask=head_mask,
-    #         inputs_embeds=inputs_embeds,
-    #         labels=labels,
-    #         use_cache=use_cache,
-    #         output_attentions=output_attentions,
-    #         output_hidden_states=output_hidden_states,
-    #         return_dict=return_dict,
-    # )
 
 
 transformers.models.gptj.modeling_gptj.GPTJForCausalLM.forward = (
