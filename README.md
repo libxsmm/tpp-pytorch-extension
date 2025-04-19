@@ -13,7 +13,8 @@ The Intel® Tensor Processing Primitives (TPP) extension brings highly optimized
 - **Operating System:** Linux-based system (e.g., Ubuntu)
 - **Compiler:** GCC 8.3.0 or higher
 - **Environment:** Anaconda/Miniconda (recommended for Python and package management)
-- **PyTorch:** pytorch==2.5.1
+- **PyTorch:** 1.4.0 or higher
+- **Python:**  3.6 or higher
 
 ---
 
