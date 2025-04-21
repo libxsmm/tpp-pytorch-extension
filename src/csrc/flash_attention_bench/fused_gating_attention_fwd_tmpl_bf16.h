@@ -12,6 +12,12 @@
 //     "Gating attention forward",
 //     std::vector<c10::IValue>({q_data, m_data})); // For recording time
 
+#ifdef __x86_64__
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+  _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST);
+#endif
+
 int64_t Sp_t = S_t;
 
 float* sfmask = new (std::align_val_t(64)) float[S_t - Sp_t];
@@ -143,7 +149,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
           k_trans_tpp(&tmp[0], &k_a[i][2 * j]);
@@ -168,7 +174,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
           kv_brgemm_tpp(
               &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
           v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t]);
@@ -231,9 +237,6 @@ if (S_t < 2560) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            // T tmp_o[A_BLOCKSIZE * H_t];
-            // T tmp_logits_bf16[A_BLOCKSIZE][S_t];
-            // float tmp_logits[A_BLOCKSIZE][S_t];
             LIBXSMM_ALIGNED(T tmp_o[A_BLOCKSIZE * H_t], 64);
             LIBXSMM_ALIGNED(T tmp_logits_bf16[A_BLOCKSIZE][S_t], 64);
             LIBXSMM_ALIGNED(float tmp_logits[A_BLOCKSIZE][S_t], 64);
@@ -381,7 +384,7 @@ if (S_t < 2560) {
     LIBXSMM_ALIGNED(float cmax[A_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float csum[A_BLOCKSIZE], 64);
 
-    int64_t start_full = rdtsc_ordered();
+    // int64_t start_full = rdtsc_ordered();
 
     #pragma omp for collapse(3) nowait
       for (int i = 0; i < B_t; i++) {
@@ -460,8 +463,8 @@ if (S_t < 2560) {
           }
         }
       }
-      int64_t end = rdtsc_ordered();
-      printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
+      // int64_t end = rdtsc_ordered();
+      // printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
     }
   }
 
@@ -518,9 +521,9 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-          float tmp[C_BLOCKSIZE * N_t * H_t]; // Should be in float for bf16
-          float tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
-          T tmp_bf16[C_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(float tmp[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(float tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(T tmp_bf16[C_BLOCKSIZE * N_t * H_t], 64);
 
           g_brgemm_tpp(
               &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);

@@ -12,6 +12,12 @@
 //     "Gating attention forward",
 //     std::vector<c10::IValue>({q_data, m_data})); // For recording time
 
+#ifdef __x86_64__
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+  _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST);
+#endif
+
 int64_t Sp_t = S_t;
 
 T* sfmask = new (std::align_val_t(64)) T[S_t - Sp_t];     /* create mask */
@@ -83,7 +89,6 @@ float alpha = (1.0 / sqrt(H_t));
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        // T tmp[QKV_BLOCKSIZE * N_t * H_t];
         LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t *H_t], 64);
         qkv_brgemm_tpp(&q_data_a[i][j][0], &query_w_a[0][0][0], &tmp[0], 1);
         scale_tpp(&tmp[0], &q_a[i][j][0][0], alpha);
@@ -102,7 +107,6 @@ float alpha = (1.0 / sqrt(H_t));
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        // T tmp[QKV_BLOCKSIZE * N_t * H_t];
         LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
         qkv_brgemm_tpp(&m_data_a[i][j][0], &key_w_a[0][0][0], &tmp[0], 1);
         k_trans_tpp(&tmp[0], &k_a[i][j]); // [ 0*H_t*S_t + 0*S_t + j]
@@ -178,8 +182,6 @@ if (S_t < 2048) {
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
-            // T tmp_o[A_BLOCKSIZE * H_t];
-            // T tmp_logits[A_BLOCKSIZE][S_t];
             LIBXSMM_ALIGNED(T tmp_o[A_BLOCKSIZE * H_t], 64);
             LIBXSMM_ALIGNED(T tmp_logits[A_BLOCKSIZE][S_t], 64);
 
@@ -419,8 +421,6 @@ auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-        // T tmp[C_BLOCKSIZE * N_t * H_t];
-        // T tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
         LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * N_t * H_t], 64);
         LIBXSMM_ALIGNED(T tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
 

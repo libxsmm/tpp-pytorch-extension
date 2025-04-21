@@ -40,9 +40,6 @@ void xsmm_manual_seed(unsigned int seed) {
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
     _MM_SET_ROUNDING_MODE(_MM_ROUND_NEAREST);
 #endif
-#pragma omp parallel
-  {
-    int tid = omp_get_thread_num();
 
     if (rng_state) {
       libxsmm_rng_destroy_extstate(rng_state);

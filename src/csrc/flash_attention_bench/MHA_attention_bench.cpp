@@ -10,21 +10,16 @@
 
 #include <omp.h>
 #include <stdio.h>
-// #include <torch/extension.h>
 #include <cmath>
 #include <iostream>
 #include <tuple>
 #include <cpuid.h>
 
-// #include <ATen/record_function.h>
 #include "ext_tpp.h"
-// #include "init.h"
 #include "timing.h"
 #include "xsmm_functors.h"
-// #include "shm_coll.h"
 
 using namespace tpp;
-// #include "tensor_helper.h"
 
 #define QKV_BLOCKSIZE 64
 #define A_BLOCKSIZE 64
@@ -34,7 +29,6 @@ using namespace tpp;
 // REGISTER_SCOPE(alpha_q_gemm, "alpha_q_gemm");
 // REGISTER_SCOPE(alpha_k_gemm, "alpha_k_gemm");
 // REGISTER_SCOPE(alpha_v_gemm, "alpha_v_gemm");
-
 // REGISTER_SCOPE(alpha_ac_gemm, "alpha_ac_gemm");
 // REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
 
@@ -136,10 +130,10 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
       m_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
     }
     for (int i = 0; i < batch_size*seq_len; ++i) {
-      bias[l][i] = static_cast<float>(rand()) / RAND_MAX;
+      bias[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
     }
     for (int i = 0; i < num_heads * seq_len * seq_len; ++i) {
-      nonbatched_bias[l][i] = static_cast<float>(rand()) / RAND_MAX;
+      nonbatched_bias[l][i] = static_cast<float>(rand() % 10)*0.1; /// RAND_MAX;
     }
     for (int i = 0; i < embedding_dim * num_heads * head_size; ++i) {
           query_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
@@ -148,14 +142,14 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
           gating_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
     }
     for (int i = 0; i < num_heads * head_size; ++i) {
-      gating_b[l][i] = static_cast<float>(rand()) / RAND_MAX;
+      gating_b[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
     }
 
     for (int i = 0; i < num_heads * head_size * embedding_dim; ++i) {
-      output_w[l][i] = static_cast<T>(rand()) / RAND_MAX;
+      output_w[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
     }
     for (int i = 0; i < embedding_dim; ++i) {
-      output_b[l][i] = static_cast<float>(rand()) / RAND_MAX;
+      output_b[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
     }
   }
 
