@@ -95,7 +95,7 @@ void fused_gating_attention_fwd_fp32(
 }
 
 template<typename T>
-std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**, T**> allocate_and_initialize(int batch_size, int seq_len, int num_heads, int head_size, int embedding_dim, int num_layer) {
+std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**, T**> allocate_and_initialize(long batch_size, long seq_len, long num_heads, long head_size, long embedding_dim, long num_layer) {
 
   T** q_data = new T*[num_layer];
   T** m_data =  new T*[num_layer];
@@ -124,6 +124,12 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
     output_w[l] = new (std::align_val_t(64)) T[num_heads * head_size * embedding_dim];
     output_b[l] = new (std::align_val_t(64)) float[embedding_dim];
     output[l] = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
+
+    // check if any allocation failed
+    if (!q_data[l] || !m_data[l] || !bias[l] || !nonbatched_bias[l] || !query_w[l] || !key_w[l] || !value_w[l] || !gating_w[l] || !gating_b[l] || !output_w[l] || !output_b[l] || !output[l]) {
+      std::cerr << "Memory allocation failed for layer " << l << std::endl;
+      exit(1);
+    }
 
     for (int i = 0; i < batch_size*seq_len*embedding_dim; ++i) {
       q_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
@@ -165,16 +171,16 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  int batch_size = std::stoi(argv[1]);
-  int seq_len = std::stoi(argv[2]);
-  int num_heads = std::stoi(argv[3]);
-  int head_size = std::stoi(argv[4]);
-  int embedding_dim = num_heads * head_size;
+  long batch_size = std::stoi(argv[1]);
+  long seq_len = std::stoi(argv[2]);
+  long num_heads = std::stoi(argv[3]);
+  long head_size = std::stoi(argv[4]);
+  long embedding_dim = num_heads * head_size;
   bool bias_flag = std::stoi(argv[5]);
   bool nb_bias_flag = std::stoi(argv[6]);
   bool bf16_flag = std::stoi(argv[7]);
-  int num_layer = std::stoi(argv[8]);
-  int num_iter = std::stoi(argv[9]);
+  long num_layer = std::stoi(argv[8]);
+  long num_iter = std::stoi(argv[9]);
   if (bf16_flag) {
     printf("Running with BF16\n");
     typedef bfloat16 T;

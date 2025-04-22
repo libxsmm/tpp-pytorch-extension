@@ -52,6 +52,12 @@ auto v_a = GetVLAPtr<T>(v, {S_t * N_t * H_t});
 T* weighted_avg = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
 auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t, H_t});
 
+// check if any allocation failed
+if (!q || !k || !v || !weighted_avg) {
+  std::cerr << "Memory allocation failed for q, k, v, or weighted_avg" << std::endl;
+  exit(1);
+}
+
 auto output_a = GetVLAPtr<T>(output, {S_t, HS_t});
 
 int lda = HS_t;
@@ -75,7 +81,7 @@ auto qkv_vnni_trans_tpp = SCOPEIT(
         T>(HS_t, N_t* H_t, HS_t, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
     VNNI);
 
-T* qkv_w_vnni = new T[HS_t * N_t * H_t]; 
+T* qkv_w_vnni = new (std::align_val_t(64)) T[HS_t * N_t * H_t]; 
 auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 
 // auto q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
@@ -93,7 +99,7 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          float tmp[QKV_BLOCKSIZE][N_t][H_t];
+          LIBXSMM_ALIGNED(float tmp[QKV_BLOCKSIZE][N_t][H_t], 64);
           zero_tpp(&tmp[0][0][0]);
           q_brgemm_tpp(
               &q_data_a[i][j][0],
@@ -499,7 +505,7 @@ auto output_vnni_trans_tpp = SCOPEIT(
         T>(N_t * H_t, HS_t, N_t* H_t, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
     VNNI);
 
-T* output_w_vnni = new T[N_t * H_t * HS_t];
+T* output_w_vnni = new (std::align_val_t(64)) T[N_t * H_t * HS_t];
 auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
