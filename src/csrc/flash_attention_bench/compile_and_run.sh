@@ -32,6 +32,12 @@ elif [ "$llm" == "gpt3-13b" ]; then
   embed_size=5140; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0
 elif [ "$llm" == "gpt3-175b" ]; then
   embed_size=12288; nheads=96; head_size=128; bias_flag=0; nbbias_flag=0
+elif [ "$llm" == "alphafold2-h32" ]; then
+  embed_size=256; nheads=8; head_size=32; bias_flag=0; nbbias_flag=0
+elif [ "$llm" == "alphafold2-h16" ]; then
+  embed_size=64; nheads=4; head_size=16; bias_flag=0; nbbias_flag=0
+elif [ "$llm" == "alphafold2-h8" ]; then
+  embed_size=64; nheads=8; head_size=8; bias_flag=0; nbbias_flag=0
 else
   echo "Custom model: $llm, please manually set the parameters"
 fi
