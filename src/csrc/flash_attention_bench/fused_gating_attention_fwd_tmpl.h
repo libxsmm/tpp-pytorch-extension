@@ -82,6 +82,7 @@ float alpha = (1.0 / sqrt(H_t));
 // (1.0/sqrt(key_dim))) ;     /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
 // 32] */
 
+auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
 {
   // RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
   {
@@ -97,9 +98,13 @@ float alpha = (1.0 / sqrt(H_t));
   }
 }
 
+auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+auto q_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
 // auto k = at::einsum("bka,ahc->bkhc", {m_data, key_w}); /* [512, 764, 8, 32]
 // = [512, 764, 256] * [256, 8, 32] */
 
+start_time = std::chrono::high_resolution_clock::now(); // Start timing
 {
   // RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
   {
@@ -115,8 +120,12 @@ float alpha = (1.0 / sqrt(H_t));
   }
 }
 
+end_time = std::chrono::high_resolution_clock::now(); // End timing
+auto k_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
 // auto v = at::einsum("bka,ahc->bkhc", {m_data, value_w}); /* [512, 764, 8, 32]
 // = [512, 764, 256] * [256, 8, 32] */
+start_time = std::chrono::high_resolution_clock::now(); // Start timing
 {
   // RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
   {
@@ -130,6 +139,9 @@ float alpha = (1.0 / sqrt(H_t));
     }
   }
 }
+
+end_time = std::chrono::high_resolution_clock::now(); // End timing
+auto v_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
 
 lda = H_t;
 ldb = A_BLOCKSIZE;
@@ -147,6 +159,8 @@ ldc = S_t;
 
 auto a_zero_tpp = SCOPEIT(SetZeroTPP<T>(A_BLOCKSIZE * H_t), EW_ZERO);
 auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t), EW_COPY);
+
+start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
 if (S_t < 2048) {
   auto a_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
@@ -195,7 +209,7 @@ if (S_t < 2048) {
             if (bias_flag)
               a_addbias_tpp(&bias_a[i][0], &tmp_logits[0][0]);
 
-            if (flag)
+            if (nbbias_flag)
               a_add_nbbias_tpp(
                   &nonbatched_bias_a[0][n][j1][0],
                   &tmp_logits[0][0],
@@ -317,7 +331,7 @@ if (S_t < 2048) {
     LIBXSMM_ALIGNED(float cmax[A_BLOCKSIZE], 64);
     LIBXSMM_ALIGNED(float csum[A_BLOCKSIZE], 64);
 
-    int64_t start_full = rdtsc_ordered();
+    // int64_t start_full = rdtsc_ordered();
       #pragma omp for collapse(3) nowait
       for (int i = 0; i < B_t; i++) {
         for (int n = 0; n < N_t; n++) {
@@ -331,7 +345,7 @@ if (S_t < 2048) {
               if (bias_flag)
                 a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
 
-              if (flag)
+              if (nbbias_flag)
                 a_add_nbbias_online_tpp(
                     &nonbatched_bias_a[0][n][j1][j2], tmp_S, tmp_S);
 
@@ -360,8 +374,9 @@ if (S_t < 2048) {
                   tmp_S_edge,
                   1);
 
-              a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
-              if (flag) {
+              if (bias_flag)
+                a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
+              if (nbbias_flag) {
                 a_add_nbbias_online_edge_tpp(
                     &nonbatched_bias_a[0][n][j1][j2], tmp_S_edge, tmp_S_edge);
               }
@@ -381,12 +396,14 @@ if (S_t < 2048) {
         }
       }
 
-    int64_t end = rdtsc_ordered();
-    printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
+    // int64_t end = rdtsc_ordered();
+    // printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
   }
 //   }
 }
-printf( "\n ----------------------------New threads starting -------------------------- \n" );
+
+end_time = std::chrono::high_resolution_clock::now(); // End timing
+auto ac_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
 
 lda = HS_t;
 ldb = N_t * H_t;
@@ -414,6 +431,8 @@ auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 // at::add(at::einsum("bqhc,hco->bqo", {weighted_avg, output_w}), output_b); /*
 // [512, 764, 256]  = [512, 764, 8, 32] * [8, 32, 256] + [256] */
 
+start_time = std::chrono::high_resolution_clock::now(); // Start timing
+
 {
   // RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
@@ -421,24 +440,37 @@ auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-        LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * N_t * H_t], 64);
-        LIBXSMM_ALIGNED(T tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
+        if (gate_flag){
+          LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(T tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
+          g_brgemm_tpp(&q_data_a[i][j][0], &gating_w_a[0][0][0], &tmp[0], 1);
+          g_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
 
-        g_brgemm_tpp(&q_data_a[i][j][0], &gating_w_a[0][0][0], &tmp[0], 1);
-        g_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
-
-        g_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[0]);
-        g_mul_tpp(
-            &tmp_gate_values[0],
-            &weighted_avg_a[i][j][0][0],
-            &tmp_gate_values[0]);
-        out_gemm_tpp(
-            &tmp_gate_values[0], &output_w_a[0][0][0], &output_a[i][j][0], 1);
-        out_addbias_tpp(&output_b_a[0][0], &output_a[i][j][0]);
+          g_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[0]);
+          g_mul_tpp(
+              &tmp_gate_values[0],
+              &weighted_avg_a[i][j][0][0],
+              &tmp_gate_values[0]);
+              
+          out_gemm_tpp(
+              &tmp_gate_values[0], &output_w_a[0][0][0], &output_a[i][j][0], 1);
+          out_addbias_tpp(&output_b_a[0][0], &output_a[i][j][0]);
+        }
+        else{
+          out_gemm_tpp(
+            &weighted_avg_a[i][j][0][0], &output_w_a[0][0][0], &output_a[i][j][0], 1);
+          out_addbias_tpp(&output_b_a[0][0], &output_a[i][j][0]);
+        }
       }
     }
   }
 }
+
+end_time = std::chrono::high_resolution_clock::now(); // End timing
+auto o_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
+// make a std::vector of the times
+std::vector<long int> times = {q_gemm_time, k_gemm_time, v_gemm_time, ac_gemm_time, o_gemm_time};
 
 delete[] sfmask;
 delete[] q;

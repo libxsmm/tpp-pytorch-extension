@@ -14,6 +14,7 @@
 #include <iostream>
 #include <tuple>
 #include <cpuid.h>
+#include <chrono>
 
 #include "ext_tpp.h"
 #include "timing.h"
@@ -42,7 +43,20 @@ unsigned long long rdtsc_ordered() {
   // return ((unsigned long long)hi << 32) | lo;
 }
 
-void fused_gating_attention_fwd_bf16(
+template <typename T>
+std::vector<T> operator+(const std::vector<T>& a, const std::vector<T>& b)
+{
+    assert(a.size() == b.size());
+
+    std::vector<T> result;
+    result.reserve(a.size());
+
+    std::transform(a.begin(), a.end(), b.begin(), 
+                   std::back_inserter(result), std::plus<T>());
+    return result;
+}
+
+std::vector<long int> fused_gating_attention_fwd_bf16(
     bfloat16* q_data,
     bfloat16* m_data,
     float* bias,
@@ -61,14 +75,17 @@ void fused_gating_attention_fwd_bf16(
     int64_t H_t,
     int64_t HS_t,
     bool bias_flag,
-    bool flag) {
+    bool nbbias_flag,
+    bool gate_flag) {
   GlobalPass _gp(FWD);
   
   typedef bfloat16 T;
   #include "fused_gating_attention_fwd_tmpl_bf16.h"
+
+  return times;
 }
 
-void fused_gating_attention_fwd_fp32(
+std::vector<long int> fused_gating_attention_fwd_fp32(
     float* q_data,
     float* m_data,
     float* bias,
@@ -87,11 +104,13 @@ void fused_gating_attention_fwd_fp32(
     int64_t H_t,
     int64_t HS_t,
     bool bias_flag,
-    bool flag) {
+    bool nbbias_flag,
+    bool gate_flag) {
   // GlobalPass _gp(FWD);
   
   typedef float T;
   #include "fused_gating_attention_fwd_tmpl.h"
+  return times;
 }
 
 template<typename T>
@@ -167,7 +186,7 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
 
 int main(int argc, char* argv[]) {
   if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <BF16> <num_layer> <num_iter>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <num_layer> <num_iter>" << std::endl;
     return 1;
   }
 
@@ -177,37 +196,46 @@ int main(int argc, char* argv[]) {
   long head_size = std::stoi(argv[4]);
   long embedding_dim = num_heads * head_size;
   bool bias_flag = std::stoi(argv[5]);
-  bool nb_bias_flag = std::stoi(argv[6]);
-  bool bf16_flag = std::stoi(argv[7]);
-  long num_layer = std::stoi(argv[8]);
-  long num_iter = std::stoi(argv[9]);
+  bool nbbias_flag = std::stoi(argv[6]);
+  bool gate_flag = std::stoi(argv[7]);
+  bool bf16_flag = std::stoi(argv[8]);
+  long num_layer = std::stoi(argv[9]);
+  long num_iter = std::stoi(argv[10]);
   if (bf16_flag) {
     printf("Running with BF16\n");
     typedef bfloat16 T;
     // Allocate and initialize input tensors
     auto [q_data, m_data, bias, nonbatched_bias, query_w, key_w, value_w, gating_w, gating_b, output_w, output_b, output] = allocate_and_initialize<T>(batch_size, seq_len, num_heads, head_size, embedding_dim, num_layer);
-  
+    
     for (int l = 0; l < num_layer; l++) {
       fused_gating_attention_fwd_bf16(
-            q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
-            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-            output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nb_bias_flag);
+        q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+        query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+        output_w[l], output_b[l], output[l], 
+        batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
     }
     auto t0 = getTime();
+    auto times = std::vector<long int>(5, 0);
     for (int i = 0; i < num_iter; i++) {
       // Run the forward function
       for (int l = 0; l < num_layer; l++) {
-        fused_gating_attention_fwd_bf16(
+        auto layer_time = fused_gating_attention_fwd_bf16(
               q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nb_bias_flag);
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        times = times + layer_time;
       }
     }
-
     auto t1 = getTime();
-    printf("Time taken: %f ms\n", ((t1 - t0)/num_iter) * 1e3);
+    // print the times vector elements with names
+    printf("Time taken for q_gemm: %f ms\n", times[0] / ((double)1e3 * num_iter * num_layer));
+    printf("Time taken for k_gemm: %f ms\n", times[1] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for v_gemm: %f ms\n", times[2] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for ac_gemm (SDPA): %f ms\n", times[3] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for o_gemm: %f ms\n", times[4] / ((double)1e3 *num_iter * num_layer));
+
+    printf("Total Time taken for one layer: %f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }
@@ -222,21 +250,30 @@ int main(int argc, char* argv[]) {
             q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
             query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
             output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nb_bias_flag);
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
     }
     auto t0 = getTime();
+    auto times = std::vector<long int>(5, 0);
     for (int i = 0; i < num_iter; i++) {
       for (int l = 0; l < num_layer; l++) {
-        fused_gating_attention_fwd_fp32(
+        auto layer_time = fused_gating_attention_fwd_fp32(
               q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nb_bias_flag);
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        times = times + layer_time;
       }
     }
 
     auto t1 = getTime();
-    printf("Time taken: %f ms\n", ((t1 - t0)/num_iter) * 1e3);
+    // print the times vector elements with names
+    printf("Time taken for q_gemm: %f ms\n", times[0] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for k_gemm: %f ms\n", times[1] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for v_gemm: %f ms\n", times[2] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for ac_gemm (SDPA): %f ms\n", times[3] / ((double)1e3 *num_iter * num_layer));
+    printf("Time taken for o_gemm: %f ms\n", times[4] / ((double)1e3 *num_iter * num_layer));
+
+    printf("Total Time taken for one layer: %f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }
