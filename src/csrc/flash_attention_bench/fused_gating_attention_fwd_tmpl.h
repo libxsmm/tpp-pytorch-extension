@@ -459,7 +459,8 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
         else{
           out_gemm_tpp(
             &weighted_avg_a[i][j][0][0], &output_w_a[0][0][0], &output_a[i][j][0], 1);
-          out_addbias_tpp(&output_b_a[0][0], &output_a[i][j][0]);
+          if (bias_flag)
+            out_addbias_tpp(&output_b_a[0][0], &output_a[i][j][0]);
         }
       }
     }

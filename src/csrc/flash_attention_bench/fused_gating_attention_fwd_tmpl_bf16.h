@@ -484,8 +484,8 @@ if (S_t < 2560) {
       }
       // int64_t end = rdtsc_ordered();
       // printf( "Time taken by thread %d is %0.2lf \n", omp_get_thread_num(), (end - start_full)/(double)1e9 );
-    }
   }
+}
 
 end_time = std::chrono::high_resolution_clock::now(); // End timing
 auto ac_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
@@ -569,7 +569,8 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
           else{
             out_gemm_tpp(
               &weighted_avg_a[i][j][0][0], &output_w_vnni_a[0][0][0], &tmp[0], 1, true);
-            out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
+            if (bias_flag)
+              out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
             out_convert_tpp(&tmp[0], &output_a[i][j][0]);
           }
         }
