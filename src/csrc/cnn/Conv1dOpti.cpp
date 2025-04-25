@@ -132,9 +132,9 @@ at::Tensor Conv1dOpti_forward_bf16_libxsmm(at::Tensor& input, at::Tensor& weight
 
     libxsmm_meltw_unary_type trans_vnni_type;
     if ( C_t % 2 == 1 ) {
-        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI_PAD;
+        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI8_PAD;
     } else {
-        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI;
+        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI8;
     }
     tpp_m1 = (XS_TILE_FORWARD + dial*(WW_t-1));
     tpp_m2 = (W_t - tile_multiple + dial*(WW_t-1));
@@ -431,9 +431,9 @@ std::tuple<at::Tensor, at::Tensor> Conv1dOpti_backward_bf16_libxsmm(at::Tensor& 
 
     libxsmm_meltw_unary_type trans_vnni_type;
     if ( F_t % 2 == 1 ) {
-        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI_PAD;
+        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI8_PAD;
     } else {
-        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI;
+        trans_vnni_type = LIBXSMM_MELTW_TYPE_UNARY_TRANSFORM_NORM_TO_VNNI8;
     }
 
     tpp_m1 = (XS_TILE_DBACKWARD + dial*(WW_t-1));
@@ -1316,11 +1316,12 @@ at::Tensor relu_backward_bf16(at::Tensor& grad, at::Tensor& mask) {
 }
 
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-m.def("forward", &Conv1dOpti_forward_libxsmm, "Conv1dOpti lib forward");
-m.def("backward", &Conv1dOpti_backward_libxsmm, "Conv1dOpti lib backward");
-m.def("forward_bf16", &Conv1dOpti_forward_bf16_libxsmm, "Conv1dOpti bf16 forward");
-m.def("backward_bf16", &Conv1dOpti_backward_bf16_libxsmm, "Conv1dOpti bf16 backward");
-m.def("relu_forward_bf16", &relu_forward_bf16, "ReLU bf16 forward");
-m.def("relu_backward_bf16", &relu_backward_bf16, "ReLU bf16 backward");
+void init_conv1d_opti(pybind11::module& m) {
+  auto cnn = m.def_submodule("_conv1dopti");
+  cnn.def("forward", &Conv1dOpti_forward_libxsmm, "Conv1dOpti lib forward");
+  cnn.def("backward", &Conv1dOpti_backward_libxsmm, "Conv1dOpti lib backward");
+  cnn.def("forward_bf16", &Conv1dOpti_forward_bf16_libxsmm, "Conv1dOpti bf16 forward");
+  cnn.def("backward_bf16", &Conv1dOpti_backward_bf16_libxsmm, "Conv1dOpti bf16 backward");
+  cnn.def("relu_forward_bf16", &relu_forward_bf16, "ReLU bf16 forward");
+  cnn.def("relu_backward_bf16", &relu_backward_bf16, "ReLU bf16 backward");
 }
