@@ -25,11 +25,11 @@ Keep the batch size as power of 2 with the MKLDNN backend (Conv1d) for optimal p
 
 """
 Batch_size = 64                  # Batch size (64)
-Input_width = 60000              # Width of the input signal track (60000)
+Input_width = 60000             # Width of the input signal track (60000)
 Channels = 15                    # Number of channels in the input (15)
 Filters = 15                     # Number of filter in the layer (15)
 Dilation = 8                     # Amount of dilation (8)
-Kernel_size = 51                 # Size of each filter (51)
+Kernel_size = 20                # Size of each filter (51)
 enable_BF16 = False              # Enable layer compute in BFloat16 (Only works when Filters and channels are both even numbers)
 
 class ZeroSamePad1d(nn.Module):
