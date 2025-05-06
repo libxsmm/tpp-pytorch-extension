@@ -1,7 +1,6 @@
 # Optimized 1D U-Net with TPP Convolution Layer
-
-An optimized 1D convolutional layer (`Conv1dOpti`) is developed using LIBXSMM Tensor Processing Primitives (TPPs) to enable high-performance execution. The implementation is integrated into the `cnn/` directory of the `tpp_pytorch_extension` package, allowing seamless access upon compilation. The optimized layer is subsequently integrated into a full 1D U-Net architecture to serve as a complete and practical example.
 ---
+An optimized 1D convolutional layer (`Conv1dOpti`) is developed using LIBXSMM Tensor Processing Primitives (TPPs) to enable high-performance execution. The implementation is integrated into the `cnn/` directory of the `tpp_pytorch_extension` package, allowing seamless access upon compilation. The optimized layer is subsequently integrated into a full 1D U-Net architecture to serve as a complete and practical example.
 
 ## 🚀 Features
 
