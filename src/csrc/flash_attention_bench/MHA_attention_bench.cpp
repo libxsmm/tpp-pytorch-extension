@@ -235,7 +235,7 @@ void flops_and_bandwidth(
 
 int main(int argc, char* argv[]) {
   if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <num_layer> <num_iter>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <num_layer> <num_iter> <self_attention_flag>" << std::endl;
     return 1;
   }
 
@@ -250,6 +250,7 @@ int main(int argc, char* argv[]) {
   bool bf16_flag = std::stoi(argv[8]);
   long num_layer = std::stoi(argv[9]);
   long num_iter = std::stoi(argv[10]);
+  bool self_attention_flag = std::stoi(argv[11]);
   if (bf16_flag) {
     printf("Running with BF16\n");
     typedef bfloat16 T;
@@ -257,23 +258,57 @@ int main(int argc, char* argv[]) {
     auto [q_data, m_data, bias, nonbatched_bias, query_w, key_w, value_w, gating_w, gating_b, output_w, output_b, output] = allocate_and_initialize<T>(batch_size, seq_len, num_heads, head_size, embedding_dim, num_layer);
     
     for (int l = 0; l < num_layer; l++) {
-      fused_gating_attention_fwd_bf16(
-        q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
-        query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-        output_w[l], output_b[l], output[l], 
-        batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+      if (self_attention_flag){
+        if (l==0) {
+          fused_gating_attention_fwd_bf16(
+            q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
+            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+            output_w[l], output_b[l], output[l], 
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        } else {
+          fused_gating_attention_fwd_bf16(
+            output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+            output_w[l], output_b[l], output[l], 
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        }
+      } else {
+        fused_gating_attention_fwd_bf16(
+          q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+          query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+          output_w[l], output_b[l], output[l], 
+          batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+      }
     }
     auto t0 = getTime();
     auto times = std::vector<long int>(5, 0);
     for (int i = 0; i < num_iter; i++) {
       // Run the forward function
       for (int l = 0; l < num_layer; l++) {
-        auto layer_time = fused_gating_attention_fwd_bf16(
-              q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+        if (self_attention_flag){
+          if (l==0) {
+            auto layer_time = fused_gating_attention_fwd_bf16(
+              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
               batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
-        times = times + layer_time;
+            times = times + layer_time;
+          } else {
+            auto layer_time = fused_gating_attention_fwd_bf16(
+              output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            times = times + layer_time;
+          }
+        } else {
+          auto layer_time = fused_gating_attention_fwd_bf16(
+                q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          times = times + layer_time;
+        }
       }
     }
     auto t1 = getTime();
@@ -290,22 +325,56 @@ int main(int argc, char* argv[]) {
     auto [q_data, m_data, bias, nonbatched_bias, query_w, key_w, value_w, gating_w, gating_b, output_w, output_b, output] = allocate_and_initialize<T>(batch_size, seq_len, num_heads, head_size, embedding_dim, num_layer);
   
     for (int l = 0; l < num_layer; l++) {
-      fused_gating_attention_fwd_fp32(
-            q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+      if (self_attention_flag){
+        if (l==0) {
+          fused_gating_attention_fwd_fp32(
+            q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
             query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
             output_w[l], output_b[l], output[l], 
             batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        } else {
+          fused_gating_attention_fwd_fp32(
+            output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+            output_w[l], output_b[l], output[l], 
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        }
+      } else {
+        fused_gating_attention_fwd_fp32(
+              q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+      }
     }
     auto t0 = getTime();
     auto times = std::vector<long int>(5, 0);
     for (int i = 0; i < num_iter; i++) {
       for (int l = 0; l < num_layer; l++) {
-        auto layer_time = fused_gating_attention_fwd_fp32(
-              q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+        if (self_attention_flag){
+          if (l==0) {
+            auto layer_time = fused_gating_attention_fwd_fp32(
+              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
               batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
-        times = times + layer_time;
+            times = times + layer_time;
+          } else {
+            auto layer_time = fused_gating_attention_fwd_fp32(
+              output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            times = times + layer_time;
+          }
+        } else {
+          auto layer_time = fused_gating_attention_fwd_fp32(
+                q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          times = times + layer_time;
+        }
       }
     }
 
