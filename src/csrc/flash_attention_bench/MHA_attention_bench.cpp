@@ -181,6 +181,55 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
   return std::make_tuple(q_data, m_data, bias, nonbatched_bias, query_w, key_w, value_w, gating_w, gating_b, output_w, output_b, output);
 }
 
+template<typename T>
+void flops_and_bandwidth(
+  const std::vector<long int>& times,
+  long batch_size,
+  long seq_len,
+  long num_heads,
+  long head_size,
+  long embedding_dim,
+  bool gate_flag,
+  int num_iter,
+  int num_layer,
+  bool bias_flag,
+  bool nbbias_flag
+  ) {
+    auto times_ms = std::vector<double>(5, 0);
+    for(int i = 0; i < 5; i++) {
+      times_ms[i] = (double)times[i] / ((double)1e3 * num_iter * num_layer);
+    }
+    auto q_flops = ((double)2.0 * batch_size * seq_len * num_heads * head_size * embedding_dim) / (times_ms[0] * (double)1e9);
+    auto k_flops = ((double)2.0 * batch_size * seq_len * num_heads * head_size * embedding_dim) / (times_ms[1] * (double)1e9);
+    auto v_flops = ((double)2.0 * batch_size * seq_len * num_heads * head_size * embedding_dim) / (times_ms[2] * (double)1e9);
+    auto ac_flops = ((double)4.0 * batch_size * num_heads * head_size * seq_len * seq_len) / (times_ms[3] * (double)1e9);
+    auto o_flops = ((double)2.0 * batch_size * seq_len * num_heads * head_size * embedding_dim);
+    if (gate_flag)
+      o_flops += ((double)2.0 * batch_size * seq_len * num_heads * head_size * embedding_dim);
+    o_flops = o_flops / (times_ms[4] * (double)1e9);
+    
+    auto q_gb = ((((double)2.0 * batch_size * seq_len * num_heads * head_size) + ((double)num_heads * head_size * embedding_dim)) * sizeof(T)) / (times_ms[0] * (double)1e6);
+    auto k_gb = ((((double)2.0 *batch_size * seq_len * num_heads * head_size) + ((double)num_heads * head_size * embedding_dim)) * sizeof(T)) / (times_ms[1] * (double)1e6);
+    auto v_gb = ((((double)2.0 *batch_size * seq_len * num_heads * head_size) + ((double)num_heads * head_size * embedding_dim)) * sizeof(T)) / (times_ms[2] * (double)1e6);
+
+    auto ac_gb = ((((double)4.0 *batch_size * seq_len * num_heads * head_size)) * sizeof(T));
+    if (bias_flag)
+      ac_gb += ((((double)batch_size * seq_len)) * sizeof(float));
+    if (nbbias_flag)
+      ac_gb += ((((double)num_heads * seq_len * seq_len)) * sizeof(float));
+    ac_gb = ac_gb / (times_ms[3] * (double)1e6);
+
+    auto o_gb = ((((double)2.0 *batch_size * seq_len * num_heads * head_size) + ((double)num_heads * head_size * embedding_dim)) * sizeof(T));
+    if (gate_flag)
+      o_gb += ((((double)batch_size * seq_len * num_heads * head_size) + ((double)num_heads * head_size * embedding_dim)) * sizeof(T));
+    o_gb = o_gb / (times_ms[4] * (double)1e6);
+    // print the times_ms vector elements with names 
+    printf("Time taken for q_gemm: %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", times_ms[0], q_flops, q_gb);
+    printf("Time taken for k_gemm: %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", times_ms[1], k_flops, k_gb);
+    printf("Time taken for v_gemm: %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", times_ms[2], v_flops, v_gb);
+    printf("Time   ac_gemm (SDPA): %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", times_ms[3], ac_flops, ac_gb);
+    printf("Time taken for o_gemm: %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", times_ms[4], o_flops, o_gb);
+  }
 
 // Main function that takes Batch size, Sequence length, Number of heads, Head size as input
 
@@ -228,14 +277,9 @@ int main(int argc, char* argv[]) {
       }
     }
     auto t1 = getTime();
-    // print the times vector elements with names
-    printf("Time taken for q_gemm: %f ms\n", times[0] / ((double)1e3 * num_iter * num_layer));
-    printf("Time taken for k_gemm: %f ms\n", times[1] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for v_gemm: %f ms\n", times[2] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for ac_gemm (SDPA): %f ms\n", times[3] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for o_gemm: %f ms\n", times[4] / ((double)1e3 *num_iter * num_layer));
+    flops_and_bandwidth<T>(times, batch_size, seq_len, num_heads, head_size, embedding_dim, gate_flag, num_iter, num_layer, bias_flag, nbbias_flag);
 
-    printf("Total Time taken for one layer: %f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
+    printf("Total Time taken for one layer: %0.2f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }
@@ -266,14 +310,9 @@ int main(int argc, char* argv[]) {
     }
 
     auto t1 = getTime();
-    // print the times vector elements with names
-    printf("Time taken for q_gemm: %f ms\n", times[0] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for k_gemm: %f ms\n", times[1] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for v_gemm: %f ms\n", times[2] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for ac_gemm (SDPA): %f ms\n", times[3] / ((double)1e3 *num_iter * num_layer));
-    printf("Time taken for o_gemm: %f ms\n", times[4] / ((double)1e3 *num_iter * num_layer));
+    flops_and_bandwidth<T>(times, batch_size, seq_len, num_heads, head_size, embedding_dim, gate_flag, num_iter, num_layer, bias_flag, nbbias_flag);
 
-    printf("Total Time taken for one layer: %f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
+    printf("Total Time taken for one layer: %0.2f ms\n", ((t1 - t0)/(num_iter * num_layer)) * 1e3);
     for(int l = 0; l < num_layer; l++) {
       delete[] q_data[l]; delete[] m_data[l]; delete[] bias[l]; delete[] nonbatched_bias[l]; delete[] query_w[l]; delete[] key_w[l]; delete[] value_w[l]; delete[] gating_w[l]; delete[] gating_b[l]; delete[] output_w[l]; delete[] output_b[l]; delete[] output[l];
     }

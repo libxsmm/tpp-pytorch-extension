@@ -7,7 +7,7 @@ export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:aut
 
 # write help message
 if [ "$1" == "--help" ]; then
-  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <num_layer> <num_iter> <nheads> <head_size> <bias_flag> <nbbias_flag>"
+  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <num_layer> <num_iter> <nheads> <head_size> <bias_flag> <nbbias_flag> <gate_flag>"
   echo ""
   echo "llm: name of the model (default: llama-7b), options: llama-7b, llama4, llama-3.1-8B, llama-3.2-3B, llama-3.2-1B,"
   echo "gpt2, gpt3-13b, gpt3-175b, alphafold2-h32, alphafold2-h16, alphafold2-h8"
@@ -68,7 +68,7 @@ echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16
 
 
 echo "Compiling MHA"
-g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f > /dev/null 2>&1
+g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
 # KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=4 perf stat -e cycles,cpu/event=0xc2,umask=0x2,name=UOPS_RETIRED.RETIRE_SLOTS/,cpu/event=0xc1,umask=0x02,cmask=0x1,name=FP_ASSIST.ANY/,cpu/event=0xc1,umask=0x08,cmask=0x1,name=ASSISTS.PAGE_FAULT/,cpu/event=0xc1,umask=0x10,cmask=0x1,name=ASSISTS.SSE_AVX_MIX/,cpu/event=0x79,umask=0x30,name=IDQ.MS_UOPS/ ./mha.o 32 3072 8 8 0 0 0 1 0
 
 # get number of cpu from lscpu command
