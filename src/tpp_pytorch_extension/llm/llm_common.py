@@ -171,7 +171,7 @@ class TppCache(DynamicCache):
     def reorder_cache(self, beam_idx: torch.LongTensor):
         """Reorders the cache for beam search, given the selected beam indices."""
         # print_line_info()
-        self.tpp_cache.reorder_cache(beam_idx)
+        self.tpp_cache.reorder_cache(beam_idx.to(torch.long))
 
     def get_cpp(self):
         return self.tpp_cache
