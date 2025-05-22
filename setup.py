@@ -136,6 +136,8 @@ sources = [
     "src/csrc/common_loops.cpp",
     "src/csrc/qtypes.cpp",
 ]
+#CNN
+sources += glob.glob("src/csrc/cnn/*.cpp")
 
 # AlphaFold sources
 sources += glob.glob("src/csrc/alphafold/*.cpp")
