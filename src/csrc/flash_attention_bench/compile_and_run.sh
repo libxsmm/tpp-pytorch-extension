@@ -51,7 +51,7 @@ elif [ "$llm" == "llama-3.2-1B" ]; then
 elif [ "$llm" == "gpt2" ]; then
   embed_size=768; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-13b" ]; then
-  embed_size=5140; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
+  embed_size=5120; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-175b" ]; then
   embed_size=12288; nheads=96; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "alphafold2-h32" ]; then
