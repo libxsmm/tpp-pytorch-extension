@@ -246,7 +246,9 @@ class BlockedTensor(object):
 
 
 class BlockedParameter(torch.nn.Parameter):
-    def __new__(cls, data=None, requires_grad=True):
+    def __new__(cls, data=None, requires_grad=True, **kwargs):
+        if kwargs:
+            print(f"kwargs={kwargs}")
         return super(BlockedParameter, cls).__new__(
             cls, data=data, requires_grad=requires_grad
         )
@@ -327,11 +329,18 @@ class BlockedModule(torch.nn.Module):
         error_msgs,
     ):
         blocked_params = []
-        local_metadata["assign_to_params_buffers"] = False
-        for p in self.parameters(recurse=False):
-            if isinstance(p, BlockedParameter) and p.is_blocked():
-                p.unblock()
-                blocked_params.append(p)
+        meta_params = {}
+        assign_to_params_buffers = local_metadata.get("assign_to_params_buffers", False)
+        # local_metadata["assign_to_params_buffers"] = False
+
+        for n, p in self.named_parameters(recurse=False):
+            if isinstance(p, BlockedParameter):
+                if p.is_blocked():
+                    p.unblock()
+                    blocked_params.append(n)
+                if p.is_meta or assign_to_params_buffers:
+                    meta_params[n] = getattr(p, "blocking_param", None)
+
         super(BlockedModule, self)._load_from_state_dict(
             state_dict,
             prefix,
@@ -341,8 +350,16 @@ class BlockedModule(torch.nn.Module):
             unexpected_keys,
             error_msgs,
         )
-        for p in blocked_params:
-            p.block()
+        for n, v in meta_params.items():
+            # print(f"BlockingParam {n}: {v}")
+            p = getattr(self, n)
+            blocked_p = BlockedParameter(p.data)
+            blocked_p.set_blocking_param(v)
+            setattr(self, n, blocked_p)
+        for n in blocked_params:
+            p = getattr(self, n)
+            if isinstance(p, BlockedParameter):
+                p.block()
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             print("_load_from_state_dict Called - %s" % prefix)
 
