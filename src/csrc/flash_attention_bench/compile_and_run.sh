@@ -7,7 +7,7 @@ export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:aut
 
 # write help message
 if [ "$1" == "--help" ]; then
-  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <num_layer> <num_iter> <nheads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <self_attention_flag>"
+  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <b_vnni> <num_layer> <num_iter> <nheads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <self_attention_flag>"
   echo ""
   echo "llm: name of the model (default: llama-7b), options: llama-7b, llama4, llama-3.1-8B, llama-3.2-3B, llama-3.2-1B,"
   echo "gpt2, gpt3-13b, gpt3-175b, alphafold2-h32, alphafold2-h16, alphafold2-h8"
@@ -15,6 +15,7 @@ if [ "$1" == "--help" ]; then
   echo "seq_len: (default: 4096)"
   echo "hyper: (default: 0, no hyperthreading)"
   echo "BF16: (default: 1, use BF16)"
+  echo "b_vnni: (default: 1, b is in vnni format)"
   echo "num_layer: (default: 3)"
   echo "num_iter: (default: 3)"
   echo "nheads: (default: 32)"
@@ -30,14 +31,15 @@ batch_size=${2:-64}
 seq_len=${3:-4096}
 hyper=${4:-0}
 BF16=${5:-1}
-num_layer=${6:-3}
-num_iter=${7:-3}
-nheads=${8:-32}
-head_size=${9:-128}
-bias_flag=${10:-0}
-nbbias_flag=${11:-0}
-gate_flag=${12:-0}
-self_attention_flag=${13:-1}
+b_vnni=${6:-1}
+num_layer=${7:-3}
+num_iter=${8:-3}
+nheads=${9:-32}
+head_size=${10:-128}
+bias_flag=${11:-0}
+nbbias_flag=${12:-0}
+gate_flag=${13:-0}
+self_attention_flag=${14:-1}
 
 # echo "Running $llm model"
 if [ "$llm" == "llama-7b" -o "$llm" == "llama4" -o "$llm" == "llama-3.1-8B" ]; then
@@ -65,7 +67,7 @@ else
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag"
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag"
 
 
 echo "Compiling MHA"
@@ -80,9 +82,9 @@ cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $num_layer $num_iter $self_attention_flag
+    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
 else
     threads=$((cpu_count * 2))
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $num_layer $num_iter $self_attention_flag
+    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
 fi

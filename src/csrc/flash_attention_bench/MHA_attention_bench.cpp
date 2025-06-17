@@ -76,7 +76,8 @@ std::vector<long int> fused_gating_attention_fwd_bf16(
     int64_t HS_t,
     bool bias_flag,
     bool nbbias_flag,
-    bool gate_flag) {
+    bool gate_flag,
+    bool b_vnni) {
   GlobalPass _gp(FWD);
   
   typedef bfloat16 T;
@@ -235,7 +236,7 @@ void flops_and_bandwidth(
 
 int main(int argc, char* argv[]) {
   if (argc < 5) {
-    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <num_layer> <num_iter> <self_attention_flag>" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>" << std::endl;
     return 1;
   }
 
@@ -248,9 +249,10 @@ int main(int argc, char* argv[]) {
   bool nbbias_flag = std::stoi(argv[6]);
   bool gate_flag = std::stoi(argv[7]);
   bool bf16_flag = std::stoi(argv[8]);
-  long num_layer = std::stoi(argv[9]);
-  long num_iter = std::stoi(argv[10]);
-  bool self_attention_flag = std::stoi(argv[11]);
+  bool b_vnni = std::stoi(argv[9]);
+  long num_layer = std::stoi(argv[10]);
+  long num_iter = std::stoi(argv[11]);
+  bool self_attention_flag = std::stoi(argv[12]);
   if (bf16_flag) {
     printf("Running with BF16\n");
     typedef bfloat16 T;
@@ -264,20 +266,20 @@ int main(int argc, char* argv[]) {
             q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
             query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
             output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
         } else {
           fused_gating_attention_fwd_bf16(
             output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
             query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
             output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
         }
       } else {
         fused_gating_attention_fwd_bf16(
           q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
           query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
           output_w[l], output_b[l], output[l], 
-          batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
       }
     }
     auto t0 = getTime();
@@ -291,14 +293,14 @@ int main(int argc, char* argv[]) {
               q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
             times = times + layer_time;
           } else {
             auto layer_time = fused_gating_attention_fwd_bf16(
               output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
             times = times + layer_time;
           }
         } else {
@@ -306,7 +308,7 @@ int main(int argc, char* argv[]) {
                 q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
                 query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
                 output_w[l], output_b[l], output[l], 
-                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
           times = times + layer_time;
         }
       }
