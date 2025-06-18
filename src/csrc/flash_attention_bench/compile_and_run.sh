@@ -1,6 +1,7 @@
 source /swtools/intel/2025.1/oneapi-vars.sh --force > /dev/null 2>&1
 export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
 export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
+export OMP_STACKSIZE=20M
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
 export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 # export LIBXSMM_TARGET=clx
