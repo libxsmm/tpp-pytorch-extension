@@ -37,7 +37,7 @@ auto key_w_a = GetVLAPtr<T>(key_w, {N_t, H_t});
 auto value_w_a = GetVLAPtr<T>(value_w, {N_t, H_t});
 auto gating_w_a = GetVLAPtr<T>(gating_w, {N_t, H_t});
 auto gating_b_a = GetVLAPtr<float>(gating_b, {H_t});
-auto output_w_a = GetVLAPtr<T>(output_w, {H_t, HS_t});
+auto output_w_a = GetVLAPtr<T>(output_w, {HS_t});
 auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
 T* q = new (std::align_val_t(64)) T[B_t * S_t * N_t *H_t];
@@ -78,7 +78,7 @@ float alpha = (1.0 / sqrt(H_t));
 
 auto qkv_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
-        T>(HS_t, N_t* H_t, HS_t, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
+        T>(QKV_BLOCKSIZE, N_t* H_t, QKV_BLOCKSIZE, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
     VNNI);
 
 T* qkv_w_vnni = new (std::align_val_t(64)) T[HS_t * N_t * H_t]; 
@@ -92,7 +92,11 @@ auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
   // RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
   {
     if(b_vnni) {
-      qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&query_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     }
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
@@ -165,7 +169,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
   // RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
   {
     if(b_vnni){
-      qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&key_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     }
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
@@ -199,7 +207,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
   // RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
   {
     if(b_vnni){
-      qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&value_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
     }
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
@@ -543,11 +555,11 @@ auto out_convert_tpp =
 
 auto output_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
-        T>(N_t * H_t, HS_t, N_t* H_t, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
+        T>(C_BLOCKSIZE, HS_t, C_BLOCKSIZE, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
     VNNI);
 
 T* output_w_vnni = new (std::align_val_t(64)) T[N_t * H_t * HS_t];
-auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
+auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {HS_t});
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
 // gating_w}), gating_b));   /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
@@ -562,8 +574,16 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
   // RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
     if(b_vnni){
-      qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
-      output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&gating_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      #pragma omp parallel for
+      for (int i=0; i < N_t*H_t; i += C_BLOCKSIZE){
+        output_vnni_trans_tpp(&output_w_a[i][0], &output_w_vnni_a[i][0]);
+      }
+      // qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+      // output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
     }
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
@@ -593,10 +613,10 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
             if(b_vnni){
               out_gemm_tpp(
-                  &tmp_bf16[0], &output_w_vnni_a[0][0][0], &tmp[0], 1, true);
+                  &tmp_bf16[0], &output_w_vnni_a[0][0], &tmp[0], 1, true);
             } else {
               out_gemm_tpp(
-                  &tmp_bf16[0], &output_w_a[0][0][0], &tmp[0], 1, true);
+                  &tmp_bf16[0], &output_w_a[0][0], &tmp[0], 1, true);
             }
             out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
             out_convert_tpp(&tmp[0], &output_a[i][j][0]);
@@ -605,10 +625,10 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
           else{
             if(b_vnni){
               out_gemm_tpp(
-                &weighted_avg_a[i][j][0][0], &output_w_vnni_a[0][0][0], &tmp[0], 1, true);
+                &weighted_avg_a[i][j][0][0], &output_w_vnni_a[0][0], &tmp[0], 1, true);
             } else {
               out_gemm_tpp(
-                &weighted_avg_a[i][j][0][0], &output_w_a[0][0][0], &tmp[0], 1, true);
+                &weighted_avg_a[i][j][0][0], &output_w_a[0][0], &tmp[0], 1, true);
             }
             if (bias_flag)
               out_addbias_tpp(&output_b_a[0][0], &tmp[0]);

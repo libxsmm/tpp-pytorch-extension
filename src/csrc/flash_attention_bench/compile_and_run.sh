@@ -78,7 +78,7 @@ g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I ../../../libxsmm/inc
 cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 
 
-# <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <num_layer> <num_iter>
+# <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
     echo "CPU count: $cpu_count, threads: $threads"
