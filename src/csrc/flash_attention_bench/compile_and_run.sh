@@ -2,7 +2,8 @@ source /swtools/intel/2025.1/oneapi-vars.sh --force > /dev/null 2>&1
 export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
 export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
 export OMP_STACKSIZE=20M
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
+export LIBXSMM_PATH=/data/nfs_home/nchaudh1/libxsmm
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$LIBXSMM_PATH/lib/
 export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 # export LIBXSMM_TARGET=clx
 
@@ -72,7 +73,7 @@ echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16
 
 
 echo "Compiling MHA"
-g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp -mavx512f
 # KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=4 perf stat -e cycles,cpu/event=0xc2,umask=0x2,name=UOPS_RETIRED.RETIRE_SLOTS/,cpu/event=0xc1,umask=0x02,cmask=0x1,name=FP_ASSIST.ANY/,cpu/event=0xc1,umask=0x08,cmask=0x1,name=ASSISTS.PAGE_FAULT/,cpu/event=0xc1,umask=0x10,cmask=0x1,name=ASSISTS.SSE_AVX_MIX/,cpu/event=0x79,umask=0x30,name=IDQ.MS_UOPS/ ./mha.o 32 3072 8 8 0 0 0 1 0
 
 # get number of cpu from lscpu command
