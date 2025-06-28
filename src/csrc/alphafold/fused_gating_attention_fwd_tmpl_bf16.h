@@ -20,6 +20,7 @@ int64_t N_t = query_w.size(1); /* number of heads (8) */
 int64_t H_t = query_w.size(2); /* head size (32) */
 
 auto flag = nonbatched_bias.size(0) > 0;
+bool b_vnni = 1;
 
 int64_t S_t = Sp_t;
 if (Sp_t % QKV_BLOCKSIZE != 0) {
@@ -57,7 +58,7 @@ auto key_w_a = GetVLAPtr<T>(key_w, {N_t, H_t});
 auto value_w_a = GetVLAPtr<T>(value_w, {N_t, H_t});
 auto gating_w_a = GetVLAPtr<T>(gating_w, {N_t, H_t});
 auto gating_b_a = GetVLAPtr<float>(gating_b, {H_t});
-auto output_w_a = GetVLAPtr<T>(output_w, {H_t, HS_t});
+auto output_w_a = GetVLAPtr<T>(output_w, {HS_t});
 auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
 auto q = q_data.new_empty({B_t, S_t, N_t, H_t}); /* [512, 764, 8, 32] */
@@ -83,7 +84,7 @@ int ldc = N_t * H_t;
 auto q_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        float>(QKV_BLOCKSIZE, N_t* H_t, HS_t, 1, 1, lda, ldb, ldc, 0.0, 0, 1)));
+        float>(QKV_BLOCKSIZE, N_t* H_t, QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE*N_t*H_t, lda, ldb, ldc, 0.0, 0, 1, b_vnni)));
 auto q_convert_tpp =
     SCOPEIT((ConvertTPP<float, T>(QKV_BLOCKSIZE * HS_t)), EW_ZERO);
 
@@ -94,7 +95,7 @@ float alpha = (1.0 / sqrt(key_dim));
 
 auto qkv_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
-        T>(HS_t, N_t* H_t, HS_t, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
+        T>(QKV_BLOCKSIZE, N_t* H_t, QKV_BLOCKSIZE, N_t* H_t, ldb, ldb, XformTPP::XFORM_N2V_TPP),
     VNNI);
 auto qkv_w_vnni = q_data.new_empty({HS_t, N_t, H_t}); /* [256, 8, 32] */
 auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
@@ -105,7 +106,13 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
 {
   RECORD_SCOPE(alpha_q_gemm, {q, q_data, query_w});
   {
-    qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    if(b_vnni) {
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&query_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&query_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    }
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
@@ -116,12 +123,21 @@ auto qkv_w_vnni_a = GetVLAPtr<T>(qkv_w_vnni, {N_t, H_t});
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
           float tmp[QKV_BLOCKSIZE][N_t][H_t];
           zero_tpp(&tmp[0][0][0]);
-          q_brgemm_tpp(
-              &q_data_a[i][j][0],
-              &qkv_w_vnni_a[0][0][0],
-              &tmp[0][0][0],
-              1,
-              true);
+          if(b_vnni){
+            q_brgemm_tpp(
+                &q_data_a[i][j][0],
+                &qkv_w_vnni_a[0][0][0],
+                &tmp[0][0][0],
+                HS_t/QKV_BLOCKSIZE,
+                true);
+          } else {
+             q_brgemm_tpp(
+                &q_data_a[i][j][0],
+                &query_w_a[0][0][0],
+                &tmp[0][0][0],
+                HS_t/QKV_BLOCKSIZE,
+                true);
+          }
           scale_tpp(&tmp[0][0][0], &tmp[0][0][0], alpha);
           q_convert_tpp(&tmp[0][0][0], &q_a[i][j][0][0]);
         }
@@ -156,13 +172,19 @@ auto v_vnni_trans_tpp = SCOPEIT(
 auto kv_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(QKV_BLOCKSIZE, N_t* H_t, HS_t, 1, 1, lda, ldb, ldc, 0.0, 0, 1)));
+        T>(QKV_BLOCKSIZE, N_t* H_t, QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE*N_t*H_t, lda, ldb, ldc, 0.0, 0, 1, b_vnni)));
 // auto k = at::einsum("bka,ahc->bkhc", {m_data, key_w});
 // /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8, 32] */
 {
   RECORD_SCOPE(alpha_k_gemm, {k, m_data, key_w});
   {
-    qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    if(b_vnni){
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&key_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&key_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    }
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel
     {
@@ -170,9 +192,14 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
-          kv_brgemm_tpp(
-              &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
+          if(b_vnni) {
+            kv_brgemm_tpp(
+                &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+          } else {
+            kv_brgemm_tpp(
+                &m_data_a[i][j][0], &key_w_a[0][0][0], &tmp[0], HS_t/QKV_BLOCKSIZE, true);  
+          }
           k_trans_tpp(&tmp[0], &k_a[i][2 * j]);
         }
       }
@@ -186,7 +213,13 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 {
   RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
   {
-    qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    if(b_vnni){
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&value_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      // qkv_vnni_trans_tpp(&value_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+    }
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
@@ -195,9 +228,14 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-          T tmp[QKV_BLOCKSIZE * N_t * H_t];
-          kv_brgemm_tpp(
-              &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * N_t * H_t], 64);
+          if(b_vnni) {
+            kv_brgemm_tpp(
+                &m_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+          } else {
+            kv_brgemm_tpp(
+                &m_data_a[i][j][0], &value_w_a[0][0][0], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+          }
           v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t]);
         }
       }
@@ -487,7 +525,7 @@ ldc = N_t * H_t;
 auto g_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        float>(C_BLOCKSIZE, N_t* H_t, HS_t, 1, 1, lda, ldb, ldc, 0.0, 0, 1)));
+        float>(C_BLOCKSIZE, N_t* H_t, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE*N_t*H_t, lda, ldb, ldc, 0.0, 0, 1, b_vnni)));
 auto g_addbias_tpp =
     SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, N_t* H_t, ldc), BIAS);
 auto g_sigmoid_tpp =
@@ -500,7 +538,7 @@ auto g_convert_tpp =
 auto out_gemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        float>(C_BLOCKSIZE, HS_t, N_t* H_t, 1, 1, lda, ldb, ldc, 0.0, 0, 1)));
+        float>(C_BLOCKSIZE, HS_t, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE*HS_t, lda, ldb, ldc, 0.0, 0, 1, b_vnni)));
 auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, HS_t, ldc), BIAS);
 
 auto out_convert_tpp =
@@ -508,10 +546,10 @@ auto out_convert_tpp =
 
 auto output_vnni_trans_tpp = SCOPEIT(
     XformExtTPP<
-        T>(N_t * H_t, HS_t, N_t* H_t, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
+        T>(C_BLOCKSIZE, HS_t, C_BLOCKSIZE, HS_t, lda, lda, XformTPP::XFORM_N2V_TPP),
     VNNI);
-auto output_w_vnni = q_data.new_empty({N_t, H_t, HS_t}); /* [8, 32, 256] */
-auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
+T* output_w_vnni = new (std::align_val_t(64)) T[N_t * H_t * HS_t];
+auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {HS_t});
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
 // gating_w}), gating_b));   /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
@@ -522,8 +560,18 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 {
   RECORD_SCOPE(alpha_o_gemm, {weighted_avg, v, q_data, gating_w, gating_b});
   {
-    qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
-    output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
+    if(b_vnni){
+      #pragma omp parallel for
+      for (int i=0; i < HS_t; i += QKV_BLOCKSIZE){
+        qkv_vnni_trans_tpp(&gating_w_a[i][0][0], &qkv_w_vnni_a[i][0][0]);
+      }
+      #pragma omp parallel for
+      for (int i=0; i < N_t*H_t; i += C_BLOCKSIZE){
+        output_vnni_trans_tpp(&output_w_a[i][0], &output_w_vnni_a[i][0]);
+      }
+      // qkv_vnni_trans_tpp(&gating_w_a[0][0][0], &qkv_w_vnni_a[0][0][0]);
+      // output_vnni_trans_tpp(&output_w_a[0][0][0], &output_w_vnni_a[0][0][0]);
+    }
     RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 
 #pragma omp parallel
@@ -532,12 +580,17 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
 #pragma omp for collapse(2)
       for (int i = 0; i < B_t; i++) {
         for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-          float tmp[C_BLOCKSIZE * N_t * H_t]; // Should be in float for bf16
-          float tmp_gate_values[C_BLOCKSIZE * N_t * H_t];
-          T tmp_bf16[C_BLOCKSIZE * N_t * H_t];
+          LIBXSMM_ALIGNED(float tmp[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(float tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
+          LIBXSMM_ALIGNED(T tmp_bf16[C_BLOCKSIZE * N_t * H_t], 64);
 
-          g_brgemm_tpp(
-              &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          if(b_vnni){
+            g_brgemm_tpp(
+                &q_data_a[i][j][0], &qkv_w_vnni_a[0][0][0], &tmp[0], HS_t/C_BLOCKSIZE, true);
+          } else {
+            g_brgemm_tpp(
+                &q_data_a[i][j][0], &gating_w_a[0][0][0], &tmp[0], HS_t/C_BLOCKSIZE, true);  
+          }
           g_addbias_tpp(&gating_b_a[0][0], &tmp[0]);
 
           g_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[0]);
@@ -545,8 +598,13 @@ auto output_w_vnni_a = GetVLAPtr<T>(output_w_vnni, {H_t, HS_t});
           g_convert_tpp(&tmp_gate_values[0], &tmp_bf16[0]);
           g_mul_tpp(&tmp_bf16[0], &weighted_avg_a[i][j][0][0], &tmp_bf16[0]);
 
-          out_gemm_tpp(
-              &tmp_bf16[0], &output_w_vnni_a[0][0][0], &tmp[0], 1, true);
+          if(b_vnni){
+            out_gemm_tpp(
+                &tmp_bf16[0], &output_w_vnni_a[0][0], &tmp[0], (N_t*H_t)/C_BLOCKSIZE, true);
+          } else {
+            out_gemm_tpp(
+                &tmp_bf16[0], &output_w_a[0][0], &tmp[0], (N_t*H_t)/C_BLOCKSIZE, true);
+          }
           out_addbias_tpp(&output_b_a[0][0], &tmp[0]);
           out_convert_tpp(&tmp[0], &output_a[i][j][0]);
         }
