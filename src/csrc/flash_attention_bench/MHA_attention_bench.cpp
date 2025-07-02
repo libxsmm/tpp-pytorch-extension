@@ -38,7 +38,7 @@ using namespace tpp;
 // REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
 
 unsigned long long rdtsc_ordered() {
-#if 1
+#ifdef __riscv
   return 0;
 #else
   unsigned int eax, ebx, ecx, edx;
