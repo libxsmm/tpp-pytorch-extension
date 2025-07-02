@@ -13,7 +13,11 @@
 #include <cmath>
 #include <iostream>
 #include <tuple>
+
+#ifndef __riscv
 #include <cpuid.h>
+#endif
+
 #include <chrono>
 
 #include "ext_tpp.h"
@@ -34,13 +38,17 @@ using namespace tpp;
 // REGISTER_SCOPE(alpha_o_gemm, "alpha_o_gemm");
 
 unsigned long long rdtsc_ordered() {
+#if 1
+  return 0;
+#else
   unsigned int eax, ebx, ecx, edx;
-  __cpuid(1, eax, ebx, ecx, edx); // Using specific function for cpuid
+  //__cpuid(1, eax, ebx, ecx, edx); // Using specific function for cpuid
 
   return __rdtsc();
-  // unsigned int lo, hi;
-  // __asm__ volatile ("rdtsc" : "=a" (lo), "=d" (hi));
-  // return ((unsigned long long)hi << 32) | lo;
+  unsigned int lo, hi;
+  __asm__ volatile ("rdtsc" : "=a" (lo), "=d" (hi));
+  return ((unsigned long long)hi << 32) | lo;
+#endif
 }
 
 template <typename T>

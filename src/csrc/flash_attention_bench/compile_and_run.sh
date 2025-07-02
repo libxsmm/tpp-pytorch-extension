@@ -29,20 +29,19 @@ if [ "$1" == "--help" ]; then
   exit 0
 fi
 
-llm=${1:-llama-7b}
+llm=${1:-gpt2}
 batch_size=${2:-64}
 seq_len=${3:-4096}
 hyper=${4:-0}
-BF16=${5:-1}
-b_vnni=${6:-1}
-num_layer=${7:-3}
-num_iter=${8:-3}
-nheads=${9:-32}
-head_size=${10:-128}
-bias_flag=${11:-0}
-nbbias_flag=${12:-0}
-gate_flag=${13:-0}
-self_attention_flag=${14:-1}
+BF16=${5:-0}
+num_layer=${6:-3}
+num_iter=${7:-3}
+nheads=${8:-32}
+head_size=${9:-128}
+bias_flag=${10:-0}
+nbbias_flag=${11:-0}
+gate_flag=${12:-0}
+self_attention_flag=${13:-1}
 
 # echo "Running $llm model"
 if [ "$llm" == "llama-7b" -o "$llm" == "llama4" -o "$llm" == "llama-3.1-8B" ]; then
@@ -54,7 +53,7 @@ elif [ "$llm" == "llama-3.2-3B" ]; then
 elif [ "$llm" == "llama-3.2-1B" ]; then
   embed_size=2048; nheads=32; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt2" ]; then
-  embed_size=768; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
+  embed_size=64; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-13b" ]; then
   embed_size=5120; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-175b" ]; then
@@ -79,7 +78,7 @@ g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/includ
 
 # get number of cpu from lscpu command
 cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
-
+#
 
 # <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
 if [ "$hyper" != "1" ]; then

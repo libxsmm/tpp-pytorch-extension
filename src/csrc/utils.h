@@ -88,6 +88,15 @@ static __inline__ unsigned long long rdtsc(void) {
 
   return val;
 }
+#elif defined(__riscv)
+static __inline__ unsigned long long rdtsc(void)
+{
+  unsigned long long val;
+
+  asm volatile("rdcycle %0" : "=r"(val));
+
+  return val;
+}
 #else
 #error "Unsupported architecture for rdtsc"
 #endif
