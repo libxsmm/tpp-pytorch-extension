@@ -27,11 +27,11 @@ if [ "$1" == "--help" ]; then
   exit 0
 fi
 
-llm=${1:-gpt2}
+llm=${1:-llama-7b}
 batch_size=${2:-64}
 seq_len=${3:-4096}
 hyper=${4:-0}
-BF16=${5:-0}
+BF16=${5:-1}
 num_layer=${6:-3}
 num_iter=${7:-3}
 nheads=${8:-32}
@@ -51,7 +51,7 @@ elif [ "$llm" == "llama-3.2-3B" ]; then
 elif [ "$llm" == "llama-3.2-1B" ]; then
   embed_size=2048; nheads=32; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt2" ]; then
-  embed_size=64; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
+  embed_size=768; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-13b" ]; then
   embed_size=5120; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-175b" ]; then
