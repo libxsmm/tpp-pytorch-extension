@@ -1,6 +1,6 @@
 export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
 # export OMP_STACKSIZE=20M
-export LIBXSMM_PATH=/data/nfs_home/nchaudh1/libxsmm
+export LIBXSMM_PATH=/home/raisiddh/libxsmm
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$LIBXSMM_PATH/lib/
 export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 # export LIBXSMM_TARGET=clx
@@ -27,20 +27,38 @@ if [ "$1" == "--help" ]; then
   exit 0
 fi
 
-llm=${1:-llama-7b}
-batch_size=${2:-64}
-seq_len=${3:-4096}
-hyper=${4:-0}
-BF16=${5:-1}
-b_vnni=${6:-1}
-num_layer=${7:-3}
-num_iter=${8:-3}
-nheads=${9-32}
-head_size=${10:-128}
-bias_flag=${11:-0}
-nbbias_flag=${12:-0}
-gate_flag=${13:-0}
-self_attention_flag=${14:-1}
+if [[ $(uname -m) == "riscv64" ]] 
+then
+  llm=${1:-gpt2}
+  batch_size=${2:-64}
+  seq_len=${3:-256}
+  hyper=${4:-0}
+  BF16=${5:-0}
+  b_vnni=${6:-1}
+  num_layer=${7:-3}
+  num_iter=${8:-3}
+  nheads=${9-32}
+  head_size=${10:-128}
+  bias_flag=${11:-0}
+  nbbias_flag=${12:-0}
+  gate_flag=${13:-0}
+  self_attention_flag=${14:-1}
+else
+  llm=${1:-llama-7b}
+  batch_size=${2:-64}
+  seq_len=${3:-4096}
+  hyper=${4:-0}
+  BF16=${5:-1}
+  b_vnni=${6:-1}
+  num_layer=${7:-3}
+  num_iter=${8:-3}
+  nheads=${9-32}
+  head_size=${10:-128}
+  bias_flag=${11:-0}
+  nbbias_flag=${12:-0}
+  gate_flag=${13:-0}
+  self_attention_flag=${14:-1}
+fi
 
 # echo "Running $llm model"
 if [ "$llm" == "llama-7b" -o "$llm" == "llama4" -o "$llm" == "llama-3.1-8B" ]; then
