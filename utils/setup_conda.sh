@@ -13,7 +13,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd -P)
 CONDA_INSTALL_DIR=`realpath ./miniforge3`
-ENV_NAME=pt251
+ENV_NAME=pt271
 
 while (( "$#" )); do
   case "$1" in
@@ -44,7 +44,7 @@ if ! test -d ${CONDA_INSTALL_DIR} ; then
   bash ./Miniforge3-Linux-$(uname -m).sh -b -p ${CONDA_INSTALL_DIR}
 fi
 if ! test -d ${CONDA_INSTALL_DIR}/envs/${ENV_NAME} ; then
-${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.9
+${CONDA_INSTALL_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.10
 fi
 source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 
@@ -54,11 +54,12 @@ source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 if [ $(uname -m) == "x86_64" ] ; then
   conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
   conda install -y gperftools -c conda-forge
-  conda install -y pytorch==2.5.1 torchvision torchaudio cpuonly -c pytorch
+  pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 elif [ $(uname -m) == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
-conda install -y pytorch numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
-conda install -y -c conda-forge openblas
+  conda install -y numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
+  conda install -y -c conda-forge openblas
+  pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 else
   echo "Unknown architecture: $(uname -m)"
   exit 1
