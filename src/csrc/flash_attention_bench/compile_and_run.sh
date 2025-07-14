@@ -1,10 +1,13 @@
+if [[ $(uname -m) == "riscv64" ]] 
+then
+  echo "Running on RISC-V architecture"
+else
+  source /swtools/intel/2025.1/oneapi-vars.sh --force > /dev/null
+fi
 export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
-# export OMP_STACKSIZE=20M
-export LIBXSMM_PATH=/home/raisiddh/libxsmm
+export LIBXSMM_PATH=../../../libxsmm
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$LIBXSMM_PATH/lib/
 export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
-# export LIBXSMM_TARGET=clx
-# export LIBXSMM_VERBOSE=-1
 
 # write help message
 if [ "$1" == "--help" ]; then
