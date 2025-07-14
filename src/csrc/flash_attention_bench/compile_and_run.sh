@@ -1,8 +1,6 @@
-source /swtools/intel/2025.1/oneapi-vars.sh --force > /dev/null 2>&1
 export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
-export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
 # export OMP_STACKSIZE=20M
-export LIBXSMM_PATH=/data/nfs_home/nchaudh1/libxsmm
+export LIBXSMM_PATH=/home/raisiddh/libxsmm
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$LIBXSMM_PATH/lib/
 export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 # export LIBXSMM_TARGET=clx
@@ -29,20 +27,38 @@ if [ "$1" == "--help" ]; then
   exit 0
 fi
 
-llm=${1:-llama-7b}
-batch_size=${2:-64}
-seq_len=${3:-4096}
-hyper=${4:-0}
-BF16=${5:-1}
-b_vnni=${6:-1}
-num_layer=${7:-3}
-num_iter=${8:-3}
-nheads=${9:-32}
-head_size=${10:-128}
-bias_flag=${11:-0}
-nbbias_flag=${12:-0}
-gate_flag=${13:-0}
-self_attention_flag=${14:-1}
+if [[ $(uname -m) == "riscv64" ]] 
+then
+  llm=${1:-gpt2}
+  batch_size=${2:-64}
+  seq_len=${3:-256}
+  hyper=${4:-0}
+  BF16=${5:-0}
+  b_vnni=${6:-1}
+  num_layer=${7:-3}
+  num_iter=${8:-3}
+  nheads=${9-32}
+  head_size=${10:-128}
+  bias_flag=${11:-0}
+  nbbias_flag=${12:-0}
+  gate_flag=${13:-0}
+  self_attention_flag=${14:-1}
+else
+  llm=${1:-llama-7b}
+  batch_size=${2:-64}
+  seq_len=${3:-4096}
+  hyper=${4:-0}
+  BF16=${5:-1}
+  b_vnni=${6:-1}
+  num_layer=${7:-3}
+  num_iter=${8:-3}
+  nheads=${9-32}
+  head_size=${10:-128}
+  bias_flag=${11:-0}
+  nbbias_flag=${12:-0}
+  gate_flag=${13:-0}
+  self_attention_flag=${14:-1}
+fi
 
 # echo "Running $llm model"
 if [ "$llm" == "llama-7b" -o "$llm" == "llama-3.1-8B" ]; then
@@ -74,20 +90,30 @@ echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16
 
 
 echo "Compiling MHA"
-g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp -mavx512f
-# KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=4 perf stat -e cycles,cpu/event=0xc2,umask=0x2,name=UOPS_RETIRED.RETIRE_SLOTS/,cpu/event=0xc1,umask=0x02,cmask=0x1,name=FP_ASSIST.ANY/,cpu/event=0xc1,umask=0x08,cmask=0x1,name=ASSISTS.PAGE_FAULT/,cpu/event=0xc1,umask=0x10,cmask=0x1,name=ASSISTS.SSE_AVX_MIX/,cpu/event=0x79,umask=0x30,name=IDQ.MS_UOPS/ ./mha.o 32 3072 8 8 0 0 0 1 0
+if [[ $(uname -m) == "riscv64" ]] 
+then
+  # Get number of cpu from lscpu command
+  cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 
-# get number of cpu from lscpu command
-cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
+  threads=$cpu_count
+  echo "CPU count: $cpu_count, threads: $threads"
 
-
-# <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
-if [ "$hyper" != "1" ]; then
-    threads=$cpu_count
-    echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+  g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp
+  KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads taskset -c 0-$threads ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
 else
-    threads=$((cpu_count * 2))
-    echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+  g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp -mavx512f
+
+  # Get number of cpu from lscpu command
+  cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
+
+  # <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
+  if [ "$hyper" != "1" ]; then
+      threads=$cpu_count
+      echo "CPU count: $cpu_count, threads: $threads"
+      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+  else
+      threads=$((cpu_count * 2))
+      echo "CPU count: $cpu_count, threads: $threads"
+      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+  fi
 fi

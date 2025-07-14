@@ -13,7 +13,11 @@
 #include <cmath>
 #include <iostream>
 #include <tuple>
+
+#ifndef __riscv
 #include <cpuid.h>
+#endif
+
 #include <chrono>
 
 #include "ext_tpp.h"
