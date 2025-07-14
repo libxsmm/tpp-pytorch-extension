@@ -45,7 +45,7 @@ gate_flag=${13:-0}
 self_attention_flag=${14:-1}
 
 # echo "Running $llm model"
-if [ "$llm" == "llama-7b" -o "$llm" == "llama4" -o "$llm" == "llama-3.1-8B" ]; then
+if [ "$llm" == "llama-7b" -o "$llm" == "llama-3.1-8B" ]; then
   embed_size=4096; nheads=32; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "llama-70b" ]; then
   embed_size=8192; nheads=64; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
@@ -55,7 +55,7 @@ elif [ "$llm" == "llama-3.2-1B" ]; then
   embed_size=2048; nheads=32; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt2" ]; then
   embed_size=768; nheads=12; head_size=64; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
-elif [ "$llm" == "gpt3-13b" ]; then
+elif [ "$llm" == "gpt3-13b" -o "$llm" == "llama4" ]; then
   embed_size=5120; nheads=40; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
 elif [ "$llm" == "gpt3-175b" ]; then
   embed_size=12288; nheads=96; head_size=128; bias_flag=0; nbbias_flag=0; gate_flag=0 self_attention_flag=1
