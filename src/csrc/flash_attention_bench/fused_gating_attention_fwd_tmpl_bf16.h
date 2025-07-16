@@ -638,7 +638,8 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
               out_gemm_tpp(
                   &tmp_bf16[0], &output_w_a[0][k], &tmp[0], (N_t*H_t)/C_BLOCKSIZE, true);
             }
-            out_addbias_tpp(&output_b_a[0][k], &tmp[0]);
+            if (bias_flag)
+              out_addbias_tpp(&output_b_a[0][k], &tmp[0]);
             out_convert_tpp(&tmp[0], &output_a[i][j][k]);
           }
         }
