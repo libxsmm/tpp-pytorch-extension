@@ -41,6 +41,8 @@ static const int USE_MXFP4 = env2int("USE_MXFP4", 0);
 static const int USE_MXFP4_FT = env2int("USE_MXFP4_FT", 0);
 static const int USE_QINT8 = env2int("USE_QINT8", 0);
 static const int USE_QINT8_FT = env2int("USE_QINT8_FT", 0);
+static const int USE_QINT2 = env2int("USE_QINT2", 0);
+static const int USE_QINT2_FT = env2int("USE_QINT2_FT", 0);
 
 REGISTER_LOCAL_SCOPE(b_emb, "b_emb");
 REGISTER_LOCAL_SCOPE(qkv_gemm, "qkv_gemm");
@@ -370,6 +372,8 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
       return remap_and_quantize_qint8(t);
     else if (USE_MXFP4_FT == 1)
       return remap_and_quantize_mxfp4(t);
+    else if (USE_QINT2_FT == 1)
+      return remap_and_quantize_qint2_intlv(t);
     else
       return t;
   }
@@ -409,6 +413,8 @@ inline at::Tensor wt_tensor_for_first_token(at::Tensor t) {
     return remap_and_quantize_qint8(t_new);
   else if (USE_MXFP4_FT == 1)
     return remap_and_quantize_mxfp4(t_new);
+  else if (USE_QINT2_FT == 1)
+    return remap_and_quantize_qint2_intlv(t_new);
   else
     return t_new;
 }
@@ -456,7 +462,8 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
     } else if (t_wt.qscheme() == at::kPerBlockAffine) {
-      if (t_wt.dtype() == at::kQInt8) {
+      if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2 ||
+          t_wt.dtype() == at::kQUInt2x4) {
         return fused_qkv_gemm_spl<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>>(
             t_in, t_wts, t_bias);
       } else {
@@ -674,6 +681,18 @@ struct __attribute__((visibility("hidden"))) GPTJBlock : LLMBlock {
         t_Wp = remap_and_quantize_qint8(t_Wp);
         t_Wi = remap_and_quantize_qint8(t_Wi);
         t_Wo = remap_and_quantize_qint8(t_Wo);
+      } else if (USE_QINT2) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint2_intlv(t_Wq);
+        t_Wk = remap_and_quantize_qint2_intlv(t_Wk);
+        t_Wv = remap_and_quantize_qint2_intlv(t_Wv);
+        t_Wp = remap_and_quantize_qint2_intlv(t_Wp);
+        t_Wi = remap_and_quantize_qint2_intlv(t_Wi);
+        t_Wo = remap_and_quantize_qint2_intlv(t_Wo);
       }
     }
 
@@ -896,9 +915,7 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
         t_Wp = remap_and_quantize_mxfp4(t_Wp);
         t_Wi = remap_and_quantize_mxfp4(t_Wi);
         t_Wo = remap_and_quantize_mxfp4(t_Wo);
-      }
-
-      else if (USE_QINT8) {
+      } else if (USE_QINT8) {
         if (t_Wq.dtype() == at::kBFloat16) {
           remap_for_first_token<bfloat16>();
         } else {
@@ -910,6 +927,18 @@ struct __attribute__((visibility("hidden"))) OPTDecoderLayer : LLMBlock {
         t_Wp = remap_and_quantize_qint8(t_Wp);
         t_Wi = remap_and_quantize_qint8(t_Wi);
         t_Wo = remap_and_quantize_qint8(t_Wo);
+      } else if (USE_QINT2) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint2_intlv(t_Wq);
+        t_Wk = remap_and_quantize_qint2_intlv(t_Wk);
+        t_Wv = remap_and_quantize_qint2_intlv(t_Wv);
+        t_Wp = remap_and_quantize_qint2_intlv(t_Wp);
+        t_Wi = remap_and_quantize_qint2_intlv(t_Wi);
+        t_Wo = remap_and_quantize_qint2_intlv(t_Wo);
       }
     }
 
@@ -1103,9 +1132,7 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
         t_Wg = remap_and_quantize_mxfp4(t_Wg);
         t_Wu = remap_and_quantize_mxfp4(t_Wu);
         t_Wd = remap_and_quantize_mxfp4(t_Wd);
-      }
-
-      else if (USE_QINT8) {
+      } else if (USE_QINT8) {
         if (t_Wq.dtype() == at::kBFloat16) {
           remap_for_first_token<bfloat16>();
         } else {
@@ -1118,6 +1145,19 @@ struct __attribute__((visibility("hidden"))) LlamaDecoderLayer : LLMBlock {
         t_Wg = remap_and_quantize_qint8(t_Wg);
         t_Wu = remap_and_quantize_qint8(t_Wu);
         t_Wd = remap_and_quantize_qint8(t_Wd);
+      } else if (USE_QINT2) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint2_intlv(t_Wq);
+        t_Wk = remap_and_quantize_qint2_intlv(t_Wk);
+        t_Wv = remap_and_quantize_qint2_intlv(t_Wv);
+        t_Wp = remap_and_quantize_qint2_intlv(t_Wp);
+        t_Wg = remap_and_quantize_qint2_intlv(t_Wg);
+        t_Wu = remap_and_quantize_qint2_intlv(t_Wu);
+        t_Wd = remap_and_quantize_qint2_intlv(t_Wd);
       }
     }
 
@@ -1315,9 +1355,7 @@ struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {
         t_Wg = remap_and_quantize_mxfp4(t_Wg);
         t_Wu = remap_and_quantize_mxfp4(t_Wu);
         t_Wd = remap_and_quantize_mxfp4(t_Wd);
-      }
-
-      else if (USE_QINT8) {
+      } else if (USE_QINT8) {
         if (t_Wq.dtype() == at::kBFloat16) {
           remap_for_first_token<bfloat16>();
         } else {
@@ -1330,6 +1368,19 @@ struct __attribute__((visibility("hidden"))) Qwen2DecoderLayer : LLMBlock {
         t_Wg = remap_and_quantize_qint8(t_Wg);
         t_Wu = remap_and_quantize_qint8(t_Wu);
         t_Wd = remap_and_quantize_qint8(t_Wd);
+      } else if (USE_QINT2) {
+        if (t_Wq.dtype() == at::kBFloat16) {
+          remap_for_first_token<bfloat16>();
+        } else {
+          remap_for_first_token<float>();
+        }
+        t_Wq = remap_and_quantize_qint2_intlv(t_Wq);
+        t_Wk = remap_and_quantize_qint2_intlv(t_Wk);
+        t_Wv = remap_and_quantize_qint2_intlv(t_Wv);
+        t_Wp = remap_and_quantize_qint2_intlv(t_Wp);
+        t_Wg = remap_and_quantize_qint2_intlv(t_Wg);
+        t_Wu = remap_and_quantize_qint2_intlv(t_Wu);
+        t_Wd = remap_and_quantize_qint2_intlv(t_Wd);
       }
     }
 

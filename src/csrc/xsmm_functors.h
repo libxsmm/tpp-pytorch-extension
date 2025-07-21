@@ -2641,15 +2641,29 @@ class BrgemmTPP {
         if (p->b_vnni)
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_A;
         if (p->b_vnni >= 2) {
-          if (p->b_vnni == 2)
-            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
-          else if (p->b_vnni == 8)
-            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI8_INTLV;
-          else
+          if (p->b_vnni == 2) {
+            if constexpr (std::is_same<Tw, uint8_t>::value) {
+              l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI2;
+            } else if constexpr (std::is_same<Tw, int8_t>::value) {
+              l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT4_VNNI2;
+            }
+          } else if (p->b_vnni == 8) {
+            if constexpr (std::is_same<Tw, uint8_t>::value)
+              l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_MXFP4_VNNI8_INTLV;
+            else if constexpr (std::is_same<Tw, int8_t>::value)
+              l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT4_VNNI8_INTLV;
+          } else if (p->b_vnni == 16) {
+            l_flags |=
+                LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT2_VNNI4_INTLV /*|
+                                                                      LIBXSMM_GEMM_FLAG_B_UNSIGNED*/
+                ;
+          } else {
             TPP_ASSERT(0, "Invalid B VNNI type\n");
+          }
           TPP_ASSERT(
-              (std::is_same<Tw, uint8_t>::value),
-              "MXFP4 must use uint8_t for weights\n");
+              (std::is_same<Tw, uint8_t>::value ||
+               std::is_same<Tw, int8_t>::value),
+              "LP Quantized GEMM must use uint8_t or int8_t for weights\n");
         }
         if (p->a_trans == 1 && p->a_vnni == 1) {
           l_flags |= LIBXSMM_GEMM_FLAG_VNNI_B;
@@ -2689,7 +2703,8 @@ class BrgemmTPP {
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
       l_brconfig.br_stride_a_hint = (p->b_vnni == 2 || p->b_vnni == 8)
           ? (p->str_b * sizeof(Tw)) / 2
-          : p->str_b * sizeof(Tw);
+          : ((p->b_vnni == 16) ? (p->str_b * sizeof(Tw)) / 4
+                               : p->str_b * sizeof(Tw));
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
       l_brconfig.br_unroll_hint = p->unroll_hint;
 
