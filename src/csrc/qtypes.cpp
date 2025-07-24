@@ -28,6 +28,7 @@ static const int QINT8_EMU = env2int("QINT8_EMU", 0);
 static const int QINT8_BLOCK_SIZE = env2int("QINT8_BLOCK_SIZE", 256);
 static const int QINT2_BLOCK_SIZE = env2int("QINT2_BLOCK_SIZE", 256);
 static const int USE_MXFP4_INT8 = env2int("USE_MXFP4_INT8", 0);
+static const int TPP_QINT2_AS_QINT1 = env2int("TPP_QINT2_AS_QINT1", 0);
 
 REGISTER_LOCAL_SCOPE(quant, "quant");
 
@@ -930,7 +931,79 @@ inline at::Tensor remap_and_quantize_qint8(at::Tensor t) {
   return ret;
 }
 
+inline at::Tensor remap_and_quantize_qint1(at::Tensor t) {
+  RECORD_SCOPE(quant, {t});
+  auto dim = t.dim();
+  long block_size = 0;
+  auto sizes = t.sizes();
+  long K1, K2, K3 = 2;
+  long C1, C2, C3 = 4;
+  auto K = sizes[0];
+  if (dim > 3)
+    K *= sizes[3];
+  if (dim == 5) {
+    t = t.permute({0, 3, 1, 2, 4}).contiguous().view({K, -1});
+  } else if (dim == 4) {
+    t = t.permute({0, 3, 1, 2}).contiguous().view({K, -1});
+  }
+  TPP_ASSERT(K % 2 == 0, "K must be multiple of 2\n");
+  if (K % 32 == 0)
+    K2 = 16;
+  else if (dim > 3 && sizes[3] % K3 == 0)
+    K2 = sizes[3] / K3;
+  else
+    K2 = K / K3;
+  K1 = K / (K2 * K3);
+  auto C = t.size(1);
+  TPP_ASSERT(C % 4 == 0, "C must be multiple of 4\n");
+  C1 = sizes[1];
+  C2 = C / (C1 * C3);
+  if (C % QINT2_BLOCK_SIZE == 0) {
+    C2 = QINT2_BLOCK_SIZE / C3;
+    C1 = C / QINT2_BLOCK_SIZE;
+  } else {
+    for (int QBS = 4096; QBS >= 64; QBS /= 2) {
+      if (QINT2_BLOCK_SIZE > QBS && C % QBS == 0) {
+        C2 = QBS / C3;
+        C1 = C / QBS;
+        break;
+      }
+    }
+  }
+  block_size = C2 * C3;
+  t = t.view({K1, K2 * K3, C1, block_size}).permute({0, 2, 1, 3}).contiguous();
+  auto abs_max = std::get<0>(t.abs().max(-1, true));
+  auto scales = abs_max.to(at::kFloat).clamp_min_(1.0e-8);
+  auto quantized = torch::round(t / scales)
+                       .clamp_(-1.0, 1.0)
+                       .to(at::kByte)
+                       .bitwise_and_(0x80)
+                       .bitwise_right_shift_(7);
+  // need shape of original tensor in vnni format before packing
+  auto quantized_vnni =
+      quantized.view({K1, C1, K2 * K3, C2, C3}).permute({0, 1, 3, 2, 4});
+  quantized = quantized.view({K1, C1, K2, K3, C2, C3});
+  quantized = quantized.permute({3, 5, 0, 1, 4, 2})
+                  .contiguous()
+                  .view({8, K1, C1, C2, K2});
+  auto packed = quantized[0];
+  for (int i = 1; i < 8; i++) {
+    packed = packed.bitwise_or(quantized[i].bitwise_left_shift(i));
+  }
+  // auto packed2 = packed.new_zeros({2, packed.numel()});
+  // packed2[0] = packed.view({-1});
+  auto packed2 = torch::cat({packed, packed});
+  auto qtensor = create_qtensor_int2sym(
+      quantized_vnni.sizes(), packed2, scales, block_size, 2, true);
+  // auto ret = quantize_int2sym(t, block_size, 2, true);
+  std::cout << "remap_and_quantize_qint1: " << qtensor.sizes()
+            << " dt: " << qtensor.dtype() << std::endl;
+  return qtensor;
+}
+
 inline at::Tensor remap_and_quantize_qint2_intlv(at::Tensor t) {
+  if (TPP_QINT2_AS_QINT1)
+    return remap_and_quantize_qint1(t);
   RECORD_SCOPE(quant, {t});
   auto dim = t.dim();
   long block_size = 0;

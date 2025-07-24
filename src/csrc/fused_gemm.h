@@ -28,6 +28,8 @@ static int CK_BLOCK_SIZE = env2int("CK_BLOCK_SIZE", 64);
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
 static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 64);
+static const int TPP_QINT2_AS_QINT1 = env2int("TPP_QINT2_AS_QINT1", 0);
+
 static const char* GEMM_LOOP_SCHEME_REUSE =
     getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
 static const char* GEMM_LOOP_SCHEME_STREAMING =
@@ -1119,7 +1121,11 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       } else if (t_wt.dtype() == at::kQUInt4x2) {
         b_vnni = t_wt.size(-1);
       } else if (t_wt.dtype() == at::kQUInt2x4) {
-        b_vnni = 16;
+        if (TPP_QINT2_AS_QINT1) {
+          b_vnni = 4;
+        } else {
+          b_vnni = 16;
+        }
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }
@@ -1166,6 +1172,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
         t_wt_V.is_quantized() && t_wt_V.qscheme() == at::kPerBlockAffine,
         "Weight not quantized\n");
     long pack_size = q_per_block_pack_size(t_wt_V);
+    if (t_wt_V.dtype() == at::kQUInt2x4 && TPP_QINT2_AS_QINT1) {
+      pack_size = 8; // 2x4 is treated as 8x1
+    }
     auto wt_V = GetVLAPtr<BrTw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
     auto t_w_scl = q_per_block_scales(t_wt_V);
     auto t_i_scl = q_per_block_scales(t_in);

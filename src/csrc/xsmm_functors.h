@@ -2653,10 +2653,9 @@ class BrgemmTPP {
             else if constexpr (std::is_same<Tw, int8_t>::value)
               l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT4_VNNI8_INTLV;
           } else if (p->b_vnni == 16) {
-            l_flags |=
-                LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT2_VNNI4_INTLV /*|
-                                                                      LIBXSMM_GEMM_FLAG_B_UNSIGNED*/
-                ;
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT2_VNNI4_INTLV;
+          } else if (p->b_vnni == 4) {
+            l_flags |= LIBXSMM_GEMM_FLAG_INTERPRETE_A_AS_INT1_VNNI4;
           } else {
             TPP_ASSERT(0, "Invalid B VNNI type\n");
           }
@@ -2701,10 +2700,14 @@ class BrgemmTPP {
       l_shape.comp_type = XsmmDtype<Tcomp>();
 
       l_brconfig.br_type = LIBXSMM_GEMM_BATCH_REDUCE_STRIDE;
-      l_brconfig.br_stride_a_hint = (p->b_vnni == 2 || p->b_vnni == 8)
-          ? (p->str_b * sizeof(Tw)) / 2
-          : ((p->b_vnni == 16) ? (p->str_b * sizeof(Tw)) / 4
-                               : p->str_b * sizeof(Tw));
+      l_brconfig.br_stride_a_hint = p->str_b * sizeof(Tw);
+      if (p->b_vnni == 2 || p->b_vnni == 8) {
+        l_brconfig.br_stride_a_hint /= 2;
+      } else if (p->b_vnni == 16) {
+        l_brconfig.br_stride_a_hint /= 4;
+      } else if (p->b_vnni == 4) {
+        l_brconfig.br_stride_a_hint /= 8;
+      }
       l_brconfig.br_stride_b_hint = p->str_a * sizeof(Tin);
       l_brconfig.br_unroll_hint = p->unroll_hint;
 
