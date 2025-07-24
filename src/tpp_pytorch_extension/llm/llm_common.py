@@ -401,10 +401,17 @@ class BlockedLinear(BlockedModule, torch.nn.Linear):
         #    input = input.chunk(self.parallel_size, dim=-1)[self.parallel_rank].contiguous()
         self.maybe_block_params()
         bias = (
-            self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
+            # self.bias if self.bias is not None else torch.Tensor().to(self.weight.dtype)
+            self.bias
+            if self.bias is not None
+            else torch.Tensor().to(
+                self.weight.dtype if not self.weight.is_quantized else torch.bfloat16
+            )
         )
         # print("BIas:", bias.shape, bias.dtype)
-        input = input.to(self.weight.dtype)
+        input = input.to(
+            self.weight.dtype if not self.weight.is_quantized else torch.bfloat16
+        )
         parallel_dim = self.parallel_dim if self.model_parallel == True else -1
         split_sizes = self.split_sizes if hasattr(self, "split_sizes") else []
         ret = fc_plain(input, self.weight, bias, parallel_dim, split_sizes)
