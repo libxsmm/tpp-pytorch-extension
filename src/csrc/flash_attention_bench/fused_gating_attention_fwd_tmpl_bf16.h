@@ -146,7 +146,7 @@ auto k_trans_tpp = SCOPEIT(
         QKV_BLOCKSIZE,
         QKV_BLOCKSIZE,
         S_t,
-        XformTPP::XFORM_XPOSE_N2V_TPP),
+        (b_vnni) ? XformTPP::XFORM_XPOSE_N2V_TPP : XformTPP::XFORM_XPOSE_TPP),
     XPOSE);
 
 auto v_vnni_trans_tpp = SCOPEIT(
@@ -159,6 +159,8 @@ auto v_vnni_trans_tpp = SCOPEIT(
         N_t* H_t,
         XformTPP::XFORM_N2V_TPP),
     VNNI);
+
+auto v_cpy_tpp = SCOPEIT(CpyTPP<T>(QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE, N_t* H_t), EW_COPY);
 
 auto kv_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
@@ -192,11 +194,12 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
             if(b_vnni) {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &qkv_w_vnni_a[0][k*2], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+              k_trans_tpp(&tmp[0], &k_a[i][k*S_t + 2 * j]);
             } else {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &key_w_a[0][k], &tmp[0], HS_t/QKV_BLOCKSIZE, true);  
+              k_trans_tpp(&tmp[0], &k_a[i][k*S_t + j]);
             }
-            k_trans_tpp(&tmp[0], &k_a[i][k*S_t + 2 * j]);
           }
         }
       }
@@ -235,11 +238,12 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
             if(b_vnni) {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &qkv_w_vnni_a[0][k*2], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+              v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t + 2*k]);
             } else {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &value_w_a[0][k], &tmp[0], HS_t/QKV_BLOCKSIZE, true);
+              v_cpy_tpp(&tmp[0], &v_a[i][j * N_t * H_t + k]);
             }
-            v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t + 2*k]);
           }
         }
       }
@@ -271,7 +275,7 @@ auto a_cpy_tpp = SCOPEIT(CpyTPP<T>(A_BLOCKSIZE, H_t, H_t, N_t* H_t), EW_COPY);
 
 if (S_t < 2560) {
   auto a_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
-      A_BLOCKSIZE, A_BLOCKSIZE, H_t, 1, 1, N_t * H_t, S_t, S_t, 0.0, 0, 1)));
+      A_BLOCKSIZE, A_BLOCKSIZE, H_t, 1, 1, N_t * H_t, S_t, S_t, 0.0, 0, 1, b_vnni)));
 
   auto c_brgemm_tpp = SCOPEITGEMM((BrgemmTPP<T, T>(
       A_BLOCKSIZE,
@@ -284,7 +288,8 @@ if (S_t < 2560) {
       H_t,
       0.0,
       0,
-      1)));
+      1,
+      b_vnni)));
 
   auto a_addbias_tpp = SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, S_t, S_t), BIAS);
   auto a_add_nbbias_tpp =
@@ -310,12 +315,21 @@ if (S_t < 2560) {
 
             a_brgemm_tpp.config();
             for (int j2 = 0; j2 < S_t; j2 += A_BLOCKSIZE) {
-              a_brgemm_tpp(
-                  &q_a[i][j1][n * H_t],
-                  &k_a[i][n * H_t * S_t + 2 * j2],
-                  &tmp_logits[0][j2],
-                  1,
-                  true);
+              if (b_vnni) {
+                a_brgemm_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + 2 * j2],
+                    &tmp_logits[0][j2],
+                    1,
+                    true);
+              } else {
+                a_brgemm_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + j2],
+                    &tmp_logits[0][j2],
+                    1,
+                    true);
+              }
             }
             a_brgemm_tpp.release();
             if (bias_flag)
@@ -333,13 +347,22 @@ if (S_t < 2560) {
               a_add_sfmask_tpp(&sfmask_a[0][0], &tmp_logits[0][Sp_t]);
               a_softmax_tpp(1, &tmp_logits[0][0], &tmp_logits_bf16[0][0]);
             }
-
-            c_brgemm_tpp(
-                &tmp_logits_bf16[0][0],
-                &v_a[i][n * H_t * 2],
-                &tmp_o[0],
-                S_t / A_BLOCKSIZE,
-                false);
+            
+            if (b_vnni) {
+              c_brgemm_tpp(
+                  &tmp_logits_bf16[0][0],
+                  &v_a[i][n * H_t * 2],
+                  &tmp_o[0],
+                  S_t / A_BLOCKSIZE,
+                  false);
+            } else {
+              c_brgemm_tpp(
+                  &tmp_logits_bf16[0][0],
+                  &v_a[i][n * H_t],
+                  &tmp_o[0],
+                  S_t / A_BLOCKSIZE,
+                  false);
+            }
             a_cpy_tpp(&tmp_o[0], &weighted_avg_a[i][j1][n * H_t]);
           }
         }
@@ -361,7 +384,8 @@ if (S_t < 2560) {
       Ak_BLOCKSIZE,
       0.0,
       0,
-      1)));
+      1,
+      b_vnni)));
 
   auto c_brgemm_online_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
       A_BLOCKSIZE,
@@ -374,7 +398,8 @@ if (S_t < 2560) {
       H_t,
       0.0,
       0,
-      1)));
+      1,
+      b_vnni)));
 
   auto a_addbias_online_tpp =
       SCOPEIT(AddBiasTPP<float>(A_BLOCKSIZE, Ak_BLOCKSIZE, Ak_BLOCKSIZE), BIAS);
@@ -409,7 +434,8 @@ if (S_t < 2560) {
       lastBlockSize,
       0.0,
       0,
-      1)));
+      1,
+      b_vnni)));
 
   auto c_brgemm_edge_tpp = SCOPEITGEMM((BrgemmTPP<T, float>(
       A_BLOCKSIZE,
@@ -422,7 +448,8 @@ if (S_t < 2560) {
       H_t,
       0.0,
       0,
-      1)));
+      1,
+      b_vnni)));
 
   auto a_addbias_online_edge_tpp = SCOPEIT(
       AddBiasTPP<float>(A_BLOCKSIZE, lastBlockSize, lastBlockSize), BIAS);
@@ -459,12 +486,21 @@ if (S_t < 2560) {
           for (int j1 = 0; j1 < S_t; j1 += A_BLOCKSIZE) {
             for (int j2 = 0; j2 < (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
                  j2 += Ak_BLOCKSIZE) {
-              a_brgemm_tpp(
-                  &q_a[i][j1][n * H_t],
-                  &k_a[i][n * H_t * S_t + 2 * j2],
-                  tmp_S,
-                  1,
-                  false);
+              if (b_vnni) {
+                a_brgemm_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + 2 * j2],
+                    tmp_S,
+                    1,
+                    false);
+              } else {
+                a_brgemm_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + j2],
+                    tmp_S,
+                    1,
+                    false);
+              }
 
               if (bias_flag)
                 a_addbias_online_tpp(&bias_a[i][j2], tmp_S);
@@ -480,12 +516,21 @@ if (S_t < 2560) {
                 a_softmax_online_tpp(1, tmp_S, tmp_S_bf16, cmax, csum, omax);
               }
 
-              c_brgemm_online_tpp(
-                  tmp_S_bf16,
-                  &v_a[i][j2 * N_t * H_t + n * H_t * 2],
-                  tmp_o1,
-                  1,
-                  false); // O = P*V
+              if (b_vnni) {
+                c_brgemm_online_tpp(
+                    tmp_S_bf16,
+                    &v_a[i][j2 * N_t * H_t + n * H_t * 2],
+                    tmp_o1,
+                    1,
+                    false); // O = P*V
+              } else {
+                c_brgemm_online_tpp(
+                    tmp_S_bf16,
+                    &v_a[i][j2 * N_t * H_t + n * H_t],
+                    tmp_o1,
+                    1,
+                    false); // O = P*V
+              }
 
               if (j2 == 0) {
                 a_cpy2_tpp(tmp_o1, tmp_o2);
@@ -498,11 +543,19 @@ if (S_t < 2560) {
               float* tmp_S_edge = new (std::align_val_t(64)) float[A_BLOCKSIZE * lastBlockSize];
               T* tmp_S_bf16_edge = new (std::align_val_t(64)) T[A_BLOCKSIZE * lastBlockSize];
               int j2 = (S_t / Ak_BLOCKSIZE) * Ak_BLOCKSIZE;
-              a_brgemm_edge_tpp(
-                  &q_a[i][j1][n * H_t],
-                  &k_a[i][n * H_t * S_t + 2 * j2],
-                  tmp_S_edge,
-                  1);
+              if (b_vnni) {
+                a_brgemm_edge_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + 2 * j2],
+                    tmp_S_edge,
+                    1);
+              } else {
+                a_brgemm_edge_tpp(
+                    &q_a[i][j1][n * H_t],
+                    &k_a[i][n * H_t * S_t + j2],
+                    tmp_S_edge,
+                    1);
+              }
 
               if (bias_flag)
                 a_addbias_online_edge_tpp(&bias_a[i][j2], tmp_S_edge);
@@ -515,11 +568,19 @@ if (S_t < 2560) {
               a_softmax_online_edge_tpp(
                   1, tmp_S_edge, tmp_S_bf16_edge, cmax, csum, omax);
 
-              c_brgemm_edge_tpp(
-                  tmp_S_bf16_edge,
-                  &v_a[i][j2 * N_t * H_t + n * H_t * 2],
-                  tmp_o1,
-                  1);
+              if (b_vnni) {
+                c_brgemm_edge_tpp(
+                    tmp_S_bf16_edge,
+                    &v_a[i][j2 * N_t * H_t + n * H_t * 2],
+                    tmp_o1,
+                    1);
+              } else {
+                c_brgemm_edge_tpp(
+                    tmp_S_bf16_edge,
+                    &v_a[i][j2 * N_t * H_t + n * H_t],
+                    tmp_o1,
+                    1);
+              }
               a_softmax_fixup_online(tmp_o1, tmp_o2, cmax, csum, omax, osum);
               delete[] tmp_S_edge;
               delete[] tmp_S_bf16_edge;
