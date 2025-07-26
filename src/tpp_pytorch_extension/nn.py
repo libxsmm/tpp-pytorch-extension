@@ -19,12 +19,14 @@ TPP_XGEMM_PREPACK_LEVEL = int(os.environ.get("TPP_XGEMM_PREPACK_LEVEL", "1"))
 try:
     if TPP_XGEMM == 1:
         import XGEMM as xgemm
+
         xgemm.set_log_level("WARNING")
-        #xgemm.set_num_devices(1)
+        # xgemm.set_num_devices(1)
     else:
         xgemm = None
 except:
     xgemm = None
+
 
 def gemm_timer(func):
     @wraps(func)
@@ -32,28 +34,40 @@ def gemm_timer(func):
         start_time = time.perf_counter()
         result = func(input, *args, **kwargs)
         end_time = time.perf_counter()
-        execution_time = end_time - start_time
+        exec_time = end_time - start_time
         M, K, N = (input.shape[0], input.shape[1], result.shape[-1])
-        flops = 2 * M * N * K / execution_time / 1e12
+        flops = 2 * M * N * K / exec_time / 1e12
+        in_dt = input.dtype
         if M > 100:
-            print(f"Function '{func.__name__}' took {execution_time*1e3:.3f} ms ({flops:.2f} TF/s) [{M} {N} {K}].")
+            print(
+                f"Func '{func.__name__}' took {exec_time*1e3:.3f} ms ({flops:.2f} TF/s) [{M} {N} {K} {in_dt}]."
+            )
         return result
+
     return wrapper
 
+
 @gemm_timer
-def fc_xgemm(input, weight, bias=None, K=None):
+def fc_xgemm(input, weight, w_trans, bias, K):
     sizes = list(input.shape)
-    if K is None:
-        K = weight.shape[1]
     sizes[1] = K
     output = torch.empty(sizes, dtype=input.dtype, device=input.device)
-    if isinstance(weight, torch.Tensor):
-        xgemm.xgemm(input, weight, output, 1.0, 0.0)
+    if bias is None:
+        if isinstance(weight, torch.Tensor):
+            xgemm.xgemm(input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans)
+        else:
+            xgemm.xgemm_packed(input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans)
     else:
-        xgemm.xgemm_packed(input, weight, output, 1.0, 0.0)
-    if bias:
-        output += bias
+        if isinstance(weight, torch.Tensor):
+            xgemm.xgemm(input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans, bias=bias)
+        else:
+            xgemm.xgemm_packed(
+                input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans, bias=bias
+            )
+    # if bias:
+    #     output += bias
     return output
+
 
 @gemm_timer
 def fc_plain(input, weight, bias=torch.Tensor(), parallel_dim=-1, split_sizes=[]):
@@ -141,7 +155,7 @@ if LinearMethodBase:
             input_size: int,
             output_size: int,
             params_dtype: torch.dtype,
-            **extra_weight_attrs
+            **extra_weight_attrs,
         ):
             raise "NotImplemented"
 
@@ -153,8 +167,9 @@ if LinearMethodBase:
         ) -> torch.Tensor:
 
             N = x.numel() // x.shape[-1]
-            if xgemm and N > 60 and hasattr(layer, 'weight_t'):
-                ret = fc_xgemm(x, layer.weight_t, bias, layer.weight.shape[0])
+            if xgemm and N > 60 and hasattr(layer, "weight_t"):
+                bias_t = layer.bias_t if bias else None
+                ret = fc_xgemm(x, layer.weight_t, 1, bias_t, layer.weight.shape[0])
                 return ret
 
             if layer.weight.dtype == torch.float16:
@@ -211,8 +226,16 @@ def FixLinearBase(
         if ofm % bk == 0 and ifm % bc == 0:
             self.weight_1 = BlockedWeight(self.weight.data, bk, bc, layer_dtype)
             use_tpp = True
-    if xgemm is not None: # and (self.weight.shape[0] >=8192 or self.weight.shape[1] >= 8192):
-        self.weight_t = xgemm.Matrix(self.weight.data.t().contiguous(), TPP_XGEMM_PREPACK_LEVEL, 2)
+    if (
+        xgemm is not None
+    ):  # and (self.weight.shape[0] >=8192 or self.weight.shape[1] >= 8192):
+        self.weight_t = xgemm.Matrix(
+            self.weight, "b", TPP_XGEMM_PREPACK_LEVEL, split=1, Op=1
+        )
+        if self.bias:
+            self.bias_t = xgemm.Matrix(
+                self.bias, "d", TPP_XGEMM_PREPACK_LEVEL, split=0, Op=0
+            )
         use_tpp = True
         # self.weight_t.shape = self.weight.shape
     if use_tpp:
