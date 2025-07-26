@@ -16,6 +16,7 @@ except:
 
 TPP_XGEMM = int(os.environ.get("TPP_XGEMM", "1"))
 TPP_XGEMM_PREPACK_LEVEL = int(os.environ.get("TPP_XGEMM_PREPACK_LEVEL", "1"))
+TPP_XGEMM_USE_FP8 = int(os.environ.get("TPP_XGEMM_USE_FP8", "0"))
 try:
     if TPP_XGEMM == 1:
         import XGEMM as xgemm
@@ -52,6 +53,8 @@ def fc_xgemm(input, weight, w_trans, bias, K):
     sizes = list(input.shape)
     sizes[1] = K
     output = torch.empty(sizes, dtype=input.dtype, device=input.device)
+    if TPP_XGEMM_USE_FP8 > 0:
+        input = input.to(torch.float8_e4m3fn)
     if bias is None:
         if isinstance(weight, torch.Tensor):
             xgemm.xgemm(input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans)
@@ -169,6 +172,7 @@ if LinearMethodBase:
             N = x.numel() // x.shape[-1]
             if xgemm and N > 60 and hasattr(layer, "weight_t"):
                 bias_t = layer.bias_t if bias else None
+
                 ret = fc_xgemm(x, layer.weight_t, 1, bias_t, layer.weight.shape[0])
                 return ret
 
@@ -226,11 +230,12 @@ def FixLinearBase(
         if ofm % bk == 0 and ifm % bc == 0:
             self.weight_1 = BlockedWeight(self.weight.data, bk, bc, layer_dtype)
             use_tpp = True
-    if (
-        xgemm is not None
-    ):  # and (self.weight.shape[0] >=8192 or self.weight.shape[1] >= 8192):
+    if xgemm is not None:
+        weight = self.weight
+        if TPP_XGEMM_USE_FP8 > 0:
+            weight = weight.to(torch.float8_e4m3fn)
         self.weight_t = xgemm.Matrix(
-            self.weight, "b", TPP_XGEMM_PREPACK_LEVEL, split=1, Op=1
+            weight, "b", TPP_XGEMM_PREPACK_LEVEL, split=1, Op=1
         )
         if self.bias:
             self.bias_t = xgemm.Matrix(
