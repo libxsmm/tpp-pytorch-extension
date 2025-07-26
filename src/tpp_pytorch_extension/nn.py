@@ -21,6 +21,7 @@ try:
     if TPP_XGEMM == 1:
         import XGEMM as xgemm
 
+        # xgemm.set_log_level("INFO")
         xgemm.set_log_level("WARNING")
         # xgemm.set_num_devices(1)
     else:
@@ -190,12 +191,17 @@ if LinearMethodBase:
                 ret = self.orig_method.apply(layer, x, bias)
                 return ret
 
-            x = x.to(weight.dtype)
-            bias = (
-                bias.to(weight.dtype)
-                if bias is not None
-                else torch.Tensor().to(weight.dtype)
-            )
+            if weight.dtype != torch.float8_e4m3fn:
+                x = x.to(weight.dtype)
+                bias = (
+                    bias.to(weight.dtype)
+                    if bias is not None
+                    else torch.Tensor().to(weight.dtype)
+                )
+            else:
+                bias = (
+                    bias.to(x.dtype) if bias is not None else torch.Tensor().to(x.dtype)
+                )
             # if N > 250:
             #     print(f"TPP: {weight.dtype} {x.shape[0]}, {x.shape[1]}, {weight.shape}, {bias.shape}")
             ret = fc_plain(x, weight, bias)
@@ -224,6 +230,8 @@ def FixLinearBase(
     bk, bc = bkbc_2
     if ofm % bk == 0 and ifm % bc == 0:
         self.weight_2 = BlockedWeight(self.weight.data, bk, bc, layer_dtype)
+        if TPP_XGEMM_USE_FP8 > 0:
+            self.weight_2 = self.weight_2.to(torch.float8_e4m3fn)
         use_tpp = True
     if bkbc_1 is not None:
         bk, bc = bkbc_1
