@@ -61,21 +61,21 @@ int ldc = N_t * H_t;
 auto qkv_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE*N_t*H_t, lda, ldb, QKV_BLOCKSIZE, 0.0, 0, 1)));
+        T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE*N_t*H_t, lda, ldb, QKVO_BLOCKSIZE, 0.0, 0, 1)));
 
 auto k_trans_tpp = SCOPEIT(
     XformExtTPP<T>(
-        QKV_BLOCKSIZE,
-        QKV_BLOCKSIZE,
-        QKV_BLOCKSIZE,
-        QKV_BLOCKSIZE,
-        QKV_BLOCKSIZE,
+        QKVO_BLOCKSIZE,
+        QKVO_BLOCKSIZE,
+        QKVO_BLOCKSIZE,
+        QKVO_BLOCKSIZE,
+        QKVO_BLOCKSIZE,
         S_t,
         XformTPP::XFORM_XPOSE_TPP),
     XPOSE);
 
-auto scale_tpp = SCOPEIT((ScaleTPP<T, T>(QKV_BLOCKSIZE * QKV_BLOCKSIZE)), EW_SCL);
-auto copy_tpp = SCOPEIT(CpyTPP<T>(QKV_BLOCKSIZE, QKV_BLOCKSIZE, QKV_BLOCKSIZE, ldb), EW_COPY);
+auto scale_tpp = SCOPEIT((ScaleTPP<T, T>(QKVO_BLOCKSIZE * QKVO_BLOCKSIZE)), EW_SCL);
+auto copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, ldb), EW_COPY);
 float alpha = (1.0 / sqrt(H_t));
 
 // auto q = at::mul(at::einsum("bqa,ahc->bqhc", {q_data, query_w}),
@@ -89,10 +89,10 @@ auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        for (int k = 0; k < (N_t * H_t); k += QKV_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * QKV_BLOCKSIZE], 64);
-          qkv_brgemm_tpp(&q_data_a[i][j][0], &query_w_a[0][k], &tmp[0], HS_t/QKV_BLOCKSIZE);
+      for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+        for (int k = 0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+          LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
+          qkv_brgemm_tpp(&q_data_a[i][j][0], &query_w_a[0][k], &tmp[0], HS_t/QKVO_BLOCKSIZE);
           scale_tpp(&tmp[0], &tmp[0], alpha);
           copy_tpp(&tmp[0], &q_a[i][j][k]);
         }
@@ -114,10 +114,10 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        for (int k = 0; k < (N_t * H_t); k += QKV_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * QKV_BLOCKSIZE], 64);
-          qkv_brgemm_tpp(&m_data_a[i][j][0], &key_w_a[0][k], &tmp[0], HS_t/QKV_BLOCKSIZE);
+      for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+        for (int k = 0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+          LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
+          qkv_brgemm_tpp(&m_data_a[i][j][0], &key_w_a[0][k], &tmp[0], HS_t/QKVO_BLOCKSIZE);
           k_trans_tpp(&tmp[0], &k_a[i][k*S_t + j]); // [ 0*H_t*S_t + 0*S_t + j]
         }
       }
@@ -137,11 +137,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
     // RECORD_FUNCTION("parallel_for", std::vector<c10::IValue>());
 #pragma omp parallel for collapse(3)
     for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += QKV_BLOCKSIZE) {
-        for (int k = 0; k < (N_t * H_t); k += QKV_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(T tmp[QKV_BLOCKSIZE * QKV_BLOCKSIZE], 64);
+      for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+        for (int k = 0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+          LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
           qkv_brgemm_tpp(
-              &m_data_a[i][j][0], &value_w_a[0][k], &tmp[0], HS_t/QKV_BLOCKSIZE);
+              &m_data_a[i][j][0], &value_w_a[0][k], &tmp[0], HS_t/QKVO_BLOCKSIZE);
           copy_tpp(&tmp[0], &v_a[i][j][k]);
         }
       }
@@ -421,17 +421,17 @@ ldc = N_t * H_t;
 auto g_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE*HS_t, lda, ldb, C_BLOCKSIZE, 0.0, 0, 1)));
-auto g_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, C_BLOCKSIZE), BIAS);
+        T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE*HS_t, lda, ldb, QKVO_BLOCKSIZE, 0.0, 0, 1)));
+auto g_addbias_tpp = SCOPEIT(AddBiasTPP<float>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE), BIAS);
 auto g_sigmoid_tpp =
-    SCOPEIT(SiLUFwdTPP<T>(C_BLOCKSIZE, C_BLOCKSIZE), EW_MUL);
-auto g_mul_tpp = SCOPEIT((MulTPP<T, T>(C_BLOCKSIZE, C_BLOCKSIZE, ldc, ldc)), EW_MUL);
+    SCOPEIT(SiLUFwdTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE), EW_MUL);
+auto g_mul_tpp = SCOPEIT((MulTPP<T, T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, ldc, ldc)), EW_MUL);
 
 auto out_gemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE, C_BLOCKSIZE*HS_t, lda, ldb, C_BLOCKSIZE, 0.0, 0, 1)));
-auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(C_BLOCKSIZE, C_BLOCKSIZE), BIAS);
+        T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE*HS_t, lda, ldb, QKVO_BLOCKSIZE, 0.0, 0, 1)));
+auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE), BIAS);
 
 // gate_values = at::sigmoid(at::add(at::einsum("bqc,chv->bqhv", {q_data,
 // gating_w}), gating_b));   /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8,
@@ -449,13 +449,13 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
     if (gate_flag){
 #pragma omp parallel for collapse(2)
     for (int i = 0; i < B_t; i++) {
-      for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-        LIBXSMM_ALIGNED(T tmp_gate_values[C_BLOCKSIZE * N_t * H_t], 64);
-        for (int k=0; k < (N_t * H_t); k += C_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * C_BLOCKSIZE], 64);
-          LIBXSMM_ALIGNED(T tmp_sig[C_BLOCKSIZE * C_BLOCKSIZE], 64);
+      for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+        LIBXSMM_ALIGNED(T tmp_gate_values[QKVO_BLOCKSIZE * N_t * H_t], 64);
+        for (int k=0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+          LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
+          LIBXSMM_ALIGNED(T tmp_sig[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
 
-          g_brgemm_tpp(&q_data_a[i][j][0], &gating_w_a[0][k], &tmp[0], (N_t*H_t)/C_BLOCKSIZE);
+          g_brgemm_tpp(&q_data_a[i][j][0], &gating_w_a[0][k], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
           g_addbias_tpp(&gating_b_a[0][k], &tmp[0]);
 
           g_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_sig[0]);
@@ -465,10 +465,10 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
               &weighted_avg_a[i][j][k],
               &tmp_gate_values[k]);
         }
-        for (int k=0; k < (N_t * H_t); k += C_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(T tmp[C_BLOCKSIZE * C_BLOCKSIZE], 64);
+        for (int k=0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+          LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
           out_gemm_tpp(
-              &tmp_gate_values[0], &output_w_a[0][k], &tmp[0], (N_t*H_t)/C_BLOCKSIZE);
+              &tmp_gate_values[0], &output_w_a[0][k], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
           if (bias_flag)
             out_addbias_tpp(&output_b_a[0][k], &tmp[0]);
           copy_tpp(&tmp[0], &output_a[i][j][k]);
@@ -478,11 +478,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
   } else {
 #pragma omp parallel for collapse(3)
       for (int i = 0; i < B_t; i++) {
-        for (int j = 0; j < S_t; j += C_BLOCKSIZE) {
-          for (int k=0; k < (N_t * H_t); k += C_BLOCKSIZE) {
-            LIBXSMM_ALIGNED(float tmp[C_BLOCKSIZE * C_BLOCKSIZE], 64);
+        for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+          for (int k=0; k < (N_t * H_t); k += QKVO_BLOCKSIZE) {
+            LIBXSMM_ALIGNED(float tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
             out_gemm_tpp(
-                &weighted_avg_a[i][j][0], &output_w_a[0][k], &tmp[0], (N_t*H_t)/C_BLOCKSIZE);
+                &weighted_avg_a[i][j][0], &output_w_a[0][k], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
             if (bias_flag)
               out_addbias_tpp(&output_b_a[0][k], &tmp[0]);
             copy_tpp(&tmp[0], &output_a[i][j][k]);

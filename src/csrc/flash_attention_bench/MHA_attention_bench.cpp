@@ -26,10 +26,9 @@
 
 using namespace tpp;
 
-#define QKV_BLOCKSIZE 64
+#define QKVO_BLOCKSIZE 64
 #define A_BLOCKSIZE 64
 #define Ak_BLOCKSIZE 512
-#define C_BLOCKSIZE 64
 
 // REGISTER_SCOPE(alpha_q_gemm, "alpha_q_gemm");
 // REGISTER_SCOPE(alpha_k_gemm, "alpha_k_gemm");
