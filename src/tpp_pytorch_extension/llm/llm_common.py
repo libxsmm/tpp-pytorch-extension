@@ -454,7 +454,7 @@ def FixLinear(
     if weight_dtype is None:
         weight_dtype = layer_dtype
     elif isinstance(weight_dtype, str):
-        if weight_dtype not in ["mxfp4", "qint8"]:
+        if weight_dtype not in ["mxfp4", "qint8", "qint2"]:
             try:
                 weight_dtype = getattr(torch, weight_dtype)
             except:
@@ -501,6 +501,10 @@ def FixLinear(
         elif weight_dtype == "qint8":
             self.weight = torch.nn.Parameter(
                 qtype.remap_and_quantize_qint8(self.weight), requires_grad=False
+            )
+        elif weight_dtype == "qint2":
+            self.weight = torch.nn.Parameter(
+                qtype.remap_and_quantize_qint2_intlv(self.weight), requires_grad=False
             )
     else:
         self.weight = torch.nn.Parameter(

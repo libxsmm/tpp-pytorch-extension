@@ -68,9 +68,10 @@ parser.add_argument(
 parser.add_argument(
     "--weight-dtype",
     type=str,
-    choices=["float32", "bfloat16", "bfloat8", "hfloat8", "mxfp4", "qint8", None],
+    choices=["float32", "bfloat16", "bfloat8", "hfloat8"]
+    + ["mxfp4", "qint8", "qint2", None],
     default=None,
-    help="bfloat16, float32 or bfloat8 or hfloat8 or mxfp4 or qint8",
+    help="bfloat16, float32, bfloat8, hfloat8, mxfp4, qint8 or qint2",
 )
 parser.add_argument(
     "--input-tokens",
