@@ -28,6 +28,7 @@ if [ "$1" == "--help" ]; then
   echo "bias_flag: (default: 0, no bias)"
   echo "nbbias_flag: (default: 0, no nbias)"
   echo "gate_flag: (default: 0, no gate)"
+  echo "correctness_check: (default: 0, no check)"
   exit 0
 fi
 
@@ -48,6 +49,7 @@ then
   nbbias_flag=${13:-0}
   gate_flag=${14:-0}
   self_attention_flag=${15:-1}
+  correctness_check=${16:-0}
 else
   llm=${1:-llama-7b}
   batch_size=${2:-64}
@@ -64,6 +66,7 @@ else
   nbbias_flag=${13:-0}
   gate_flag=${14:-0}
   self_attention_flag=${15:-1}
+  correctness_check=${16:-0}
 fi
 
 # echo "Running $llm model"
@@ -92,7 +95,7 @@ else
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, blocked_layout: $blocked_layout, b_vnni: $b_vnni, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag"
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, blocked_layout: $blocked_layout, b_vnni: $b_vnni, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag, correctness_check: $correctness_check"
 
 
 echo "Compiling MHA"
@@ -105,7 +108,7 @@ then
   echo "CPU count: $cpu_count, threads: $threads"
 
   g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp
-  KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads taskset -c 0-$threads ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
+  KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads taskset -c 0-$threads ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag $correctness_check
 else
   g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp -mavx512f
 
@@ -116,10 +119,10 @@ else
   if [ "$hyper" != "1" ]; then
       threads=$cpu_count
       echo "CPU count: $cpu_count, threads: $threads"
-      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
+      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag $correctness_check
   else
       threads=$((cpu_count * 2))
       echo "CPU count: $cpu_count, threads: $threads"
-      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
+      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag $correctness_check
   fi
 fi

@@ -305,7 +305,7 @@ int main(int argc, char* argv[]) {
   long num_layer = std::stoi(argv[11]);
   long num_iter = std::stoi(argv[12]);
   bool self_attention_flag = std::stoi(argv[13]);
-  bool check = true;
+  bool correctness_check = std::stoi(argv[14]);
 
   if (bf16_flag) {
     printf("Running with BF16\n");
@@ -318,7 +318,7 @@ int main(int argc, char* argv[]) {
     for (int l = 0; l < num_layer; l++) {
       if (self_attention_flag){
         if (l==0) {
-          if (check) {
+          if (correctness_check) {
             fused_gating_attention_fwd_bf16(
               q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
@@ -537,7 +537,7 @@ int main(int argc, char* argv[]) {
     for (int l = 0; l < num_layer; l++) {
       if (self_attention_flag){
         if (l==0) {
-          if (check) {
+          if (correctness_check) {
             fused_gating_attention_fwd_fp32(
               q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
