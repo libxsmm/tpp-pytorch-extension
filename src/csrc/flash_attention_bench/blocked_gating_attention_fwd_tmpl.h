@@ -56,7 +56,7 @@ auto output_a = GetVLAPtr<T>(output, {S_t/QKVO_BLOCKSIZE, N_t, QKVO_BLOCKSIZE, H
 auto qkv_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, N_t*H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
+        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
 
 auto scale_tpp = SCOPEIT((ScaleTPP<T, T>(QKVO_BLOCKSIZE * H_t)), EW_SCL);
 auto copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE * H_t), EW_COPY);
@@ -72,7 +72,7 @@ auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for (int j = 0; j < (S_t/QKVO_BLOCKSIZE); j++) {
         for (int k = 0; k < N_t; k++) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * H_t], 64);
-          qkv_brgemm_tpp(&q_data_a[i][j][0][0][0], &query_w_a[0][k][0][0], &tmp[0], N_t);
+          qkv_brgemm_tpp(&q_data_a[i][j][0][0][0], &query_w_a[k][0][0][0], &tmp[0], N_t);
           scale_tpp(&tmp[0], &tmp[0], alpha);
           copy_tpp(&tmp[0], &q_a[i][j][k][0]);
         }
@@ -105,7 +105,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for (int j = 0; j < (S_t/QKVO_BLOCKSIZE); j++) {
         for (int k = 0; k < N_t; k++) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * H_t], 64);
-          qkv_brgemm_tpp(&m_data_a[i][j][0][0][0], &key_w_a[0][k][0][0], &tmp[0], N_t);
+          qkv_brgemm_tpp(&m_data_a[i][j][0][0][0], &key_w_a[k][0][0][0], &tmp[0], N_t);
           k_trans_tpp(&tmp[0], &k_a[i][j][k][0]); // [ 0*H_t*S_t + 0*S_t + j]
         }
       }
@@ -127,7 +127,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for (int j = 0; j < (S_t/QKVO_BLOCKSIZE); j++) {
         for (int k = 0; k < N_t; k++) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * H_t], 64);
-          qkv_brgemm_tpp(&m_data_a[i][j][0][0][0], &value_w_a[0][k][0][0], &tmp[0], N_t);
+          qkv_brgemm_tpp(&m_data_a[i][j][0][0][0], &value_w_a[k][0][0][0], &tmp[0], N_t);
           copy_tpp(&tmp[0], &v_a[i][j][k][0]);
         }
       }
@@ -308,7 +308,7 @@ auto ac_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_ti
 auto g_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, N_t*H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
+        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
 
 auto g_addbias_tpp = SCOPEIT(AddBiasTPP<float>(QKVO_BLOCKSIZE, H_t), BIAS);
 auto g_sigmoid_tpp =
@@ -318,7 +318,7 @@ auto g_mul_tpp = SCOPEIT((MulTPP<T, T>(QKVO_BLOCKSIZE, H_t)), EW_MUL);
 auto out_gemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
         T,
-        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, N_t*H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
+        T>(QKVO_BLOCKSIZE, H_t, H_t, QKVO_BLOCKSIZE*H_t, H_t*H_t, H_t, H_t, H_t, 0.0, 0, 1)));
 auto out_addbias_tpp = SCOPEIT(AddBiasTPP<float>(QKVO_BLOCKSIZE, H_t), BIAS);
 
 start_time = std::chrono::high_resolution_clock::now(); // Start timing
@@ -335,7 +335,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
         for (int k=0; k < N_t; k++) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * H_t], 64);
 
-          g_brgemm_tpp(&q_data_a[i][j][0][0][0], &gating_w_a[0][k][0][0], &tmp[0], N_t);
+          g_brgemm_tpp(&q_data_a[i][j][0][0][0], &gating_w_a[k][0][0][0], &tmp[0], N_t);
           g_addbias_tpp(&gating_b_a[k][0], &tmp[0]);
 
           g_sigmoid_tpp(&tmp[0], &tmp[0], &tmp_gate_values[k][0]);
@@ -348,7 +348,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
         for (int k=0; k < N_t; k++) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * H_t], 64);
           out_gemm_tpp(
-              &tmp_gate_values[0][0], &output_w_a[0][k][0][0], &tmp[0], N_t);
+              &tmp_gate_values[0][0], &output_w_a[k][0][0][0], &tmp[0], N_t);
           if (bias_flag)
             out_addbias_tpp(&output_b_a[k][0], &tmp[0]);
           copy_tpp(&tmp[0], &output_a[i][j][k][0][0]);
@@ -362,7 +362,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
           for (int k=0; k < N_t; k++) {
             LIBXSMM_ALIGNED(float tmp[QKVO_BLOCKSIZE * H_t], 64);
             out_gemm_tpp(
-                &weighted_avg_a[i][j][0][0], &output_w_a[0][k][0][0], &tmp[0], N_t);
+                &weighted_avg_a[i][j][0][0], &output_w_a[k][0][0][0], &tmp[0], N_t);
             if (bias_flag)
               out_addbias_tpp(&output_b_a[k][0], &tmp[0]);
             copy_tpp(&tmp[0], &output_a[i][j][k][0][0]);

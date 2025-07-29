@@ -181,6 +181,8 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
   float** output_b = new float*[num_layer];
   T** output = new T*[num_layer];
 
+  auto downconvert_embed_tpp = SCOPEIT((ConvertTPP<float, T>(embedding_dim)), EW_ZERO);
+
   // Initialize input tensors with random values
   for (int l = 0; l < num_layer; l++) {
     q_data[l] = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
@@ -202,9 +204,15 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
       exit(1);
     }
 
-    for (int i = 0; i < batch_size*seq_len*embedding_dim; ++i) {
-      q_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
-      m_data[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
+    for (int i = 0; i < batch_size*seq_len; ++i) {
+      float q_data_tmp[embedding_dim];
+      float m_data_tmp[embedding_dim];
+      for (int j = 0; j < embedding_dim; j++){
+        q_data_tmp[j] = static_cast<float>(rand() % 10)*0.1; /// RAND_MAX;
+        m_data_tmp[j] = static_cast<float>(rand() % 10)*0.1; /// RAND_MAX;
+      }
+      downconvert_embed_tpp(q_data_tmp, &q_data[l][i*embedding_dim]);
+      downconvert_embed_tpp(m_data_tmp, &m_data[l][i*embedding_dim]);
     }
     for (int i = 0; i < batch_size*seq_len; ++i) {
       bias[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
@@ -212,19 +220,25 @@ std::tuple<T**, T**, float**, float**, T**, T**, T**, T**, float**, T**, float**
     for (int i = 0; i < num_heads * seq_len * seq_len; ++i) {
       nonbatched_bias[l][i] = static_cast<float>(rand() % 10)*0.1; /// RAND_MAX;
     }
-    for (int i = 0; i < embedding_dim * num_heads * head_size; ++i) {
-          query_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
-          key_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
-          value_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
-          gating_w[l][i] = static_cast<T>(rand() % 10)*0.1; // / RAND_MAX;
+    for (int i = 0; i < embedding_dim; ++i) {
+      float qw_tmp[embedding_dim], kw_tmp[embedding_dim], vw_tmp[embedding_dim], gw_tmp[embedding_dim], ow_tmp[embedding_dim];
+      for (int j = 0; j < embedding_dim; j++) {
+          qw_tmp[j] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
+          kw_tmp[j] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
+          vw_tmp[j] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
+          gw_tmp[j] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
+          ow_tmp[j] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
+      }
+      downconvert_embed_tpp(qw_tmp, &query_w[l][i*embedding_dim]);
+      downconvert_embed_tpp(kw_tmp, &key_w[l][i*embedding_dim]);
+      downconvert_embed_tpp(vw_tmp, &value_w[l][i*embedding_dim]);
+      downconvert_embed_tpp(gw_tmp, &gating_w[l][i*embedding_dim]);
+      downconvert_embed_tpp(ow_tmp, &output_w[l][i*embedding_dim]);
     }
     for (int i = 0; i < num_heads * head_size; ++i) {
       gating_b[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
     }
 
-    for (int i = 0; i < num_heads * head_size * embedding_dim; ++i) {
-      output_w[l][i] = static_cast<T>(rand() % 10)*0.1; /// RAND_MAX;
-    }
     for (int i = 0; i < embedding_dim; ++i) {
       output_b[l][i] = static_cast<float>(rand() % 10)*0.1; // / RAND_MAX;
     }
@@ -324,7 +338,7 @@ int main(int argc, char* argv[]) {
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
               batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag, b_vnni);
-            // T** output_blocked = new T*[num_layer];
+
             T* output_normal = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
             T* output_blocked = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
             T* q_data_blocked = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
@@ -332,9 +346,7 @@ int main(int argc, char* argv[]) {
             T* key_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
             T* value_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
             T* gating_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
-            // gating_b[l] = new (std::align_val_t(64)) float[num_heads * head_size];
             T* output_w_blocked = new (std::align_val_t(64)) T[num_heads * head_size * embedding_dim];
-            // output_b[l] = new (std::align_val_t(64)) float[embedding_dim];
             float* nonbatched_bias_blocked = new (std::align_val_t(64)) float[num_heads * seq_len * seq_len];
 
             // Changing layout from [B, Ns, QKVO_BLOCKSIZE, N, H] to [B, Ns, num_heads, QKVO_BLOCKSIZE, head_size]
@@ -366,20 +378,19 @@ int main(int argc, char* argv[]) {
               }
             }
 
-            #pragma omp parallel for
             for(int n1 = 0; n1 < num_heads; n1++) {
               for(int h1 = 0; h1 < head_size; h1++) {
                 for(int n2 = 0; n2 < num_heads; n2++) {
                   for(int h2 = 0; h2 < head_size; h2++) {
-                    query_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
-                      = query_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    key_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    query_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]       //[n2, n1, h1, h2]
+                      = query_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];               //[n1, h1, n2, h2]
+                    key_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = key_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    value_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    value_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = value_w[l][n1 * head_size * embedding_dim + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    gating_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    gating_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = gating_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    output_w_blocked[n1 * (embedding_dim* head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    output_w_blocked[n2 * (embedding_dim* head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = output_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
                   }
                 }
@@ -405,11 +416,20 @@ int main(int argc, char* argv[]) {
                 }
               }
             }
+            auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
+            printf("Checking correctness of output in BF16\n");
             // compare the output and output_blocked float arrays
-            for (int i = 0; i < batch_size * seq_len * embedding_dim; i++) {
-              if (std::abs(output[l][i] - output_normal[i]) > 1e-5) {
-                std::cerr << "Output mismatch at index " << i << ": " << output[l][i] << " vs " << output_normal[i] << std::endl;
-                exit(1);
+            for (int i = 0; i < (batch_size * seq_len); i++) {
+              float output_float[embedding_dim];
+              float output_normal_float[embedding_dim];
+              upconvert_tpp(&output[l][i*embedding_dim], output_float);
+              upconvert_tpp(&output_normal[i*embedding_dim], output_normal_float);
+
+              for (int j = 0; j < embedding_dim; j++) {
+                if (std::abs((output_float[j] - output_normal_float[j])) > 1e-2) {
+                  std::cerr << "Output mismatch at index " << (i*embedding_dim + j) << ": " << output_float[j] << " vs " << output_normal_float[j] << std::endl;
+                  exit(1);
+                }
               }
             }
             delete[] output_blocked; delete[] output_normal;
@@ -585,20 +605,20 @@ int main(int argc, char* argv[]) {
               }
             }
 
-            #pragma omp parallel for
+            // #pragma omp parallel for
             for(int n1 = 0; n1 < num_heads; n1++) {
               for(int h1 = 0; h1 < head_size; h1++) {
                 for(int n2 = 0; n2 < num_heads; n2++) {
                   for(int h2 = 0; h2 < head_size; h2++) {
-                    query_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
-                      = query_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    key_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    query_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]     //[n2, n1, h1, h2]
+                      = query_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];             //[n1, h1, n2, h2]
+                    key_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = key_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    value_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    value_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = value_w[l][n1 * head_size * embedding_dim + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    gating_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    gating_w_blocked[n2 * (embedding_dim * head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = gating_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
-                    output_w_blocked[n1 * (embedding_dim* head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                    output_w_blocked[n2 * (embedding_dim* head_size) + n1 * (head_size * head_size) + h1 * (head_size) + h2]
                       = output_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
                   }
                 }
@@ -625,8 +645,9 @@ int main(int argc, char* argv[]) {
               }
             }
             // compare the output and output_blocked float arrays
+            printf("Checking correctness of output\n");
             for (int i = 0; i < batch_size * seq_len * embedding_dim; i++) {
-              if (std::abs(output[l][i] - output_normal[i]) > 1e-5) {
+              if (std::abs((output[l][i] - output_normal[i])) > 1e-5) {
                 std::cerr << "Output mismatch at index " << i << ": " << output[l][i] << " vs " << output_normal[i] << std::endl;
                 exit(1);
               }
