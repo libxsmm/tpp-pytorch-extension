@@ -19,6 +19,7 @@ if [ "$1" == "--help" ]; then
   echo "seq_len: (default: 4096)"
   echo "hyper: (default: 0, no hyperthreading)"
   echo "BF16: (default: 1, use BF16)"
+  echo "blocked_layout: (default: 1, use blocked_layout)"
   echo "b_vnni: (default: 1, b is in vnni format)"
   echo "num_layer: (default: 3)"
   echo "num_iter: (default: 3)"
@@ -37,30 +38,32 @@ then
   seq_len=${3:-256}
   hyper=${4:-0}
   BF16=${5:-0}
-  b_vnni=${6:-1}
-  num_layer=${7:-3}
-  num_iter=${8:-3}
-  nheads=${9-32}
-  head_size=${10:-128}
-  bias_flag=${11:-0}
-  nbbias_flag=${12:-0}
-  gate_flag=${13:-0}
-  self_attention_flag=${14:-1}
+  blocked_layout=${6:-1}
+  b_vnni=${7:-1}
+  num_layer=${8:-3}
+  num_iter=${9:-3}
+  nheads=${10-32}
+  head_size=${11:-128}
+  bias_flag=${12:-0}
+  nbbias_flag=${13:-0}
+  gate_flag=${14:-0}
+  self_attention_flag=${15:-1}
 else
   llm=${1:-llama-7b}
   batch_size=${2:-64}
   seq_len=${3:-4096}
   hyper=${4:-0}
   BF16=${5:-1}
-  b_vnni=${6:-1}
-  num_layer=${7:-3}
-  num_iter=${8:-3}
-  nheads=${9-32}
-  head_size=${10:-128}
-  bias_flag=${11:-0}
-  nbbias_flag=${12:-0}
-  gate_flag=${13:-0}
-  self_attention_flag=${14:-1}
+  blocked_layout=${6:-1}
+  b_vnni=${7:-1}
+  num_layer=${8:-3}
+  num_iter=${9:-3}
+  nheads=${10-32}
+  head_size=${11:-128}
+  bias_flag=${12:-0}
+  nbbias_flag=${13:-0}
+  gate_flag=${14:-0}
+  self_attention_flag=${15:-1}
 fi
 
 # echo "Running $llm model"
@@ -89,7 +92,7 @@ else
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag"
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, blocked_layout: $blocked_layout, b_vnni: $b_vnni, num_layer: $num_layer, num_iter: $num_iter, nheads: $nheads, head_size: $head_size, bias_flag: $bias_flag, nbbias_flag: $nbbias_flag, gate_flag: $gate_flag, self_attention_flag: $self_attention_flag"
 
 
 echo "Compiling MHA"
@@ -102,21 +105,21 @@ then
   echo "CPU count: $cpu_count, threads: $threads"
 
   g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp
-  KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads taskset -c 0-$threads ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+  KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads taskset -c 0-$threads ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
 else
   g++ -O2 MHA_attention_bench.cpp init.cpp -o mha.o -I ../ -I $LIBXSMM_PATH/include/ -DLIBXSMM_DEFAULT_CONFIG -L $LIBXSMM_PATH/lib/ -lxsmm -fopenmp -mavx512f
 
   # Get number of cpu from lscpu command
   cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 
-  # <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
+  # <batch_size> <seq_len> <num_heads> <head_size> <bias_flag> <nbbias_flag> <gate_flag> <BF16> <blocked_layout> <b_vnni> <num_layer> <num_iter> <self_attention_flag>
   if [ "$hyper" != "1" ]; then
       threads=$cpu_count
       echo "CPU count: $cpu_count, threads: $threads"
-      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
   else
       threads=$((cpu_count * 2))
       echo "CPU count: $cpu_count, threads: $threads"
-      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $b_vnni $num_layer $num_iter $self_attention_flag
+      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $nheads $head_size $bias_flag $nbbias_flag $gate_flag $BF16 $blocked_layout $b_vnni $num_layer $num_iter $self_attention_flag
   fi
 fi

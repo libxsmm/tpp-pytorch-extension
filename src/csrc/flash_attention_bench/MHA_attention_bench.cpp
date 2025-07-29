@@ -26,9 +26,8 @@
 
 using namespace tpp;
 
-#define QKVO_BLOCKSIZE 64
-#define A_BLOCKSIZE 64
-#define Ak_BLOCKSIZE 512
+#define QKVO_BLOCKSIZE 64L
+#define Ak_BLOCKSIZE 512L
 
 // REGISTER_SCOPE(alpha_q_gemm, "alpha_q_gemm");
 // REGISTER_SCOPE(alpha_k_gemm, "alpha_k_gemm");
@@ -104,6 +103,35 @@ std::vector<long int> fused_gating_attention_fwd_fp32(
   
   typedef float T;
   #include "fused_gating_attention_fwd_tmpl.h"
+  return times;
+}
+
+
+std::vector<long int> blocked_gating_attention_fwd_fp32(
+    float* q_data,
+    float* m_data,
+    float* bias,
+    float* nonbatched_bias,
+    float* query_w,
+    float* key_w,
+    float* value_w,
+    float* gating_w,
+    float* gating_b,
+    float* output_w,
+    float* output_b,
+    float* output,
+    int64_t B_t,
+    int64_t S_t,
+    int64_t N_t,
+    int64_t H_t,
+    int64_t HS_t,
+    bool bias_flag,
+    bool nbbias_flag,
+    bool gate_flag) {
+  // GlobalPass _gp(FWD);
+  
+  typedef float T;
+  #include "blocked_gating_attention_fwd_tmpl.h"
   return times;
 }
 
@@ -242,10 +270,13 @@ int main(int argc, char* argv[]) {
   bool nbbias_flag = std::stoi(argv[6]);
   bool gate_flag = std::stoi(argv[7]);
   bool bf16_flag = std::stoi(argv[8]);
-  bool b_vnni = std::stoi(argv[9]);
-  long num_layer = std::stoi(argv[10]);
-  long num_iter = std::stoi(argv[11]);
-  bool self_attention_flag = std::stoi(argv[12]);
+  bool blocked_layout = std::stoi(argv[9]);
+  bool b_vnni = std::stoi(argv[10]);
+  long num_layer = std::stoi(argv[11]);
+  long num_iter = std::stoi(argv[12]);
+  bool self_attention_flag = std::stoi(argv[13]);
+  bool check = true;
+
   if (bf16_flag) {
     printf("Running with BF16\n");
     typedef bfloat16 T;
@@ -315,6 +346,8 @@ int main(int argc, char* argv[]) {
     }
   } else {
     printf("Running with FP32\n");
+    if (blocked_layout)
+      printf("Running with blocked layout\n");
     typedef float T;
     // Allocate and initialize input tensors
     auto [q_data, m_data, bias, nonbatched_bias, query_w, key_w, value_w, gating_w, gating_b, output_w, output_b, output] = allocate_and_initialize<T>(batch_size, seq_len, num_heads, head_size, embedding_dim, num_layer);
@@ -322,24 +355,146 @@ int main(int argc, char* argv[]) {
     for (int l = 0; l < num_layer; l++) {
       if (self_attention_flag){
         if (l==0) {
-          fused_gating_attention_fwd_fp32(
-            q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
-            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-            output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          if (check) {
+            fused_gating_attention_fwd_fp32(
+              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            // T** output_blocked = new T*[num_layer];
+            T* output_normal = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
+            T* output_blocked = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
+            T* q_data_blocked = new (std::align_val_t(64)) T[batch_size * seq_len * embedding_dim];
+            T* query_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
+            T* key_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
+            T* value_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
+            T* gating_w_blocked = new (std::align_val_t(64)) T[embedding_dim * num_heads * head_size];
+            // gating_b[l] = new (std::align_val_t(64)) float[num_heads * head_size];
+            T* output_w_blocked = new (std::align_val_t(64)) T[num_heads * head_size * embedding_dim];
+            // output_b[l] = new (std::align_val_t(64)) float[embedding_dim];
+            T* nonbatched_bias_blocked = new (std::align_val_t(64)) float[num_heads * seq_len * seq_len];
+
+            // Changing layout from [B, Ns, QKVO_BLOCKSIZE, N, H] to [B, Ns, num_heads, QKVO_BLOCKSIZE, head_size]
+            #pragma omp parallel for collapse(2)
+            for(int i = 0; i < batch_size; i++) {
+              for(int ns = 0; ns < (seq_len/QKVO_BLOCKSIZE); ns++) {
+                for(int Bs = 0; Bs < QKVO_BLOCKSIZE; Bs++) {
+                  for(int n = 0; n < num_heads; n++) {
+                    for(int h = 0; h < head_size; h++) {
+                      q_data_blocked[i * (seq_len * embedding_dim) + ns*(QKVO_BLOCKSIZE*embedding_dim) +  n *(QKVO_BLOCKSIZE*head_size) + Bs*(head_size) + h]
+                       = q_data[l][i * (seq_len * embedding_dim) + ns*(QKVO_BLOCKSIZE*embedding_dim) +  Bs *(num_heads*head_size) + n*(head_size) + h];
+                    }
+                  }
+                }
+              }
+            }
+
+            #pragma omp parallel for collapse(2)
+            for(int i = 0; i < num_heads; i++) {
+              for(int ns1 = 0; ns1 < (seq_len/QKVO_BLOCKSIZE); ns1++) {
+                for(int Bs1 = 0; Bs1 < QKVO_BLOCKSIZE; Bs1++) {
+                  for(int ns2 = 0; ns2 < (seq_len/QKVO_BLOCKSIZE); ns2++) {
+                    for(int Bs2 = 0; Bs2 < QKVO_BLOCKSIZE; Bs2++) {
+                      nonbatched_bias_blocked[i * (seq_len * seq_len) + ns1*(QKVO_BLOCKSIZE*seq_len) +  ns2 *(QKVO_BLOCKSIZE*QKVO_BLOCKSIZE) + Bs1*(QKVO_BLOCKSIZE) + Bs2]
+                       = nonbatched_bias[l][i * (seq_len * seq_len) + ns1*(QKVO_BLOCKSIZE*seq_len) +  Bs1 *(seq_len) + ns2*(QKVO_BLOCKSIZE) + Bs2];
+                    }
+                  }
+                }
+              }
+            }
+
+            #pragma omp parallel for
+            for(int n1 = 0; n1 < num_heads; n1++) {
+              for(int h1 = 0; h1 < head_size; h1++) {
+                for(int n2 = 0; n2 < num_heads; n2++) {
+                  for(int h2 = 0; h2 < head_size; h2++) {
+                    query_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                      = query_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
+                    key_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                      = key_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
+                    value_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                      = value_w[l][n1 * head_size * embedding_dim + h1 * (embedding_dim) + n2 * (head_size) + h2];
+                    gating_w_blocked[n1 * (embedding_dim * head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                      = gating_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
+                    output_w_blocked[n1 * (embedding_dim* head_size) + n2 * (head_size * head_size) + h1 * (head_size) + h2]
+                      = output_w[l][n1 * (head_size * embedding_dim) + h1 * (embedding_dim) + n2 * (head_size) + h2];
+                  }
+                }
+              }
+            }
+
+            blocked_gating_attention_fwd_fp32(
+              q_data_blocked, q_data_blocked, bias[l], nonbatched_bias_blocked, 
+              query_w_blocked, key_w_blocked, value_w_blocked, gating_w_blocked, gating_b[l], 
+              output_w_blocked, output_b[l], output_blocked, 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            
+            #pragma omp parallel for collapse(2)
+            for(int i = 0; i < batch_size; i++) {
+              for(int ns = 0; ns < (seq_len/QKVO_BLOCKSIZE); ns++) {
+                for(int Bs = 0; Bs < QKVO_BLOCKSIZE; Bs++) {
+                  for(int n = 0; n < num_heads; n++) {
+                    for(int h = 0; h < head_size; h++) {
+                      output_normal[i * (seq_len * embedding_dim) + ns*(QKVO_BLOCKSIZE*embedding_dim) +  Bs *(num_heads*head_size) + n*(head_size) + h]
+                        = output_blocked[i * (seq_len * embedding_dim) + ns*(QKVO_BLOCKSIZE*embedding_dim) +  n *(QKVO_BLOCKSIZE*head_size) + Bs*(head_size) + h];
+                    }
+                  }
+                }
+              }
+            }
+            // compare the output and output_blocked float arrays
+            for (int i = 0; i < batch_size * seq_len * embedding_dim; i++) {
+              if (std::abs(output[l][i] - output_normal[i]) > 1e-5) {
+                std::cerr << "Output mismatch at index " << i << ": " << output[l][i] << " vs " << output_normal[i] << std::endl;
+                exit(1);
+              }
+            }
+            delete[] output_blocked; delete[] output_normal;
+            delete[] q_data_blocked; delete[] query_w_blocked; delete[] key_w_blocked; delete[] value_w_blocked; delete[] gating_w_blocked;
+            delete[] output_w_blocked;
+          }
+          if (blocked_layout) {
+            blocked_gating_attention_fwd_fp32(
+              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          } else {
+            fused_gating_attention_fwd_fp32(
+              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            }
         } else {
-          fused_gating_attention_fwd_fp32(
-            output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
-            query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-            output_w[l], output_b[l], output[l], 
-            batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          if (blocked_layout) {
+            blocked_gating_attention_fwd_fp32(
+              output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          } else {
+            fused_gating_attention_fwd_fp32(
+              output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+              output_w[l], output_b[l], output[l], 
+              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+          }
         }
       } else {
-        fused_gating_attention_fwd_fp32(
+        if (blocked_layout) {
+          blocked_gating_attention_fwd_fp32(
               q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
               query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
               output_w[l], output_b[l], output[l], 
               batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        } else {
+          fused_gating_attention_fwd_fp32(
+                q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+        }
       }
     }
     auto t0 = getTime();
@@ -348,27 +503,54 @@ int main(int argc, char* argv[]) {
       for (int l = 0; l < num_layer; l++) {
         if (self_attention_flag){
           if (l==0) {
-            auto layer_time = fused_gating_attention_fwd_fp32(
-              q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
-              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-              output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
-            times = times + layer_time;
-          } else {
-            auto layer_time = fused_gating_attention_fwd_fp32(
-              output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
-              query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
-              output_w[l], output_b[l], output[l], 
-              batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
-            times = times + layer_time;
-          }
-        } else {
-          auto layer_time = fused_gating_attention_fwd_fp32(
-                q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+            if (blocked_layout) {
+              auto layer_time = blocked_gating_attention_fwd_fp32(
+                q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
                 query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
                 output_w[l], output_b[l], output[l], 
                 batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
-          times = times + layer_time;
+              times = times + layer_time;
+            } else {
+              auto layer_time = fused_gating_attention_fwd_fp32(
+                q_data[l], q_data[l], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+              times = times + layer_time;
+            }
+          } else {
+            if (blocked_layout) {
+              auto layer_time = blocked_gating_attention_fwd_fp32(
+                output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+              times = times + layer_time;
+            } else {
+              auto layer_time = fused_gating_attention_fwd_fp32(
+                output[l-1], output[l-1], bias[l], nonbatched_bias[l], 
+                query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                output_w[l], output_b[l], output[l], 
+                batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+              times = times + layer_time;
+            }
+          }
+        } else {
+          if (blocked_layout) {
+            auto layer_time = blocked_gating_attention_fwd_fp32(
+                  q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+                  query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                  output_w[l], output_b[l], output[l], 
+                  batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            times = times + layer_time;
+          } else {
+            auto layer_time = fused_gating_attention_fwd_fp32(
+                  q_data[l], m_data[l], bias[l], nonbatched_bias[l], 
+                  query_w[l], key_w[l], value_w[l], gating_w[l], gating_b[l], 
+                  output_w[l], output_b[l], output[l], 
+                  batch_size, seq_len, num_heads, head_size, embedding_dim, bias_flag, nbbias_flag, gate_flag);
+            times = times + layer_time;
+          }
         }
       }
     }
