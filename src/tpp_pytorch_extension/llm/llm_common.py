@@ -493,23 +493,25 @@ def FixLinear(
         self.bias = BlockedParameter(self.bias.data)
         self.bias.set_blocking_param((None, None, layer_dtype))
     block(self)
-    if isinstance(weight_dtype, str):
-        if weight_dtype == "mxfp4":
+    with torch.no_grad():
+        if isinstance(weight_dtype, str):
+            if weight_dtype == "mxfp4":
+                self.weight = torch.nn.Parameter(
+                    qtype.remap_and_quantize_mxfp4(self.weight), requires_grad=False
+                )
+            elif weight_dtype == "qint8":
+                self.weight = torch.nn.Parameter(
+                    qtype.remap_and_quantize_qint8(self.weight), requires_grad=False
+                )
+            elif weight_dtype == "qint2":
+                self.weight = torch.nn.Parameter(
+                    qtype.remap_and_quantize_qint2_intlv(self.weight),
+                    requires_grad=False,
+                )
+        else:
             self.weight = torch.nn.Parameter(
-                qtype.remap_and_quantize_mxfp4(self.weight), requires_grad=False
+                self.weight.data.to(weight_dtype), requires_grad=False
             )
-        elif weight_dtype == "qint8":
-            self.weight = torch.nn.Parameter(
-                qtype.remap_and_quantize_qint8(self.weight), requires_grad=False
-            )
-        elif weight_dtype == "qint2":
-            self.weight = torch.nn.Parameter(
-                qtype.remap_and_quantize_qint2_intlv(self.weight), requires_grad=False
-            )
-    else:
-        self.weight = torch.nn.Parameter(
-            self.weight.data.to(weight_dtype), requires_grad=False
-        )
 
 
 def ShardLinear(m, dim, rank, size, block_size=1):

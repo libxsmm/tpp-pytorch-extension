@@ -275,10 +275,11 @@ if my_size > 1:
 model = model.eval().to(device)
 
 if args.quantize_lm_head:
-    model.lm_head.weight = torch.nn.Parameter(
-        tpx._C._qtype.remap_and_quantize_qint8(model.lm_head.weight),
-        requires_grad=False,
-    )
+    with torch.no_grad():
+        model.lm_head.weight = torch.nn.Parameter(
+            tpx._C._qtype.remap_and_quantize_qint8(model.lm_head.weight),
+            requires_grad=False,
+        )
 # for n, p in model.named_parameters():
 #     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 
