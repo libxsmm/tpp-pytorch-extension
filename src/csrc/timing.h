@@ -246,7 +246,7 @@ class ScopedTPP {
 // Keeping below two definitions for backward compatibility for now
 #define SCOPEITGEMM SCOPEIT
 #define SCOPEITGEMM2 SCOPEIT
-#if 1
+#if 0
 #define SCOPEIT(f, ...) ScopedTPP<decltype(f), 0>(f, ##__VA_ARGS__)
 #define SCOPEIT_REF(f, ...) ScopedTPP<decltype(f), 1>(f, ##__VA_ARGS__)
 #define SCOPEIT_DECL(t, ...) ScopedTPP<t, ##__VA_ARGS__, 0>

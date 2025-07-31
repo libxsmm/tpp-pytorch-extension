@@ -86,7 +86,9 @@ struct TORCH_API PerBlockQuantizer : public Quantizer {
     auto zps = GetVLAPtr<Tzp>(t_zp, {post_});
     auto out = GetVLAPtr<Tout>(t_out, {bs, post_, packed_vnni});
 
+#if 0
 #pragma omp parallel for collapse(2)
+#endif
     for (int i = 0; i < pre_; i++) {
       for (int j = 0; j < post_; j++) {
         float max = (float)in[i][0][j][0];

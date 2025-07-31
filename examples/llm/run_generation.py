@@ -287,6 +287,8 @@ if args.quantize_lm_head:
 current_path = pathlib.Path(__file__).parent.resolve()
 with open(str(current_path) + "/prompt.txt") as f:
     prompt = f.read()
+    if args.prompt is not None:
+        prompt = args.prompt
     tokens_to_use = int(args.input_tokens)
     input_ids = (
         tokenizer(prompt, return_tensors="pt").input_ids[:, :tokens_to_use].contiguous()
