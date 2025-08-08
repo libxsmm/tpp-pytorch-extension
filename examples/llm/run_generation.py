@@ -410,7 +410,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         # print(type(inputs))
 
         output = model.generate(
-            **inputs, max_new_tokens=args.max_new_tokens, **generate_kwargs
+            **inputs, max_new_tokens=args.max_new_tokens, eos_token_id=10, **generate_kwargs
         )
         if output_past_key_values == True:
             output, pkv = output

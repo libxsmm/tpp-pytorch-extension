@@ -37,6 +37,7 @@ REGISTER_SCOPE(unpad_act, "unpad_act");
 
 int globalScope = 0;
 
+int TPP_FAKE_EXP_FMA = env2int("TPP_FAKE_EXP_FMA", 0);
 long long hsh_key, hsh_ret;
 
 void reset_debug_timers() {

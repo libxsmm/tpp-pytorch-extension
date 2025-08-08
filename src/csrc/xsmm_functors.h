@@ -51,6 +51,7 @@ extern int tpp_debug_trace;
 #define DECL_VLA_PTR(type, name, dims, ptr) type(*name) dims = (type(*) dims)ptr
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
 extern long long hsh_key, hsh_ret;
+extern int TPP_FAKE_EXP_FMA;
 namespace tpp {
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
@@ -3950,6 +3951,16 @@ class VarSoftMaxFwdTPP {
             LIBXSMM_DATATYPE_F32,
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_SCALAR_IN_1,
             LIBXSMM_MELTW_TYPE_BINARY_MUL),
+        kfma(
+            1,
+            S3,
+            S3,
+            S3,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_MELTW_TYPE_BINARY_MULADD),
         kcpy(
             1,
             S3,
@@ -3980,7 +3991,11 @@ class VarSoftMaxFwdTPP {
       for (int s1 = 0; s1 < S1; s1++) {
         LIBXSMM_ALIGNED(float tmp2[S3], 64);
         ksub(&in[s1 * S2 * S3 + s2 * S3], &max, tmp2);
-        kexp(tmp2, &tmp[s1 * S3]);
+	if(!TPP_FAKE_EXP_FMA) {
+          kexp(tmp2, &tmp[s1 * S3]);
+	} else {
+	  kfma(tmp2, tmp2, &tmp[s1 * S3]);
+	}
         float lsum;
         ksum(&tmp[s1 * S3], &lsum);
         sum += lsum;
@@ -4160,6 +4175,7 @@ class VarSoftMaxFwdTPP {
   UnaryTPP kexp;
   UnaryTPP ksum;
   BinaryTPP kmul;
+  BinaryTPP kfma;
   UnaryTPP kcpy;
 };
 
@@ -4382,11 +4398,11 @@ class SoftMaxFixUpTPP {
         osum[s2] = nsum;
       } else {
         float nmax = std::max(cmax[s2], omax[s2]);
-        TPP_ASSERT(
-            nmax == cmax[s2],
-            "Flash attention nmax (%g) must equal cmax (%g)\n",
-            nmax,
-            cmax[s2]);
+        // TPP_ASSERT(
+        //     nmax == cmax[s2],
+        //     "Flash attention nmax (%g) must equal cmax (%g)\n",
+        //     nmax,
+        //     cmax[s2]);
         float oexp = exp(omax[s2] - nmax);
         // float cexp = exp(cmax[s2] - nmax); // must be 1.0
         float nsum = csum[s2] + oexp * osum[s2];

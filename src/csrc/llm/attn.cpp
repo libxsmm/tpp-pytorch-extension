@@ -682,11 +682,11 @@ struct AttnKernelsNew {
 #else
 template <typename T, typename Tc>
 struct AttnKernelsNew {
-  BrgemmTPP<T, float, Tc> a_gemm_tpp;
+  SCOPEIT_DECL(BrgemmTPP<T, float, Tc>) a_gemm_tpp;
   ScaleTPP<float, float> scale_tpp;
   AddBiasTPP<T> add_mask_tpp;
-  VarSoftMaxFwdTPP<float, T> softmax_fwd_tpp;
-  BrgemmTPP<T, T, Tc> c_gemm_tpp;
+  SCOPEIT_DECL(VarSoftMaxFwdTPP<float, T>) softmax_fwd_tpp;
+  SCOPEIT_DECL(BrgemmTPP<T, T, Tc>) c_gemm_tpp;
   ConvertTPP<T, T> cvt_tpp;
   SoftMaxFixUpTPP<T> softmax_fixup;
   SoftMaxFlashScaleTPP<T> softmax_scale;
@@ -710,7 +710,7 @@ struct AttnKernelsNew {
     // [Sqb, H] * [H, Skb] = [Sqb, Skb]
     auto k_ld =
         cm.kl_needs_trans ? (isBeamSearch ? H : cm.key.s2_str) : cm.key.h_str;
-    a_gemm_tpp = BrgemmTPP<T, float, Tc>(
+    a_gemm_tpp = SCOPEIT((BrgemmTPP<T, float, Tc>(
         Sqb,
         Skb,
         H,
@@ -723,15 +723,15 @@ struct AttnKernelsNew {
         0,
         1,
         cm.key.in_vnni,
-        cm.kl_needs_trans);
+        cm.kl_needs_trans)));
     // [Sqb, Skb]
     scale_tpp = ScaleTPP<float, float>(Sqb * Skb);
     add_mask_tpp = AddBiasTPP<T>(Sqb, Skb);
-    softmax_fwd_tpp = VarSoftMaxFwdTPP<float, T>(Sqb, Skb, USE_FLASH);
+    softmax_fwd_tpp = SCOPEIT((VarSoftMaxFwdTPP<float, T>(Sqb, Skb, USE_FLASH)), SOFTMAX);
     softmax_fixup = SoftMaxFixUpTPP<T>(Sqb, H, USE_FLASH);
     softmax_scale = SoftMaxFlashScaleTPP<T>(Sqb, H, USE_FLASH);
     // [nSk, Sqb, Skb] * [nSk, Skb, H] = tmp[Sqb, H]
-    c_gemm_tpp = BrgemmTPP<T, T, Tc>(
+    c_gemm_tpp = SCOPEIT((BrgemmTPP<T, T, Tc>(
         Sqb,
         H,
         Skb,
@@ -743,7 +743,7 @@ struct AttnKernelsNew {
         0.0,
         0,
         1,
-        cm.value.in_vnni);
+        cm.value.in_vnni)));
     // [Sqb, H] --> [Sqb, H]
     cvt_tpp = ConvertTPP<T, T>(Sqb, H, H, H);
   }
