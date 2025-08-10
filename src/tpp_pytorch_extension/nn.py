@@ -24,6 +24,7 @@ try:
         # xgemm.set_log_level("INFO")
         xgemm.set_log_level("WARNING")
         # xgemm.set_num_devices(1)
+        print(f"XGEMM using {xgemm.get_num_devices()} devices", flush=True)
     else:
         xgemm = None
 except:
@@ -54,8 +55,8 @@ def fc_xgemm(input, weight, w_trans, bias, K):
     sizes = list(input.shape)
     sizes[1] = K
     output = torch.empty(sizes, dtype=input.dtype, device=input.device)
-    if TPP_XGEMM_USE_FP8 > 0:
-        input = input.to(torch.float8_e4m3fn)
+    # if TPP_XGEMM_USE_FP8 > 0:
+    #     input = input.to(torch.float8_e4m3fn)
     if bias is None:
         if isinstance(weight, torch.Tensor):
             xgemm.xgemm(input, weight, output, 1.0, 0.0, aOp=0, bOp=w_trans)
