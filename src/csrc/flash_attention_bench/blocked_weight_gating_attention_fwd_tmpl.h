@@ -419,7 +419,7 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
     for (int i = 0; i < B_t; i++) {
       for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
         LIBXSMM_ALIGNED(T tmp_gate_values[QKVO_BLOCKSIZE * N_t * H_t], 64);
-        for (int k=0; k < (N_t*H_t)/QKVO_BLOCKSIZE; k += QKVO_BLOCKSIZE) {
+        for (int k=0; k < (N_t*H_t); k += QKVO_BLOCKSIZE) {
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
           LIBXSMM_ALIGNED(T tmp_sig[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
 
