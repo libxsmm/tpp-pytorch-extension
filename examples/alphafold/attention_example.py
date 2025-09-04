@@ -99,10 +99,10 @@ class GatingAttention(nn.Module):
         return output
 
 
-set = 1
-length = 764
+set = 3
+length = 1536
 if set == 1:
-    B, S, HS = 512, length, 256
+    B, S, HS = 64, length, 256
     N, H = 8, 32
 
 if set == 2:
@@ -151,19 +151,19 @@ net2 = Net2()
 
 torch.manual_seed(11)  # Set random seed for reproducibility
 
-q_data = torch.randn(B, S, HS, requires_grad=False)
-m_data = torch.randn(B, S, HS, requires_grad=False)
-bias = torch.randn(B, 1, 1, S, requires_grad=False)
-nonbatched_bias = torch.randn(N, S, S, requires_grad=False)
+q_data = 0.1*torch.randn(B, S, HS, requires_grad=False)
+m_data = 0.1*torch.randn(B, S, HS, requires_grad=False)
+bias = 0.1*torch.randn(B, 1, 1, S, requires_grad=False)
+nonbatched_bias = 0.1*torch.randn(N, S, S, requires_grad=False)
 # nonbatched_bias = torch.Tensor()
 
-query_w = torch.randn(HS, N, H)
-key_w = torch.randn(HS, N, H)
-value_w = torch.randn(HS, N, H)
-gating_w = torch.randn(HS, N, H)
-gating_b = torch.randn(N, H)
-output_w = torch.randn(N, H, HS)
-output_b = torch.randn(HS)
+query_w = 0.1*torch.randn(HS, N, H)
+key_w = 0.1*torch.randn(HS, N, H)
+value_w = 0.1*torch.randn(HS, N, H)
+gating_w = 0.1*torch.randn(HS, N, H)
+gating_b = 0.1*torch.randn(N, H)
+output_w = 0.1*torch.randn(N, H, HS)
+output_b = 0.1*torch.randn(HS)
 
 net1.attention.query_w.data = query_w
 net1.attention.key_w.data = key_w

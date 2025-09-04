@@ -390,6 +390,8 @@ struct TORCH_API PerBlockAffineQuantizer : public at::PerBlockQuantizer {
 
 } // namespace at
 
+int64_t q_per_block_pack_size(const at::Tensor& self);
+
 int64_t q_per_block_block_size(const at::Tensor& self);
 
 at::Tensor q_per_block_scales(const at::Tensor& self);
@@ -408,3 +410,5 @@ at::Tensor quantize_int8sym(
 
 at::Tensor remap_and_quantize_mxfp4(at::Tensor t);
 at::Tensor remap_and_quantize_qint8(at::Tensor t);
+// at::Tensor remap_and_quantize_qint4(at::Tensor t);
+at::Tensor remap_and_quantize_qint2_intlv(at::Tensor t);

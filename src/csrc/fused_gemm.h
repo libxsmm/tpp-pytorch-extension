@@ -27,7 +27,9 @@ extern int TPP_VERBOSE;
 static int CK_BLOCK_SIZE = env2int("CK_BLOCK_SIZE", 64);
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
-static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 128);
+static int MAX_HC_SIZE = env2int("MAX_HC_SIZE", 64);
+static const int TPP_QINT2_AS_QINT1 = env2int("TPP_QINT2_AS_QINT1", 0);
+
 static const char* GEMM_LOOP_SCHEME_REUSE =
     getenv("GEMM_LOOP_SCHEME_REUSE") ? getenv("GEMM_LOOP_SCHEME_REUSE") : "aCB";
 static const char* GEMM_LOOP_SCHEME_STREAMING =
@@ -1106,16 +1108,24 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       : TppBlockedLinearWBase<Tin, Tout>(t_in, t_wt, t_bias) {
     int b_vnni = 1;
     if (t_wt.is_quantized() && t_wt.qscheme() == at::kPerBlockAffine) {
+      block_size = q_per_block_block_size(t_wt);
+      TPP_ASSERT(block_size % Hc == 0, "Block size mismatch\n");
+      n_Hc_blocks = block_size / Hc;
+      ScNc = Nc / n_Hc_blocks;
+      std::cout << "Using weight type: " << t_wt.dtype()
+                << " block size: " << block_size
+                << " n_Hc_blocks: " << n_Hc_blocks << " ScNc: " << ScNc
+                << std::endl;
       if (t_wt.dtype() == at::kQInt8) {
-        // b_vnni = 2;
-        block_size = q_per_block_block_size(t_wt);
-        TPP_ASSERT(block_size % Hc == 0, "Block size mismatch\n");
-        n_Hc_blocks = block_size / Hc;
-        ScNc = Nc / n_Hc_blocks;
-        printf(
-            "Using weight type at::kQInt8 q_bs: %ld, Hc: %ld\n",
-            block_size,
-            Hc);
+        b_vnni = 1;
+      } else if (t_wt.dtype() == at::kQUInt4x2) {
+        b_vnni = t_wt.size(-1);
+      } else if (t_wt.dtype() == at::kQUInt2x4) {
+        if (TPP_QINT2_AS_QINT1) {
+          b_vnni = 4;
+        } else {
+          b_vnni = 16;
+        }
       } else {
         TPP_ASSERT(false, "Unsupported qtype\n");
       }
@@ -1161,7 +1171,10 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     TPP_ASSERT(
         t_wt_V.is_quantized() && t_wt_V.qscheme() == at::kPerBlockAffine,
         "Weight not quantized\n");
-    auto constexpr pack_size = 1;
+    long pack_size = q_per_block_pack_size(t_wt_V);
+    if (t_wt_V.dtype() == at::kQUInt2x4 && TPP_QINT2_AS_QINT1) {
+      pack_size = 8; // 2x4 is treated as 8x1
+    }
     auto wt_V = GetVLAPtr<BrTw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
     auto t_w_scl = q_per_block_scales(t_wt_V);
     auto t_i_scl = q_per_block_scales(t_in);
@@ -1515,7 +1528,8 @@ inline at::Tensor call_gemm_with_post_op(
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
     } else if (t_wt.qscheme() == at::kPerBlockAffine) {
-      if (t_wt.dtype() == at::kQInt8) {
+      if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2 ||
+          t_wt.dtype() == at::kQUInt2x4) {
         return dispatch_gemm<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>, CB>(
             cb, t_in, t_wt, t_bias);
       } else {

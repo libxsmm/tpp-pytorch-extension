@@ -169,7 +169,10 @@ inline T* pt_get_data_ptr(at::Tensor t) {
   if (c10::CppTypeToScalarType<T>::value != t.dtype()) {
     if (t.is_quantized() &&
         (std::is_same<T, uint8_t>::value || std::is_same<T, int8_t>::value))
-      return t.data_ptr<T>();
+      if (t.dtype() == c10::kQUInt2x4 || t.dtype() == c10::kQUInt4x2)
+        return (T*)t.data_ptr();
+      else
+        return t.data_ptr<T>();
     std::cout << "Warning: Tensor dtype " << t.dtype()
               << " is not same as requested template type "
               << c10::CppTypeToScalarType<T>::value << std::endl;
@@ -178,8 +181,10 @@ inline T* pt_get_data_ptr(at::Tensor t) {
     throw std::invalid_argument("Tensor type doesn't match template type");
   }
 #endif
-
-  return t.data_ptr<T>();
+  if (t.dtype() == c10::kQUInt2x4 || t.dtype() == c10::kQUInt4x2)
+    return (T*)t.data_ptr<uint8_t>();
+  else
+    return t.data_ptr<T>();
 }
 typedef int64_t index_t;
 template <typename T, std::size_t N> //, typename index_t = int64_t>

@@ -155,7 +155,12 @@ sources += glob.glob("src/csrc/gnn/gat/*.cpp")
 # DLRM sources
 sources += glob.glob("src/csrc/dlrm/*.cpp")
 
-extra_compile_args = ["-fopenmp", "-g", "-DLIBXSMM_DEFAULT_CONFIG"]  # , "-O0"]
+extra_compile_args = [
+    "-fopenmp",
+    "-fext-numeric-literals",
+    "-g",
+    "-DLIBXSMM_DEFAULT_CONFIG",
+]  # , "-O0"]
 
 # if platform.processor() != "aarch64":
 #    extra_compile_args.append("-march=native")

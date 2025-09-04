@@ -68,9 +68,10 @@ parser.add_argument(
 parser.add_argument(
     "--weight-dtype",
     type=str,
-    choices=["float32", "bfloat16", "bfloat8", "hfloat8", "mxfp4", "qint8", None],
+    choices=["float32", "bfloat16", "bfloat8", "hfloat8"]
+    + ["mxfp4", "qint8", "qint2", None],
     default=None,
-    help="bfloat16, float32 or bfloat8 or hfloat8 or mxfp4 or qint8",
+    help="bfloat16, float32, bfloat8, hfloat8, mxfp4, qint8 or qint2",
 )
 parser.add_argument(
     "--input-tokens",
@@ -98,6 +99,7 @@ parser.add_argument("--profile", action="store_true")
 parser.add_argument("--dist-backend", default="mpi", type=str)
 parser.add_argument("--load-sharded-model", action="store_true")
 parser.add_argument("--save-sharded-model", action="store_true")
+parser.add_argument("--quantize-lm-head", action="store_true")
 args = parser.parse_args()
 print(args)
 
@@ -272,8 +274,14 @@ if my_size > 1:
         torch.save(model.state_dict(), model_file)
 model = model.eval().to(device)
 
+if args.quantize_lm_head:
+    with torch.no_grad():
+        model.lm_head.weight = torch.nn.Parameter(
+            tpx._C._qtype.remap_and_quantize_qint8(model.lm_head.weight),
+            requires_grad=False,
+        )
 # for n, p in model.named_parameters():
-#    print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
+#     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 
 # input prompt
 current_path = pathlib.Path(__file__).parent.resolve()
@@ -426,6 +434,7 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         if args.profile:
             prof.step()
         print(gen_text, len(gen_ids), flush=True)
+        # print(gen_ids[0][inputs.input_ids.shape[1] :])
         if i < num_warmup or not args.token_latency:
             print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)
         if i >= num_warmup:

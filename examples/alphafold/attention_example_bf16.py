@@ -99,8 +99,8 @@ class GatingAttention(nn.Module):
         return output
 
 
-set = 1
-length = 764
+set = 3
+length = 2752
 if set == 1:
     B, S, HS = 512, length, 256
     N, H = 8, 32
@@ -151,19 +151,19 @@ net2 = Net2().to(torch.bfloat16)
 
 torch.manual_seed(11)  # Set random seed for reproducibility
 
-q_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
-m_data = torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
-bias = torch.randn(B, 1, 1, S, requires_grad=False).to(torch.bfloat16)
-nonbatched_bias = torch.randn(N, S, S, requires_grad=False).to(torch.bfloat16)
+q_data = 0.1*torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
+m_data = 0.1*torch.randn(B, S, HS, requires_grad=False).to(torch.bfloat16)
+bias = 0.1*torch.randn(B, 1, 1, S, requires_grad=False).to(torch.bfloat16)
+nonbatched_bias = 0.1*torch.randn(N, S, S, requires_grad=False).to(torch.bfloat16)
 # nonbatched_bias = torch.Tensor()
 
-query_w = torch.randn(HS, N, H).to(torch.bfloat16)
-key_w = torch.randn(HS, N, H).to(torch.bfloat16)
-value_w = torch.randn(HS, N, H).to(torch.bfloat16)
-gating_w = torch.randn(HS, N, H).to(torch.bfloat16)
-gating_b = torch.randn(N, H).to(torch.bfloat16)
-output_w = torch.randn(N, H, HS).to(torch.bfloat16)
-output_b = torch.randn(HS).to(torch.bfloat16)
+query_w = 0.1*torch.randn(HS, N, H).to(torch.bfloat16)
+key_w = 0.1*torch.randn(HS, N, H).to(torch.bfloat16)
+value_w = 0.1*torch.randn(HS, N, H).to(torch.bfloat16)
+gating_w = 0.1*torch.randn(HS, N, H).to(torch.bfloat16)
+gating_b = 0.1*torch.randn(N, H).to(torch.bfloat16)
+output_w = 0.1*torch.randn(N, H, HS).to(torch.bfloat16)
+output_b = 0.1*torch.randn(HS).to(torch.bfloat16)
 
 net1.attention.query_w.data = query_w
 net1.attention.key_w.data = key_w
@@ -207,7 +207,7 @@ forward2 = 0
 N = 10  # Number of iterations
 for _ in range(N):  # MKLDNN PyTorch layer Forward and Backward pass timing
     start = time.time()
-    Y1 = net1(q_data, m_data, bias, nonbatched_bias)
+    # Y1 = net1(q_data, m_data, bias, nonbatched_bias)
     forward1 += time.time() - start
 
 tpp_pytorch_extension.reset_debug_timers()
