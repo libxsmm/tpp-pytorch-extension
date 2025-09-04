@@ -19,7 +19,7 @@ if [ "$1" == "--help" ]; then
   echo "seq_len: (default: 4096)"
   echo "hyper: (default: 0, no hyperthreading)"
   echo "BF16: (default: 1, use BF16)"
-  echo "blocked_layout: (default: 1, use blocked_layout)"
+  echo "blocked_layout: (default: 2, 0=flat_layout, 1=blocked_layout, 2=blocked_weight_layout)"
   echo "b_vnni: (default: 1, b is in vnni format)"
   echo "num_layer: (default: 3)"
   echo "num_iter: (default: 3)"
@@ -39,7 +39,7 @@ then
   seq_len=${3:-256}
   hyper=${4:-0}
   BF16=${5:-0}
-  blocked_layout=${6:-1}
+  blocked_layout=${6:-2}
   b_vnni=${7:-1}
   num_layer=${8:-3}
   num_iter=${9:-3}
@@ -56,7 +56,7 @@ else
   seq_len=${3:-4096}
   hyper=${4:-0}
   BF16=${5:-1}
-  blocked_layout=${6:-1}
+  blocked_layout=${6:-2}
   b_vnni=${7:-1}
   num_layer=${8:-3}
   num_iter=${9:-3}
