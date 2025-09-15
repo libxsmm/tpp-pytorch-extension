@@ -43,8 +43,14 @@ auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 T* q = new (std::align_val_t(64)) T[B_t * S_t * N_t *H_t];
 auto q_a = GetVLAPtr<T>(q, {S_t, N_t * H_t});
 
+T* kn = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
+auto kn_a = GetVLAPtr<T>(kn, {S_t * N_t * H_t});
+
 T* k = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
 auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});
+
+T* vn = new (std::align_val_t(64)) T[B_t *S_t * N_t *H_t];
+auto vn_a = GetVLAPtr<T>(vn, {S_t * N_t * H_t});
 
 T* v = new (std::align_val_t(64)) T[B_t *S_t * N_t *H_t];
 auto v_a = GetVLAPtr<T>(v, {S_t * N_t * H_t});
@@ -73,6 +79,8 @@ auto q_convert_tpp =
 
 auto scale_tpp =
     SCOPEIT((ScaleTPP<float, float>(QKVO_BLOCKSIZE * QKVO_BLOCKSIZE)), EW_SCL);
+auto copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t*H_t), EW_COPY);
+
 auto zero_tpp = SCOPEIT(SetZeroTPP<float>(QKVO_BLOCKSIZE * HS_t), EW_ZERO);
 float alpha = (1.0 / sqrt(H_t));
 
@@ -144,7 +152,7 @@ auto k_trans_tpp = SCOPEIT(
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
-        QKVO_BLOCKSIZE,
+        N_t*H_t,
         S_t,
         (b_vnni) ? XformTPP::XFORM_XPOSE_N2V_TPP : XformTPP::XFORM_XPOSE_TPP),
     XPOSE);
@@ -155,12 +163,10 @@ auto v_vnni_trans_tpp = SCOPEIT(
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
-        QKVO_BLOCKSIZE,
+        N_t*H_t,
         N_t* H_t,
         XformTPP::XFORM_N2V_TPP),
     VNNI);
-
-auto v_cpy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t* H_t), EW_COPY);
 
 auto kv_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
@@ -194,12 +200,13 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
             if(b_vnni) {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &qkv_w_vnni_a[0][k*2], &tmp[0], HS_t/QKVO_BLOCKSIZE, true);
-              k_trans_tpp(&tmp[0], &k_a[i][k*S_t + 2 * j]);
+              // k_trans_tpp(&tmp[0], &k_a[i][k*S_t + 2 * j]);
             } else {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &key_w_a[0][k], &tmp[0], HS_t/QKVO_BLOCKSIZE, true);  
-              k_trans_tpp(&tmp[0], &k_a[i][k*S_t + j]);
+              // k_trans_tpp(&tmp[0], &k_a[i][k*S_t + j]);
             }
+            copy_tpp(&tmp[0], &kn_a[i][j * N_t * H_t + k]);
           }
         }
       }
@@ -210,6 +217,22 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
 end_time = std::chrono::high_resolution_clock::now(); // End timing
 auto k_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
+// Transpose the K matrix from (B, S, N*H) to (B, N*H, S)
+#pragma omp parallel for collapse(3)
+  for (int i = 0; i < B_t; i++) {
+    for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+      for (int k = 0; k < (N_t*H_t); k += QKVO_BLOCKSIZE) {
+        if (b_vnni)
+          k_trans_tpp(&kn_a[i][j*N_t*H_t + k], &k_a[i][k*S_t + 2*j]);
+        else
+          k_trans_tpp(&kn_a[i][j*N_t*H_t + k], &k_a[i][k*S_t + j]);
+      }
+    }
+  }
+
+delete[] kn;
+
 // auto v = at::einsum("bka,ahc->bkhc", {m_data, value_w});
 // /* [512, 764, 8, 32]  = [512, 764, 256] * [256, 8, 32] */
 start_time = std::chrono::high_resolution_clock::now(); // Start timing
@@ -238,12 +261,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
             if(b_vnni) {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &qkv_w_vnni_a[0][k*2], &tmp[0], HS_t/QKVO_BLOCKSIZE, true);
-              v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t + 2*k]);
             } else {
               kv_brgemm_tpp(
                   &m_data_a[i][j][0], &value_w_a[0][k], &tmp[0], HS_t/QKVO_BLOCKSIZE, true);
-              v_cpy_tpp(&tmp[0], &v_a[i][j * N_t * H_t + k]);
             }
+            copy_tpp(&tmp[0], &vn_a[i][j * N_t * H_t + k]);
           }
         }
       }
@@ -253,6 +275,21 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
 }
 end_time = std::chrono::high_resolution_clock::now(); // End timing
 auto v_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
+auto v_copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t*H_t, N_t*H_t), EW_COPY);
+#pragma omp parallel for collapse(3)
+for (int i = 0; i < B_t; i++) {
+  for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+    for (int k = 0; k < (N_t*H_t); k += QKVO_BLOCKSIZE) {
+      if (b_vnni)
+        v_vnni_trans_tpp(&vn_a[i][j*N_t*H_t + k], &v_a[i][j * N_t * H_t + 2*k]);
+      else  
+        v_copy_tpp(&vn_a[i][j*N_t*H_t + k], &v_a[i][j * N_t * H_t + k]);
+    }
+  }
+}
+
+delete[] vn;
 
 lda = H_t;
 ldb = QKVO_BLOCKSIZE;

@@ -537,6 +537,7 @@ int main(int argc, char* argv[]) {
                 }
               }
             }
+            printf("Passed\n");
             delete[] output_blocked; delete[] output_normal;
             delete[] q_data_blocked; delete[] query_w_blocked; delete[] key_w_blocked; delete[] value_w_blocked; delete[] gating_w_blocked;
             delete[] output_w_blocked;
@@ -842,6 +843,7 @@ int main(int argc, char* argv[]) {
                 exit(1);
               }
             }
+            printf("Passed\n");
             delete[] output_blocked; delete[] output_normal;
             delete[] q_data_blocked; delete[] query_w_blocked; delete[] key_w_blocked; delete[] value_w_blocked; delete[] gating_w_blocked;
             delete[] output_w_blocked;
