@@ -26,7 +26,7 @@ for (int i = 0; i < S_t - Sp_t; i++) {
 }
 auto sfmask_a = GetVLAPtr<float>(sfmask, {1L});
 
-auto q_data_a = GetVLAPtr<T>(q_data, {S_t, N_t * H_t});   // [B, Ns, N, Bs * H]
+auto q_data_a = GetVLAPtr<T>(q_data, {S_t, N_t * H_t});
 auto m_data_a = GetVLAPtr<T>(m_data, {S_t, N_t * H_t});
 auto bias_a = GetVLAPtr<float>(bias, {S_t});
 auto nonbatched_bias_a = GetVLAPtr<float>(nonbatched_bias, {N_t, S_t, S_t});
@@ -40,18 +40,24 @@ auto output_w_a = GetVLAPtr<T>(output_w, {(N_t*H_t)/QKVO_BLOCKSIZE, QKVO_BLOCKSI
 auto output_b_a = GetVLAPtr<float>(output_b, {1L});
 
 T* q = new (std::align_val_t(64)) T[B_t * S_t * N_t *H_t];
-auto q_a = GetVLAPtr<T>(q, {S_t, N_t * H_t});    // [B, Ns, N, Bs * H]
+auto q_a = GetVLAPtr<T>(q, {S_t, N_t * H_t});
+
+T* kn = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
+auto kn_a = GetVLAPtr<T>(kn, {S_t * N_t * H_t});
 
 T* k = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
-auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});    // [B, Ns, N, H * Bs]
+auto k_a = GetVLAPtr<T>(k, {S_t * N_t * H_t});
+
+T* vn = new (std::align_val_t(64)) T[B_t *S_t * N_t *H_t];
+auto vn_a = GetVLAPtr<T>(vn, {S_t * N_t * H_t});
 
 T* v = new (std::align_val_t(64)) T[B_t *S_t * N_t *H_t];
-auto v_a = GetVLAPtr<T>(v, {S_t * N_t * H_t});    // [B, Ns, N, Bs * H]
+auto v_a = GetVLAPtr<T>(v, {S_t * N_t * H_t});
 
 T* weighted_avg = new (std::align_val_t(64)) T[B_t * S_t * N_t * H_t];
-auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t * H_t}); // [B, Ns, N, Bs * H]
+auto weighted_avg_a = GetVLAPtr<T>(weighted_avg, {S_t, N_t * H_t});
 
-auto output_a = GetVLAPtr<T>(output, {S_t, N_t * H_t});   // [B, Ns, N, Bs * H]
+auto output_a = GetVLAPtr<T>(output, {S_t, N_t * H_t});
 
 auto qgo_brgemm_tpp = SCOPEITGEMM(
     (BrgemmTPP<
@@ -66,7 +72,7 @@ auto kv_brgemm_tpp = SCOPEITGEMM(
         T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE*QKVO_BLOCKSIZE, N_t*H_t, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, 0.0, 0, 1, b_vnni)));
 
 auto scale_tpp = SCOPEIT((ScaleTPP<float, float>(QKVO_BLOCKSIZE * QKVO_BLOCKSIZE)), EW_SCL);
-auto copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE * H_t), EW_COPY);
+auto copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t*H_t), EW_COPY);
 float alpha = (1.0 / sqrt(H_t));
 
 auto qkv_vnni_trans_tpp = SCOPEIT(
@@ -123,7 +129,7 @@ auto k_trans_tpp = SCOPEIT(
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
-        QKVO_BLOCKSIZE,
+        N_t*H_t,
         S_t,
         (b_vnni) ? XformTPP::XFORM_XPOSE_N2V_TPP : XformTPP::XFORM_XPOSE_TPP),
     XPOSE);
@@ -134,7 +140,7 @@ auto v_vnni_trans_tpp = SCOPEIT(
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
         QKVO_BLOCKSIZE,
-        QKVO_BLOCKSIZE,
+        N_t*H_t,
         N_t*H_t,
         XformTPP::XFORM_N2V_TPP),
     VNNI);
@@ -160,12 +166,11 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
           if (b_vnni){
             kv_brgemm_tpp(&m_data_a[i][j][0], &qkv_w_vnni_a[k/QKVO_BLOCKSIZE][0][0][0], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
-            k_trans_tpp(&tmp[0], &k_a[i][k*S_t + 2 * j]);
           }
           else {
             kv_brgemm_tpp(&m_data_a[i][j][0], &key_w_a[k/QKVO_BLOCKSIZE][0][0][0], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
-            k_trans_tpp(&tmp[0], &k_a[i][k*S_t + j]); // [ 0*H_t*S_t + 0*S_t + j]
           }
+          copy_tpp(&tmp[0], &kn_a[i][j * N_t * H_t + k]);
         }
       }
     }
@@ -175,7 +180,21 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
 end_time = std::chrono::high_resolution_clock::now(); // End timing
 auto k_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
 
-auto v_cpy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t* H_t), EW_COPY);
+// Transpose the K matrix from (B, S, N*H) to (B, N*H, S)
+#pragma omp parallel for collapse(3)
+  for (int i = 0; i < B_t; i++) {
+    for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+      for (int k = 0; k < (N_t*H_t); k += QKVO_BLOCKSIZE) {
+        if (b_vnni)
+          k_trans_tpp(&kn_a[i][j*N_t*H_t + k], &k_a[i][k*S_t + 2*j]);
+        else
+          k_trans_tpp(&kn_a[i][j*N_t*H_t + k], &k_a[i][k*S_t + j]);
+      }
+    }
+  }
+
+delete[] kn;
+
 start_time = std::chrono::high_resolution_clock::now(); // Start timing
 {
   // RECORD_SCOPE(alpha_v_gemm, {v, m_data, value_w});
@@ -196,11 +215,10 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
           LIBXSMM_ALIGNED(T tmp[QKVO_BLOCKSIZE * QKVO_BLOCKSIZE], 64);
           if(b_vnni) {
             kv_brgemm_tpp(&m_data_a[i][j][0], &qkv_w_vnni_a[k/QKVO_BLOCKSIZE][0][0][0], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
-            v_vnni_trans_tpp(&tmp[0], &v_a[i][j * N_t * H_t + 2*k]);
           } else {
             kv_brgemm_tpp(&m_data_a[i][j][0], &value_w_a[k/QKVO_BLOCKSIZE][0][0][0], &tmp[0], (N_t*H_t)/QKVO_BLOCKSIZE);
-            v_cpy_tpp(&tmp[0], &v_a[i][j * N_t * H_t + k]);
           }
+          copy_tpp(&tmp[0], &vn_a[i][j * N_t * H_t + k]);
         }
       }
     }
@@ -209,6 +227,21 @@ start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
 end_time = std::chrono::high_resolution_clock::now(); // End timing
 auto v_gemm_time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+
+auto v_copy_tpp = SCOPEIT(CpyTPP<T>(QKVO_BLOCKSIZE, QKVO_BLOCKSIZE, N_t*H_t, N_t*H_t), EW_COPY);
+#pragma omp parallel for collapse(3)
+for (int i = 0; i < B_t; i++) {
+  for (int j = 0; j < S_t; j += QKVO_BLOCKSIZE) {
+    for (int k = 0; k < (N_t*H_t); k += QKVO_BLOCKSIZE) {
+      if (b_vnni)
+        v_vnni_trans_tpp(&vn_a[i][j*N_t*H_t + k], &v_a[i][j * N_t * H_t + 2*k]);
+      else  
+        v_copy_tpp(&vn_a[i][j*N_t*H_t + k], &v_a[i][j * N_t * H_t + k]);
+    }
+  }
+}
+
+delete[] vn;
 
 long lda = H_t;
 long ldb = QKVO_BLOCKSIZE;
