@@ -8,21 +8,21 @@ export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:aut
 
 # write help message
 if [ "$1" == "--help" ]; then
-  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <num_layer> <num_iter> <embedding_dim> <intermediate_dim> <gate_flag>"
+  echo "Usage: $0 <llm> <batch_size> <seq_len> <hyper> <BF16> <b_vnni> <blocked> <num_layer> <num_iter> <embedding_dim> <intermediate_dim> <gate_flag>"
   echo ""
-  echo "llm: name of the model (default: llama-7b), options: llama-7b, llama4, llama-3.1-8B, llama-3.2-3B, llama-3.2-1B,"
+  echo "llm: name of the model (default: deepseek-r1), options: llama-7b, llama4, llama-3.1-8B, llama-3.2-3B, llama-3.2-1B,"
   echo "gpt2, gpt3-13b, gpt3-175b, alphafold2-h32, alphafold2-h16, alphafold2-h8"
   echo "batch_size: (default: 64)"
   echo "seq_len: (default: 4096)"
   echo "hyper: (default: 0, no hyperthreading)"
   echo "BF16: (default: 1, use BF16)"
+  echo "b_vnni: (default: 0, not b_vnni)"
+  echo "blocked: (default: 0, not blocked)"
   echo "num_layer: (default: 3)"
   echo "num_iter: (default: 3)"
   echo "embedding_dim: (default: 4096)"
   echo "intermediate_dim: (default: 11008)"
   echo "gate_flag: (default: 1, gate)"
-  echo "blocked: (default: 0, not blocked)"
-  echo "b_vnni: (default: 0, not b_vnni)"
   exit 0
 fi
 
@@ -31,13 +31,13 @@ batch_size=${2:-64}
 seq_len=${3:-4096}
 hyper=${4:-0}
 BF16=${5:-0}
-num_layer=${6:-1}
-num_iter=${7:-1}
-embedding_dim=${8:-4096}
-intermediate_dim=${9:-11008}
-gate_flag=${10:-1}
-blocked=${11:-0}
-b_vnni=${12:-0}
+b_vnni=${6:-0}
+blocked=${7:-0}
+num_layer=${8:-1}
+num_iter=${9:-1}
+embedding_dim=${10:-7168}
+intermediate_dim=${11:-2048}
+gate_flag=${12:-1}
 
 
 # echo "Running $llm model"
@@ -64,16 +64,29 @@ else
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, gate_flag: $gate_flag", blocked: $blocked, b_vnni: $b_vnni
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, gate_flag: $gate_flag"
 
 
 # echo "Compiling FFN benchmark code"
 if [ "$PROF" == "1" ]; then
   echo "Profiling enabled"
+  if [ "$BF16" == "1" ]; then
+    echo "Compiling with BF16"
+    g++ -O0 -pg FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  else
+    echo "Compiling with FP32"
+    g++ -O0 -pg -DUSE_FLOAT FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  fi
   g++ -O0 -pg FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
 else
   echo "Normal compilation"
-  g++ -O2 FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  if [ "$BF16" == "1" ]; then
+    echo "Compiling with BF16"
+    g++ -O2 FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  else
+    echo "Compiling with FP32"
+    g++ -O2 -DUSE_FLOAT FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  fi
 fi
 
 
@@ -84,11 +97,11 @@ cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $BF16 $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $blocked $b_vnni
+    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag
 else
     threads=$((cpu_count * 2))
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./mha.o $batch_size $seq_len $BF16 $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $blocked $b_vnni
+    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag 
 fi
 
 if [ "$PROF" == "1" ]; then
