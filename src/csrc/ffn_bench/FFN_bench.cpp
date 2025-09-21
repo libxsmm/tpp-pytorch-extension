@@ -129,7 +129,7 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
   FFNTPPs<T> tpps;
   tpps.i_gemm_tpp = BrgemmTPP<
             T,
-            T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*intermediate_dim, embedding_dim, intermediate_dim, MLP_BLOCKSIZE, 0.0, 0, 1);
+            T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*intermediate_dim, embedding_dim, intermediate_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
   if(b_vnni && std::is_same<T, bfloat16>::value){
     tpps.i_vnni_tpp = XformExtTPP<T>(
           MLP_BLOCKSIZE,
@@ -145,7 +145,7 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
   tpps.mul_tpp = Mul2TPP<T, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim, intermediate_dim);
   tpps.o_gemm_tpp = BrgemmTPP<
             T,
-            T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*embedding_dim, intermediate_dim, embedding_dim, MLP_BLOCKSIZE, 0.0, 0, 1);\
+            T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*embedding_dim, intermediate_dim, embedding_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
   if (b_vnni && std::is_same<T, bfloat16>::value){
     tpps.o_vnni_tpp = XformExtTPP<T>(
           MLP_BLOCKSIZE,
@@ -174,12 +174,12 @@ long int ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
                             bool gate_flag, bool blocked, bool b_vnni, float scale=1.0) {
 
 
-auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+  auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
-if (blocked){
-  std::cout << "waiting for the blocked implementation: \n";
-  return 0;
-} else {
+  if (blocked){
+    std::cout << "waiting for the blocked implementation: \n";
+    return 0;
+  } else {
     // std::cout << "Running with flat layout: \n";
     auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
     auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
