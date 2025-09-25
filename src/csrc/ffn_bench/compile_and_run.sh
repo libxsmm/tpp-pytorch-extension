@@ -38,6 +38,7 @@ num_iter=${9:-1}
 embedding_dim=${10:-7168}
 intermediate_dim=${11:-2048}
 gate_flag=${12:-1}
+correctness_check=${13:-1}
 
 
 # echo "Running $llm model"
@@ -64,7 +65,7 @@ else
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, gate_flag: $gate_flag"
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, gate_flag: $gate_flag", "correctness_check: $correctness_check"
 
 
 # echo "Compiling FFN benchmark code"
@@ -96,12 +97,13 @@ cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
+    threads=64
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag
+    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
 else
     threads=$((cpu_count * 2))
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag 
+    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
 fi
 
 if [ "$PROF" == "1" ]; then
