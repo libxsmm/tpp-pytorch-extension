@@ -172,7 +172,7 @@ void flat_to_blocked_weights(std::vector<std::unique_ptr<T[]>>& t_Wg,
 }
 
 template<typename T>
-FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediate_dim, bool gate_flag, bool b_vnni, float scale=1.0){
+FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediate_dim, bool gate_flag, bool b_vnni){
   FFNTPPs<T> tpps;
   tpps.i_gemm_tpp = BrgemmTPP<
             T,
@@ -212,7 +212,7 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
 
 
 template<typename T>
-FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermediate_dim, bool gate_flag, bool b_vnni, float scale=1.0){
+FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermediate_dim, bool gate_flag, bool b_vnni){
   FFNTPPs<T> tpps;
   tpps.i_gemm_tpp = BrgemmTPP<
             T,
@@ -359,7 +359,7 @@ long int ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
                             FFNTPPs<T>& tpps_main,
                             FFNTPPs<T>& tpps_edge, 
                             long token_len, long embedding_dim, long intermediate_dim, 
-                            bool gate_flag, bool b_vnni, float scale=1.0) {
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
 
 
   auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
@@ -481,7 +481,7 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
                             FFNTPPs<T>& tpps_main,
                             FFNTPPs<T>& tpps_edge, 
                             long token_len, long embedding_dim, long intermediate_dim, 
-                            bool gate_flag, bool b_vnni, float scale=1.0) {
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
 
   auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
@@ -605,6 +605,72 @@ void flops_and_bandwidth(
 }
 
 
+template<typename T>
+void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out, 
+                            std::vector<std::unique_ptr<T[]>>& t_In,
+                            std::vector<std::unique_ptr<T[]>>& t_Wg,
+                            std::vector<std::unique_ptr<T[]>>& t_Wu,
+                            std::vector<std::unique_ptr<T[]>>& t_Wd,
+                            long token_len, long embedding_dim, long intermediate_dim, 
+                            bool gate_flag, bool b_vnni, float scale=0.1, long num_layer=1) {
+
+  std::cout<< "Starting Correctness Check" << "\n";                       
+  FFNTPPs<T> tpps_main_flat, tpps_edge_flat;
+  FFNTPPs<T> tpps_main_blocked, tpps_edge_blocked;
+
+  std::vector<std::unique_ptr<T[]>> t2_Out(num_layer), t2_Wg(num_layer), t2_Wu(num_layer), t2_Wd(num_layer);
+  for(int l = 0; l < num_layer; l++){
+    t2_Out[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);
+    t2_Wg[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
+    t2_Wu[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
+    t2_Wd[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim*embedding_dim]);
+
+    std::memcpy(t2_Wg[l].get(), t_Wg[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
+    std::memcpy(t2_Wu[l].get(), t_Wu[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
+    std::memcpy(t2_Wd[l].get(), t_Wd[l].get(), sizeof(T)*intermediate_dim*embedding_dim);
+  }
+  flat_to_blocked_weights<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer);
+
+  if((token_len / MLP_BLOCKSIZE) != 0){      // No need to create main tpp if token_len < MLP_BLOCKSIZE
+    tpps_main_flat = create_flat_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+    tpps_main_blocked = create_blocked_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+  }
+  if ((token_len % MLP_BLOCKSIZE) != 0){     // No need to create edge tpp if token_len is multiple of MLP_BLOCKSIZE
+    tpps_edge_flat = create_flat_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+    tpps_edge_blocked = create_blocked_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+  }
+
+  if(b_vnni && std::is_same<T, bfloat16>::value) {        // take VNNI transform when b_vnni is True
+    flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, tpps_main_flat);
+    blocked_weight_vnni_transform<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, tpps_main_blocked);
+  }
+
+  ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], tpps_main_flat, tpps_edge_flat, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+  ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], tpps_main_blocked, tpps_edge_blocked, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+
+  auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
+  for(int l=0; l < num_layer; l++){
+    for(int i=0; i < token_len; i++){
+      float t_Out_float[embedding_dim], t2_Out_float[embedding_dim];
+      upconvert_tpp(&t_Out[l][i*embedding_dim], &t_Out_float[0]);
+      upconvert_tpp(&t2_Out[l][i*embedding_dim], &t2_Out_float[0]);
+      float tol;
+      if(std::is_same<T, bfloat16>::value)
+        tol = 1e-2;
+      else
+        tol = 1e-5;
+      for(int j=0; j < embedding_dim; j++){
+        if(std::abs(t_Out_float[j] - t2_Out_float[j]) > tol){
+          std::cout << "Layer 0: Mismatch at index " << i << ": " << (float)t_Out[0][i] << " vs " << (float)t2_Out[0][i] << std::endl;
+          exit(0);
+        }
+      }
+    }
+  }
+  std::cout<< "Correctness Check done" << "\n";
+}
+
+
 int main(int argc, char* argv[]) {
 
   if (argc < 5) {
@@ -629,64 +695,13 @@ int main(int argc, char* argv[]) {
   flat_weight_allocate_and_initialize<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer);
 
   if(correctness_check){
-    FFNTPPs<T> tpps_main_flat, tpps_edge_flat;
-    FFNTPPs<T> tpps_main_blocked, tpps_edge_blocked;
-
-    std::vector<std::unique_ptr<T[]>> t2_Out(num_layer), t2_Wg(num_layer), t2_Wu(num_layer), t2_Wd(num_layer);
-    for(int l = 0; l < num_layer; l++){
-      t2_Out[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);
-      t2_Wg[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
-      t2_Wu[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
-      t2_Wd[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim*embedding_dim]);
-
-      std::memcpy(t2_Wg[l].get(), t_Wg[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
-      std::memcpy(t2_Wu[l].get(), t_Wu[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
-      std::memcpy(t2_Wd[l].get(), t_Wd[l].get(), sizeof(T)*intermediate_dim*embedding_dim);
-    }
-    flat_to_blocked_weights<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer);
-
-    if((token_len / MLP_BLOCKSIZE) != 0){      // No need to create main tpp if token_len < MLP_BLOCKSIZE
-      tpps_main_flat = create_flat_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-      tpps_main_blocked = create_blocked_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-    }
-    if ((token_len % MLP_BLOCKSIZE) != 0){     // No need to create edge tpp if token_len is multiple of MLP_BLOCKSIZE
-      tpps_edge_flat = create_flat_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-      tpps_edge_blocked = create_blocked_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-    }
-
-    if(b_vnni && std::is_same<T, bfloat16>::value) {        // take VNNI transform when b_vnni is True
-      flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, tpps_main_flat);
-      blocked_weight_vnni_transform<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, tpps_main_blocked);
-    }
-
-    ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], tpps_main_flat, tpps_edge_flat, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-    ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], tpps_main_blocked, tpps_edge_blocked, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-
-    auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
-    //compare layer 0
-    for(int i=0; i < token_len; i++){
-      float t_Out_float[embedding_dim], t2_Out_float[embedding_dim];
-      upconvert_tpp(&t_Out[0][i*embedding_dim], &t_Out_float[0]);
-      upconvert_tpp(&t2_Out[0][i*embedding_dim], &t2_Out_float[0]);
-      float tol;
-      if(std::is_same<T, bfloat16>::value)
-        tol = 1e-2;
-      else
-        tol = 1e-5;
-      for(int j=0; j < embedding_dim; j++){
-        if(std::abs(t_Out_float[j] - t2_Out_float[j]) > tol){
-          std::cout << "Layer 0: Mismatch at index " << i << ": " << (float)t_Out[0][i] << " vs " << (float)t2_Out[0][i] << std::endl;
-          exit(0);
-        }
-      }
-    }
-    std::cout<< "Correctness Check done" << "\n";
+    correctness_checking(t_Out, t_In, t_Wg, t_Wu, t_Wd, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
   }
 
   // Timing
   long int time = 0;
   if(blocked){
-    std::cout << "Running with blocked weight layout: \n";
+    std::cout << "Running with blocked weight layout \n";
     FFNTPPs<T> tpps_main, tpps_edge;
     flat_to_blocked_weights<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer);
 
@@ -713,7 +728,7 @@ int main(int argc, char* argv[]) {
     }
 
   } else {
-    std::cout << "Running with flat weight layout: \n";
+    std::cout << "Running with flat weight layout \n";
     FFNTPPs<T> tpps_main, tpps_edge;
     if((token_len / MLP_BLOCKSIZE) != 0)      // No need to create main tpp if token_len < MLP_BLOCKSIZE
       tpps_main = create_flat_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);

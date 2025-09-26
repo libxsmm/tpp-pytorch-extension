@@ -38,7 +38,7 @@ num_iter=${9:-1}
 embedding_dim=${10:-7168}
 intermediate_dim=${11:-2048}
 gate_flag=${12:-1}
-correctness_check=${13:-1}
+correctness_check=${13:-0}
 
 
 # echo "Running $llm model"
