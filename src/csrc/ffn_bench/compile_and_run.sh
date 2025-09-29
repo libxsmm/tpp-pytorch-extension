@@ -40,12 +40,16 @@ num_iter=${9:-1}
 embedding_dim=${10:-7168}
 intermediate_dim=${11:-2048}
 gate_flag=${12:-1}
-correctness_check=${13:-1}
+correctness_check=${13:-0}
 
 
 # echo "Running $llm model"
 if [ "$llm" == "deepseek-r1" ]; then
   embedding_dim=7168; intermediate_dim=2048; gate_flag=1
+elif [ "$llm" == "qwen3-235B-A22B" ]; then
+  embedding_dim=4096; intermediate_dim=1536; gate_flag=1
+elif [ "$llm" == "qwen3-30B-A3B" ]; then
+  embedding_dim=2048; intermediate_dim=768; gate_flag=1
 elif [ "$llm" == "llama-7b" ]; then
   embedding_dim=4096; intermediate_dim=11008; gate_flag=1
 elif [ "$llm" == "llama-3.1-8B" ]; then

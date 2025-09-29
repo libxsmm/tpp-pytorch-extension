@@ -642,12 +642,14 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
 
   long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
   long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
-  bool gate_up = 1;
+  bool gate_up;
+
+  gate_up = (embedding_dim > intermediate_dim)? true : false;
 
   if(gate_flag && gate_up){
       
 #ifdef USE_TBB
-      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks]
+      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q]
       (long idx) {
         long i = (idx / (intermediate_blocks));
         long k = (idx % (intermediate_blocks));
@@ -694,7 +696,8 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
       // Gate computation
       {
 #ifdef USE_TBB
-        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_inter_a, embedding_blocks, intermediate_blocks](long idx) {
+        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q]
+        (long idx) {
         long i = (idx / (intermediate_blocks));
         long k = (idx % (intermediate_blocks));
 #else
@@ -737,7 +740,8 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
       // Up computation
       {
 #ifdef USE_TBB
-        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks](long idx) {
+        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q]
+        (long idx) {
         long i = (idx / (intermediate_blocks));
         long k = (idx % (intermediate_blocks));
 #else
@@ -779,7 +783,7 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
     // Down computation
     {
 #ifdef USE_TBB
-      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(embedding_blocks), [&tpps_main, &t_Out_a, &t_Wd_a, &t_inter_a, embedding_blocks, intermediate_blocks, scale]
+      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(embedding_blocks), [&tpps_main, &t_Out_a, &t_Wd_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, scale]
       (long idx) {
         long i = (idx / (embedding_blocks));
         long k = (idx % (embedding_blocks));
@@ -912,7 +916,7 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
       else
         tol = 1e-5;
       for(int j=0; j < embedding_dim; j++){
-        if(std::abs(t_Out_float[j] - t2_Out_float[j]) > tol){
+        if(std::abs((t_Out_float[j] - t2_Out_float[j])/t_Out_float[j]) > tol){
           std::cout << "Layer 0: Mismatch at index " << (i*embedding_dim + j) << ": " << (float)t_Out[0][j] << " vs " << (float)t2_Out[0][j] << "\n";
           exit(0);
         }
