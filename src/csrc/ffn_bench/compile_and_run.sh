@@ -1,10 +1,12 @@
-source /swtools/intel/2025.1/oneapi-vars.sh --force > /dev/null 2>&1
-export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
+source /swtools/intel/2025.2.0/setvars.sh --force > /dev/null 2>&1
+# export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
+# export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
+export LD_PRELOAD=/usr/lib64/libtcmalloc.so:$LD_PRELOAD
 export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
-export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 # export LIBXSMM_TARGET=clx
 # export PROF=1
+# export USE_TBB=1
 
 # write help message
 if [ "$1" == "--help" ]; then
@@ -38,7 +40,7 @@ num_iter=${9:-1}
 embedding_dim=${10:-7168}
 intermediate_dim=${11:-2048}
 gate_flag=${12:-1}
-correctness_check=${13:-0}
+correctness_check=${13:-1}
 
 
 # echo "Running $llm model"
@@ -71,23 +73,19 @@ echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16
 # echo "Compiling FFN benchmark code"
 if [ "$PROF" == "1" ]; then
   echo "Profiling enabled"
-  if [ "$BF16" == "1" ]; then
-    echo "Compiling with BF16"
-    g++ -O0 -pg FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
-  else
-    echo "Compiling with FP32"
-    g++ -O0 -pg -DUSE_FLOAT FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
-  fi
-  g++ -O0 -pg FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+  FLAGS="-O0 -pg"
+  [ "$BF16" = "0" ] && FLAGS="$FLAGS -DUSE_FLOAT"
+  [ "$BF16" = "0" ] && echo "Compiling with FP32" || echo "Compiling with BF16"
+  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
+  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
+
 else
   echo "Normal compilation"
-  if [ "$BF16" == "1" ]; then
-    echo "Compiling with BF16"
-    g++ -O2 FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
-  else
-    echo "Compiling with FP32"
-    g++ -O2 -DUSE_FLOAT FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f
-  fi
+  FLAGS="-O2"
+  [ "$BF16" = "0" ] && FLAGS="$FLAGS -DUSE_FLOAT"
+  [ "$BF16" = "0" ] && echo "Compiling with FP32" || echo "Compiling with BF16"
+  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
+  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f -ltbb
 fi
 
 
@@ -97,13 +95,21 @@ cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
-    threads=64
+    # threads=64
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    if [ "$USE_TBB" == "1" ]; then
+      OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    else
+      KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    fi
 else
     threads=$((cpu_count * 2))
     echo "CPU count: $cpu_count, threads: $threads"
-    KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    if [ "$USE_TBB" == "1" ]; then
+      OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    else
+      KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $gate_flag $correctness_check
+    fi
 fi
 
 if [ "$PROF" == "1" ]; then

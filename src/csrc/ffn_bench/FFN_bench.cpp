@@ -31,24 +31,27 @@ using namespace tpp;
   typedef bfloat16 T;
 #endif
 
+// #define USE_TBB
 
-template<typename Tin, typename Tout> using BrgemmTPPtype = decltype((BrgemmTPP<Tin, Tout>()));
-template<typename T> using SiLUFwdTPPtype = decltype(SiLUFwdTPP<T>());
-template<typename Tin, typename Tout, typename Tin2> using Mul2TPPtype = decltype(Mul2TPP<Tin, Tout, Tin2>());
-template<typename T> using ScaleTPPtype = decltype(ScaleTPP<T, T>());
-template<typename T> using TransTPPtype = decltype(XformExtTPP<T>());
-template<typename Tin, typename Tout> using ConvertTPPtype = decltype(ConvertTPP<Tin, Tout>());
+#ifdef USE_TBB
+  #include <tbb/parallel_for.h>
+  #include <tbb/blocked_range.h>
+  #include <tbb/global_control.h>
+#endif
+
 template<typename T>
 struct FFNTPPs {
-  BrgemmTPPtype<T, float> i_gemm_tpp;
-  SiLUFwdTPPtype<float> silu_tpp;
-  Mul2TPPtype<float, T, T> mul_tpp;
-  BrgemmTPPtype<T, float> o_gemm_tpp;
-  ScaleTPPtype<float> scale_tpp;
-  ConvertTPPtype<float, T> downconvert_inter_tpp;
-  ConvertTPPtype<float, T> downconvert_embed_tpp;
-  TransTPPtype<T> i_vnni_tpp;
-  TransTPPtype<T> o_vnni_tpp;
+  BrgemmTPP<T, float> i_gemm_tpp;
+  // SCOPEIT_DECL(BrgemmTPP<T, float>) i_gemm_tpp;
+  SiLUFwdTPP<float> silu_tpp;
+  Mul2TPP<float, T, T> mul_tpp;
+  Mul2TPP<float, T, float> gateup_mul_tpp;
+  BrgemmTPP<T, float> o_gemm_tpp;
+  ScaleTPP<float, float> scale_tpp;
+  ConvertTPP<float, T> downconvert_inter_tpp;
+  ConvertTPP<float, T> downconvert_embed_tpp;
+  XformExtTPP<T> i_vnni_tpp;
+  XformExtTPP<T> o_vnni_tpp;
 };
 
 template<typename T>
@@ -231,6 +234,7 @@ FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermed
   tpps.silu_tpp = SiLUFwdTPP<float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE);
   tpps.downconvert_inter_tpp = ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim);
   tpps.mul_tpp = Mul2TPP<float, T, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim, intermediate_dim);
+  tpps.gateup_mul_tpp = Mul2TPP<float, T, float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim);
   tpps.o_gemm_tpp = BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*MLP_BLOCKSIZE, intermediate_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
@@ -257,6 +261,8 @@ void flat_weight_vnni_transform(std::vector<std::unique_ptr<T[]>>& t_Wg,
                             long embedding_dim, long intermediate_dim, long num_layer,
                             FFNTPPs<T>& tpps_main) {
 
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE ;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE ;
   for (int l = 0; l < num_layer; l++) {
     
     auto t_Wg_a = GetVLAPtr<T>(t_Wg[l].get(), {intermediate_dim});
@@ -271,27 +277,59 @@ void flat_weight_vnni_transform(std::vector<std::unique_ptr<T[]>>& t_Wg,
     auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {intermediate_dim});
     auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {embedding_dim});
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks]
+    (long idx) {
+      long i = (idx / intermediate_blocks);
+      long j = (idx % intermediate_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < intermediate_dim; j += MLP_BLOCKSIZE){
-        tpps_main.i_vnni_tpp(&t_Wg_a[i][j], &t_Wg_vnni_a[i][2*j]);
+    for(int i = 0; i < embedding_blocks; i++){
+      for(int j = 0; j < intermediate_blocks; j++){
+#endif
+        tpps_main.i_vnni_tpp(&t_Wg_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wg_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
       }
     }
+#else
+    });
+#endif
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks]
+    (long idx) {
+      long i = (idx / intermediate_blocks);
+      long j = (idx % intermediate_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < intermediate_dim; j += MLP_BLOCKSIZE){
-        tpps_main.i_vnni_tpp(&t_Wu_a[i][j], &t_Wu_vnni_a[i][2*j]);
+    for(int i = 0; i < embedding_blocks; i++){
+      for(int j = 0; j < intermediate_blocks; j++){
+#endif
+        tpps_main.i_vnni_tpp(&t_Wu_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wu_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
       }
     }
+#else
+    });
+#endif
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks]
+    (long idx) {
+      long i = (idx / embedding_blocks);
+      long j = (idx % embedding_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < intermediate_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < embedding_dim; j += MLP_BLOCKSIZE){
-        tpps_main.o_vnni_tpp(&t_Wd_a[i][j], &t_Wd_vnni_a[i][2*j]);
+    for(int i = 0; i < intermediate_blocks; i++){
+      for(int j = 0; j < embedding_blocks; j++){
+#endif
+        tpps_main.o_vnni_tpp(&t_Wd_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wd_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
       }
     }
-
+#else
+    });
+#endif
     // copy t_Wg_vnni contents t_Wg[l]
     t_Wg[l].swap(t_Wg_vnni);
     t_Wu[l].swap(t_Wu_vnni);
@@ -307,40 +345,73 @@ void blocked_weight_vnni_transform(std::vector<std::unique_ptr<T[]>>& t_Wg,
                             long embedding_dim, long intermediate_dim, long num_layer,
                             FFNTPPs<T>& tpps_main) {
 
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE ;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE ;
+
   for (int l = 0; l < num_layer; l++) {
     
-    auto t_Wg_a = GetVLAPtr<T>(t_Wg[l].get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wu_a = GetVLAPtr<T>(t_Wu[l].get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wd_a = GetVLAPtr<T>(t_Wd[l].get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wg_a = GetVLAPtr<T>(t_Wg[l].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wu_a = GetVLAPtr<T>(t_Wu[l].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wd_a = GetVLAPtr<T>(t_Wd[l].get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
 
     auto t_Wg_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
     auto t_Wu_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
     auto t_Wd_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
 
-    auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+      long i = (idx / embedding_blocks);
+      long j = (idx % embedding_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < intermediate_dim; j += MLP_BLOCKSIZE){
-        tpps_main.i_vnni_tpp(&t_Wg_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0], &t_Wg_vnni_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0]);
+    for(int i = 0; i < intermediate_blocks; i++){
+      for(int j = 0; j < embedding_blocks; j++){
+#endif
+        tpps_main.i_vnni_tpp(&t_Wg_a[i][j][0][0], &t_Wg_vnni_a[i][j][0][0]);
+#ifndef USE_TBB
       }
     }
+#else
+    });
+#endif
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+      long i = (idx / embedding_blocks);
+      long j = (idx % embedding_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < intermediate_dim; j += MLP_BLOCKSIZE){
-        tpps_main.i_vnni_tpp(&t_Wu_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0], &t_Wu_vnni_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0]);
+    for(int i = 0; i < intermediate_blocks; i++){
+      for(int j = 0; j < embedding_blocks; j++){
+#endif
+        tpps_main.i_vnni_tpp(&t_Wu_a[i][j][0][0], &t_Wu_vnni_a[i][j][0][0]);
+#ifndef USE_TBB
       }
     }
+#else
+    });
+#endif
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+      long i = (idx / intermediate_blocks);
+      long j = (idx % intermediate_blocks);
+#else
     #pragma omp parallel for collapse(2)
-    for(int i = 0; i < intermediate_dim; i += MLP_BLOCKSIZE){
-      for(int j = 0; j < embedding_dim; j += MLP_BLOCKSIZE){
-        tpps_main.o_vnni_tpp(&t_Wd_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0], &t_Wd_vnni_a[j/MLP_BLOCKSIZE][i/MLP_BLOCKSIZE][0][0]);
+    for(int i = 0; i < embedding_blocks; i++){
+      for(int j = 0; j < intermediate_blocks; j++){
+#endif
+        tpps_main.o_vnni_tpp(&t_Wd_a[i][j][0][0], &t_Wd_vnni_a[i][j][0][0]);
+#ifndef USE_TBB
       }
     }
+#else
+    });
+#endif
 
     // copy t_Wg_vnni contents t_Wg[l]
     t_Wg[l].swap(t_Wg_vnni);
@@ -370,38 +441,63 @@ long int ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
   auto t_Wu_a = GetVLAPtr<T>(t_Wu.get(), {intermediate_dim});
   auto t_Wd_a = GetVLAPtr<T>(t_Wd.get(), {embedding_dim});
 
+  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  long token_len_re = (token_len % MLP_BLOCKSIZE);
+
   std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
   auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
 
-  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
-  long token_len_re = (token_len % MLP_BLOCKSIZE);
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE ;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE ;
+
   {
     // Gate computation
     {
 
+#ifdef USE_TBB
+      tbb::parallel_for(0L, (token_len/MLP_BLOCKSIZE)*intermediate_blocks, [&tpps_main, &t_In_a, &t_Wg_a, &t_inter_a, token_len_q, embedding_blocks, intermediate_blocks, b_vnni]
+      (long idx) {
+
+        long i = (idx / intermediate_blocks);
+        long k = (idx % intermediate_blocks);
+#else      
       #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
+      for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wg_a[0][k*2], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], embedding_blocks);
           else
-            tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wg_a[0][k], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[0][k*MLP_BLOCKSIZE], &tmp[0], embedding_blocks);
           tpps_main.silu_tpp(&tmp[0], &tmp[0]);
-          tpps_main.downconvert_inter_tpp(&tmp[0], &t_inter_a[i][k]);
+          tpps_main.downconvert_inter_tpp(&tmp[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
       }
+#else
+      });
+#endif
       if(token_len_re != 0){   //edge case or decode case
+#ifdef USE_TBB
+        tbb::parallel_for(0L, intermediate_blocks, [&tpps_edge, &t_In_a, &t_Wg_a, &t_inter_a, token_len_q, token_len_re, embedding_blocks, intermediate_blocks, b_vnni]
+        (long k) {
+#else
         #pragma omp parallel for
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[0][k*2], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], embedding_blocks);
           else
-            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[0][k], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[0][k*MLP_BLOCKSIZE], &tmp[0], embedding_blocks);
           tpps_edge.silu_tpp(&tmp[0], &tmp[0]);
-          tpps_edge.downconvert_inter_tpp(&tmp[0], &t_inter_a[token_len_q][k]);
+          tpps_edge.downconvert_inter_tpp(&tmp[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
+#else
+        });
+#endif
       }
     }
   }
@@ -410,27 +506,50 @@ long int ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
   if(gate_flag){
     // Up computation
     {
+
+#ifdef USE_TBB
+      tbb::parallel_for(0L, (token_len/MLP_BLOCKSIZE)*intermediate_blocks, [&tpps_main, &t_In_a, &t_Wu_a, &t_inter_a, token_len_q, embedding_blocks, intermediate_blocks, b_vnni]
+      (long idx) {
+
+        long i = (idx / intermediate_blocks);
+        long k = (idx % intermediate_blocks);
+#else      
       #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
+      for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wu_a[0][k*2], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wu_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], embedding_blocks);
           else
-            tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wu_a[0][k], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_main.mul_tpp(&tmp[0], &t_inter_a[i][k], &t_inter_a[i][k]);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wu_a[0][k*MLP_BLOCKSIZE], &tmp[0], embedding_blocks);
+          tpps_main.mul_tpp(&tmp[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
       }
+#else
+      });
+#endif
       if(token_len_re != 0){       //edge case or decode case
+
+#ifdef USE_TBB
+        tbb::parallel_for(0L, intermediate_blocks, [&tpps_edge, &t_In_a, &t_Wu_a, &t_inter_a, token_len_q, token_len_re, embedding_blocks, intermediate_blocks, b_vnni]
+        (long k) {
+#else
         #pragma omp parallel for
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[0][k*2], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], embedding_blocks);
           else
-            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[0][k], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_edge.mul_tpp(&tmp[0], &t_inter_a[token_len_q][k], &t_inter_a[token_len_q][k]);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[0][k*MLP_BLOCKSIZE], &tmp[0], embedding_blocks);
+          tpps_edge.mul_tpp(&tmp[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
+#else
+        });
+#endif
       }
     }
   }
@@ -438,29 +557,51 @@ long int ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
   {
     // Down computation
     {
+
+#ifdef USE_TBB
+      tbb::parallel_for(0L, (token_len/MLP_BLOCKSIZE)*embedding_blocks, [&tpps_main, &t_Out_a, &t_Wd_a, &t_inter_a, token_len_q, embedding_blocks, intermediate_blocks, b_vnni, scale]
+      (long idx) {
+
+        long i = (idx / embedding_blocks);
+        long k = (idx % embedding_blocks);
+#else 
       #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < embedding_dim; k += MLP_BLOCKSIZE) {
+      for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+        for (long k = 0; k < embedding_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_main.o_gemm_tpp(&t_inter_a[i][0], &t_Wd_a[0][k*2], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+            tpps_main.o_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][0], &t_Wd_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], intermediate_blocks);
           else
-            tpps_main.o_gemm_tpp(&t_inter_a[i][0], &t_Wd_a[0][k], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+            tpps_main.o_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][0], &t_Wd_a[0][k*MLP_BLOCKSIZE], &tmp[0], intermediate_blocks);
           tpps_main.scale_tpp(&tmp[0], &tmp[0], scale);
-          tpps_main.downconvert_embed_tpp(&tmp[0], &t_Out_a[i][k]);
+          tpps_main.downconvert_embed_tpp(&tmp[0], &t_Out_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
       }
+#else
+      });
+#endif
       if(token_len_re != 0){       //edge case or decode case
+#ifdef USE_TBB
+        tbb::parallel_for(0L, embedding_blocks, [&tpps_edge, &t_Out_a, &t_Wd_a, &t_inter_a, token_len_q, token_len_re, embedding_blocks, intermediate_blocks, b_vnni, scale]
+        (long k) {
+#else
         #pragma omp parallel for
-        for (int k = 0; k < embedding_dim; k += MLP_BLOCKSIZE) {
+        for (long k = 0; k < embedding_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
           if(b_vnni && std::is_same<T, bfloat16>::value)
-            tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[0][k*2], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+            tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[0][k*MLP_BLOCKSIZE*2], &tmp[0], intermediate_blocks);
           else
-            tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[0][k], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+            tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[0][k*MLP_BLOCKSIZE], &tmp[0], intermediate_blocks);
           tpps_edge.scale_tpp(&tmp[0], &tmp[0], scale);
-          tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k]);
+          tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
+#else
+        });
+#endif
       }
     }
   }
@@ -493,54 +634,142 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
   auto t_Wu_a = GetVLAPtr<T>(t_Wu.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
   auto t_Wd_a = GetVLAPtr<T>(t_Wd.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
 
-  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
-  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
-
   long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
   long token_len_re = (token_len % MLP_BLOCKSIZE);
 
-  {
-    // Gate computation
-    {
+  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
+  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
 
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
+  bool gate_up = 1;
+
+  if(gate_flag && gate_up){
+      
+#ifdef USE_TBB
+      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks]
+      (long idx) {
+        long i = (idx / (intermediate_blocks));
+        long k = (idx % (intermediate_blocks));
+#else
       #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
-          tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wg_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_main.silu_tpp(&tmp[0], &tmp[0]);
-          tpps_main.downconvert_inter_tpp(&tmp[0], &t_inter_a[i][k]);
+      for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+          LIBXSMM_ALIGNED(float tmp_g[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
+          LIBXSMM_ALIGNED(float tmp_u[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
+          tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[k][0][0][0], &tmp_g[0], embedding_blocks);
+          tpps_main.silu_tpp(&tmp_g[0], &tmp_g[0]);
+          tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wu_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+          tpps_main.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
       }
+#else
+      });
+#endif
+
       if(token_len_re != 0){   //edge case or decode case
+#ifdef USE_TBB
+        tbb::parallel_for(0L, intermediate_blocks, [&tpps_edge, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, token_len_re]
+          (long k) {
+#else
         #pragma omp parallel for
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
-          tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_edge.silu_tpp(&tmp[0], &tmp[0]);
-          tpps_edge.downconvert_inter_tpp(&tmp[0], &t_inter_a[token_len_q][k]);
+        for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+          LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+          LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+          tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[k][0][0][0], &tmp_g[0], embedding_blocks);
+          tpps_edge.silu_tpp(&tmp_g[0], &tmp_g[0]);
+          tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+          tpps_edge.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
+        }
+#else
+        });
+#endif
+      }
+  } else {    // Normal gate and up computation
+    {
+      // Gate computation
+      {
+#ifdef USE_TBB
+        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_inter_a, embedding_blocks, intermediate_blocks](long idx) {
+        long i = (idx / (intermediate_blocks));
+        long k = (idx % (intermediate_blocks));
+#else
+        #pragma omp parallel for collapse(2)
+        for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+          for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+            LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[k][0][0][0], &tmp[0], embedding_blocks);
+            tpps_main.silu_tpp(&tmp[0], &tmp[0]);
+            tpps_main.downconvert_inter_tpp(&tmp[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
+          }
+        }
+#else
+        });
+#endif
+        if(token_len_re != 0){   //edge case or decode case
+#ifdef USE_TBB
+        tbb::parallel_for(0L, intermediate_blocks, [&tpps_edge, &t_In_a, &t_Wg_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, token_len_re]
+          (long k) {
+#else
+          #pragma omp parallel for
+          for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+            LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[k][0][0][0], &tmp[0], embedding_blocks);
+            tpps_edge.silu_tpp(&tmp[0], &tmp[0]);
+            tpps_edge.downconvert_inter_tpp(&tmp[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
+          }
+#else
+          });
+#endif
         }
       }
     }
-  }
 
-  if(gate_flag){
-    // Up computation
-    {
-      #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
-          tpps_main.i_gemm_tpp(&t_In_a[i][0], &t_Wu_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_main.mul_tpp(&tmp[0], &t_inter_a[i][k], &t_inter_a[i][k]);
+    if(gate_flag){
+      // Up computation
+      {
+#ifdef USE_TBB
+        tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks](long idx) {
+        long i = (idx / (intermediate_blocks));
+        long k = (idx % (intermediate_blocks));
+#else
+        #pragma omp parallel for collapse(2)
+        for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+          for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+            LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
+            tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wu_a[k][0][0][0], &tmp[0], embedding_blocks);
+            tpps_main.mul_tpp(&tmp[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
+          }
         }
-      }
-      if(token_len_re != 0){       //edge case or decode case
-        #pragma omp parallel for
-        for (int k = 0; k < intermediate_dim; k += MLP_BLOCKSIZE) {
-          LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
-          tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], embedding_dim/MLP_BLOCKSIZE);
-          tpps_edge.mul_tpp(&tmp[0], &t_inter_a[token_len_q][k], &t_inter_a[token_len_q][k]);
+#else
+        });
+#endif
+        if(token_len_re != 0){       //edge case or decode case
+#ifdef USE_TBB
+          tbb::parallel_for(0L, (intermediate_blocks), [&tpps_edge, &t_In_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, token_len_re]
+          (long k) {
+#else
+          #pragma omp parallel for
+          for (long k = 0; k < intermediate_blocks; k++) {
+#endif
+            LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[k][0][0][0], &tmp[0], embedding_blocks);
+            tpps_edge.mul_tpp(&tmp[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
+          }
+#else
+          });
+#endif
         }
       }
     }
@@ -549,23 +778,44 @@ long int ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
   {
     // Down computation
     {
+#ifdef USE_TBB
+      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(embedding_blocks), [&tpps_main, &t_Out_a, &t_Wd_a, &t_inter_a, embedding_blocks, intermediate_blocks, scale]
+      (long idx) {
+        long i = (idx / (embedding_blocks));
+        long k = (idx % (embedding_blocks));
+#else
       #pragma omp parallel for collapse(2)
-      for (int i = 0; i < token_len_q; i += MLP_BLOCKSIZE) {
-        for (int k = 0; k < embedding_dim; k += MLP_BLOCKSIZE) {
+      for (long i = 0; i < (token_len_q/MLP_BLOCKSIZE); i++) {
+        for (long k = 0; k < embedding_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
-          tpps_main.o_gemm_tpp(&t_inter_a[i][0], &t_Wd_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+          tpps_main.o_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][0], &t_Wd_a[k][0][0][0], &tmp[0], intermediate_blocks);
           tpps_main.scale_tpp(&tmp[0], &tmp[0], scale);
-          tpps_main.downconvert_embed_tpp(&tmp[0], &t_Out_a[i][k]);
+          tpps_main.downconvert_embed_tpp(&tmp[0], &t_Out_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
       }
+#else
+      });
+#endif
+      
       if(token_len_re != 0){       //edge case or decode case
+#ifdef USE_TBB
+        tbb::parallel_for(0L, (embedding_blocks), [&tpps_edge, &t_Out_a, &t_Wd_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, token_len_re, scale]
+          (long k) {
+#else
         #pragma omp parallel for
-        for (int k = 0; k < embedding_dim; k += MLP_BLOCKSIZE) {
+        for (long k = 0; k < embedding_blocks; k++) {
+#endif
           LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
-          tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[k/MLP_BLOCKSIZE][0][0][0], &tmp[0], intermediate_dim/MLP_BLOCKSIZE);
+          tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd_a[k][0][0][0], &tmp[0], intermediate_blocks);
           tpps_edge.scale_tpp(&tmp[0], &tmp[0], scale);
-          tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k]);
+          tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k*MLP_BLOCKSIZE]);
+#ifndef USE_TBB
         }
+#else
+        });
+#endif
       }
     }
   }
@@ -648,6 +898,8 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
   ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], tpps_main_flat, tpps_edge_flat, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
   ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], tpps_main_blocked, tpps_edge_blocked, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
 
+  // long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  // long token_len_re = (token_len % MLP_BLOCKSIZE);
   auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
   for(int l=0; l < num_layer; l++){
     for(int i=0; i < token_len; i++){
@@ -661,7 +913,7 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
         tol = 1e-5;
       for(int j=0; j < embedding_dim; j++){
         if(std::abs(t_Out_float[j] - t2_Out_float[j]) > tol){
-          std::cout << "Layer 0: Mismatch at index " << i << ": " << (float)t_Out[0][i] << " vs " << (float)t2_Out[0][i] << std::endl;
+          std::cout << "Layer 0: Mismatch at index " << (i*embedding_dim + j) << ": " << (float)t_Out[0][j] << " vs " << (float)t2_Out[0][j] << "\n";
           exit(0);
         }
       }
@@ -677,6 +929,10 @@ int main(int argc, char* argv[]) {
     std::cerr << "Usage: " << argv[0] << " <batch_size> <b_vnni> <blocked> <seq_len> <num_layer> <num_iter> <embedding_dim> <intermediate_dim> <gate_flag> <correctness_check>" << std::endl;
     return 1;
   }
+  int num_threads = omp_get_max_threads();
+#ifdef USE_TBB
+  tbb::global_control control(tbb::global_control::max_allowed_parallelism, num_threads);
+#endif
 
   long batch_size = std::stoi(argv[1]);
   long seq_len = std::stoi(argv[2]);
