@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <cmath>
 #include <iostream>
+#include <list>
 #include <tuple>
 #include <chrono>
 #include <memory>
@@ -37,6 +38,7 @@ using namespace tpp;
   #include <tbb/parallel_for.h>
   #include <tbb/blocked_range.h>
   #include <tbb/global_control.h>
+  #include <tbb/concurrent_vector.h>
 #endif
 
 // #define SCOPE_TPP
@@ -51,8 +53,6 @@ using namespace tpp;
     ScaleTPP<float, float> scale_tpp;
     ConvertTPP<float, T> downconvert_inter_tpp;
     ConvertTPP<float, T> downconvert_embed_tpp;
-    XformExtTPP<T> i_vnni_tpp;
-    XformExtTPP<T> o_vnni_tpp;
   };
 
 #else
@@ -66,8 +66,6 @@ using namespace tpp;
     SCOPEIT_DECL(ScaleTPP<float, float>) scale_tpp;
     SCOPEIT_DECL(ConvertTPP<float, T>) downconvert_inter_tpp;
     SCOPEIT_DECL(ConvertTPP<float, T>) downconvert_embed_tpp;
-    SCOPEIT_DECL(XformExtTPP<T>) i_vnni_tpp;
-    SCOPEIT_DECL(XformExtTPP<T>) o_vnni_tpp;
   };
 #endif
 
@@ -106,44 +104,46 @@ template<typename T>
 void flat_weight_allocate_and_initialize(std::vector<std::unique_ptr<T[]>>& t_Wg,
                              std::vector<std::unique_ptr<T[]>>& t_Wu,
                              std::vector<std::unique_ptr<T[]>>& t_Wd,
-  long embedding_dim, long intermediate_dim, long num_layer) {
+  long embedding_dim, long intermediate_dim, long num_layer, long num_expert) {
 
   auto downconvert_embed_tpp = SCOPEIT((ConvertTPP<float, T>(embedding_dim)), EW_ZERO);
   auto downconvert_inter_tpp = SCOPEIT((ConvertTPP<float, T>(intermediate_dim)), EW_ZERO);
 
   for (int l = 0; l < num_layer; l++) {
-    t_Wg[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    t_Wu[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    t_Wd[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
+    for (int e=0; e < num_expert; e++){
+      t_Wg[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      t_Wu[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      t_Wd[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
 
-    for(int i=0; i < intermediate_dim; i++){
-      float t_Wd_tmp[embedding_dim];
-      #pragma omp parallel
-      {
-        int j;
-        unsigned int myseed = omp_get_thread_num();
-        #pragma omp for
-        for (j = 0; j < embedding_dim; j++){
-          t_Wd_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
+      for(int i=0; i < intermediate_dim; i++){
+        float t_Wd_tmp[embedding_dim];
+        #pragma omp parallel
+        {
+          int j;
+          unsigned int myseed = omp_get_thread_num();
+          #pragma omp for
+          for (j = 0; j < embedding_dim; j++){
+            t_Wd_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
+          }
         }
+        downconvert_embed_tpp(t_Wd_tmp, &t_Wd[l*num_expert + e][i*embedding_dim]);
       }
-      downconvert_embed_tpp(t_Wd_tmp, &t_Wd[l][i*embedding_dim]);
-    }
-    
-    for (int i = 0; i < embedding_dim; ++i) {
-      float t_Wg_tmp[intermediate_dim], t_Wu_tmp[intermediate_dim];
-      #pragma omp parallel
-      {
-        int j;
-        unsigned int myseed = omp_get_thread_num();
-        #pragma omp for
-        for (j = 0; j < intermediate_dim; j++){
-          t_Wg_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-          t_Wu_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
+      
+      for (int i = 0; i < embedding_dim; ++i) {
+        float t_Wg_tmp[intermediate_dim], t_Wu_tmp[intermediate_dim];
+        #pragma omp parallel
+        {
+          int j;
+          unsigned int myseed = omp_get_thread_num();
+          #pragma omp for
+          for (j = 0; j < intermediate_dim; j++){
+            t_Wg_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
+            t_Wu_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
+          }
         }
+        downconvert_inter_tpp(t_Wg_tmp, &t_Wg[l*num_expert + e][i*intermediate_dim]);
+        downconvert_inter_tpp(t_Wu_tmp, &t_Wu[l*num_expert + e][i*intermediate_dim]);
       }
-      downconvert_inter_tpp(t_Wg_tmp, &t_Wg[l][i*intermediate_dim]);
-      downconvert_inter_tpp(t_Wu_tmp, &t_Wu[l][i*intermediate_dim]);
     }
   }
 }
@@ -152,9 +152,10 @@ template<typename T>
 void flat_to_blocked_weights(std::vector<std::unique_ptr<T[]>>& t_Wg,
                              std::vector<std::unique_ptr<T[]>>& t_Wu,
                              std::vector<std::unique_ptr<T[]>>& t_Wd,
-  long embedding_dim, long intermediate_dim, long num_layer) {
+  long embedding_dim, long intermediate_dim, long num_layer, long num_expert) {
 
-    for(int l = 0; l < num_layer; l++) {
+  for(int l = 0; l < num_layer; l++) {
+    for(int e=0; e < num_expert; e++){
       auto t_Wg_tmp = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
       auto t_Wu_tmp = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
       auto t_Wd_tmp = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
@@ -164,10 +165,10 @@ void flat_to_blocked_weights(std::vector<std::unique_ptr<T[]>>& t_Wg,
           for(int n2 = 0; n2 < intermediate_dim/MLP_BLOCKSIZE; n2++) {
             for(int h2 = 0; h2 < MLP_BLOCKSIZE; h2++) {
               t_Wg_tmp[n2 * (embedding_dim * MLP_BLOCKSIZE) + n1 * (MLP_BLOCKSIZE * MLP_BLOCKSIZE) + h1 * (MLP_BLOCKSIZE) + h2]     //[n2, n1, h1, h2]
-                = t_Wg[l][n1 * (MLP_BLOCKSIZE * intermediate_dim) + h1 * (intermediate_dim) + n2 * (MLP_BLOCKSIZE) + h2];             //[n1, h1, n2, h2]
+                = t_Wg[l*num_expert + e][n1 * (MLP_BLOCKSIZE * intermediate_dim) + h1 * (intermediate_dim) + n2 * (MLP_BLOCKSIZE) + h2];             //[n1, h1, n2, h2]
 
               t_Wu_tmp[n2 * (embedding_dim * MLP_BLOCKSIZE) + n1 * (MLP_BLOCKSIZE * MLP_BLOCKSIZE) + h1 * (MLP_BLOCKSIZE) + h2]
-                = t_Wu[l][n1 * (MLP_BLOCKSIZE * intermediate_dim) + h1 * (intermediate_dim) + n2 * (MLP_BLOCKSIZE) + h2];
+                = t_Wu[l*num_expert + e][n1 * (MLP_BLOCKSIZE * intermediate_dim) + h1 * (intermediate_dim) + n2 * (MLP_BLOCKSIZE) + h2];
             }
           }
         }
@@ -184,10 +185,11 @@ void flat_to_blocked_weights(std::vector<std::unique_ptr<T[]>>& t_Wg,
         }
       }
 
-      t_Wg[l].swap(t_Wg_tmp);
-      t_Wu[l].swap(t_Wu_tmp);
-      t_Wd[l].swap(t_Wd_tmp);
+      t_Wg[l*num_expert + e].swap(t_Wg_tmp);
+      t_Wu[l*num_expert + e].swap(t_Wu_tmp);
+      t_Wd[l*num_expert + e].swap(t_Wd_tmp);
     }
+  }
 }
 
 template<typename T>
@@ -197,33 +199,14 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
   tpps.i_gemm_tpp = BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*intermediate_dim, embedding_dim, intermediate_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
-  if(b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.i_vnni_tpp = XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          intermediate_dim,
-          intermediate_dim,
-          XformTPP::XFORM_N2V_TPP);
-  }
-  
+
   tpps.silu_tpp = SiLUFwdTPP<float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE);
   tpps.downconvert_inter_tpp = ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim);
   tpps.mul_tpp = Mul2TPP<float, T, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim, intermediate_dim);
   tpps.o_gemm_tpp = BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*embedding_dim, intermediate_dim, embedding_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
-  if (b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.o_vnni_tpp = XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          embedding_dim,
-          embedding_dim,
-          XformTPP::XFORM_N2V_TPP);
-  }
+
   tpps.scale_tpp = ScaleTPP<float, float>(M_dim * MLP_BLOCKSIZE);
   tpps.downconvert_embed_tpp = ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, embedding_dim);
 
@@ -231,16 +214,6 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
   tpps.i_gemm_tpp = SCOPEITGEMM((BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*intermediate_dim, embedding_dim, intermediate_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value))));
-  if(b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.i_vnni_tpp = SCOPEIT((XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          intermediate_dim,
-          intermediate_dim,
-          XformTPP::XFORM_N2V_TPP)), XPOSE);
-  }
   
   tpps.silu_tpp = SCOPEIT((SiLUFwdTPP<float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE)), ACT);
   tpps.downconvert_inter_tpp = SCOPEIT((ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim)), EW_COPY);
@@ -248,16 +221,7 @@ FFNTPPs<T> create_flat_ffn_tpps(long M_dim, long embedding_dim, long intermediat
   tpps.o_gemm_tpp = SCOPEITGEMM((BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*embedding_dim, intermediate_dim, embedding_dim, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value))));
-  if (b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.o_vnni_tpp = SCOPEIT((XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          embedding_dim,
-          embedding_dim,
-          XformTPP::XFORM_N2V_TPP)), XPOSE);
-  }
+
   tpps.scale_tpp = SCOPEIT((ScaleTPP<float, float>(M_dim * MLP_BLOCKSIZE)), EW_SCL);
   tpps.downconvert_embed_tpp = SCOPEIT((ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, embedding_dim)), EW_COPY);
 
@@ -275,16 +239,6 @@ FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermed
   tpps.i_gemm_tpp = BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*MLP_BLOCKSIZE, embedding_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
-  if(b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.i_vnni_tpp = XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          XformTPP::XFORM_N2V_TPP);
-  }
   
   tpps.silu_tpp = SiLUFwdTPP<float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE);
   tpps.downconvert_inter_tpp = ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim);
@@ -293,16 +247,7 @@ FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermed
   tpps.o_gemm_tpp = BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*MLP_BLOCKSIZE, intermediate_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
-  if (b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.o_vnni_tpp = XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          XformTPP::XFORM_N2V_TPP);
-  }
+
   tpps.scale_tpp = ScaleTPP<float, float>(M_dim * MLP_BLOCKSIZE);
   tpps.downconvert_embed_tpp = ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, embedding_dim);
 
@@ -310,16 +255,6 @@ FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermed
   tpps.i_gemm_tpp = SCOPEITGEMM((BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*MLP_BLOCKSIZE, embedding_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value))));
-  if(b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.i_vnni_tpp = SCOPEIT((XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          XformTPP::XFORM_N2V_TPP)), XPOSE);
-  }
   
   tpps.silu_tpp = SCOPEIT((SiLUFwdTPP<float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE)), ACT);
   tpps.downconvert_inter_tpp = SCOPEIT((ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, intermediate_dim)), EW_COPY);
@@ -328,16 +263,7 @@ FFNTPPs<T> create_blocked_ffn_tpps(long M_dim, long embedding_dim, long intermed
   tpps.o_gemm_tpp = SCOPEITGEMM((BrgemmTPP<
             T,
             float>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE*MLP_BLOCKSIZE, intermediate_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 0.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value))));
-  if (b_vnni && std::is_same<T, bfloat16>::value){
-    tpps.o_vnni_tpp = SCOPEIT((XformExtTPP<T>(
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          MLP_BLOCKSIZE,
-          XformTPP::XFORM_N2V_TPP)), XPOSE);
-  }
+  
   tpps.scale_tpp = SCOPEIT((ScaleTPP<float, float>(M_dim * MLP_BLOCKSIZE)), EW_SCL);
   tpps.downconvert_embed_tpp = SCOPEIT((ConvertTPP<float, T>(M_dim, MLP_BLOCKSIZE, MLP_BLOCKSIZE, embedding_dim)), EW_COPY);
 #endif
@@ -348,82 +274,121 @@ template<typename T>
 void flat_weight_vnni_transform(std::vector<std::unique_ptr<T[]>>& t_Wg,
                              std::vector<std::unique_ptr<T[]>>& t_Wu,
                              std::vector<std::unique_ptr<T[]>>& t_Wd,
-                            long embedding_dim, long intermediate_dim, long num_layer,
-                            FFNTPPs<T>& tpps_main) {
+                            long embedding_dim, long intermediate_dim, long num_layer, long num_expert) {
+#ifndef SCOPE_TPP
+  auto i_vnni_tpp = XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        intermediate_dim,
+        intermediate_dim,
+        XformTPP::XFORM_N2V_TPP);
+
+  auto o_vnni_tpp = XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        embedding_dim,
+        embedding_dim,
+        XformTPP::XFORM_N2V_TPP);
+#else
+  auto i_vnni_tpp = SCOPEIT((XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        intermediate_dim,
+        intermediate_dim,
+        XformTPP::XFORM_N2V_TPP)), XPOSE);
+  
+  auto o_vnni_tpp = SCOPEIT((XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        embedding_dim,
+        embedding_dim,
+        XformTPP::XFORM_N2V_TPP)), XPOSE);
+#endif
 
   long embedding_blocks = embedding_dim/MLP_BLOCKSIZE ;
   long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE ;
+
   for (int l = 0; l < num_layer; l++) {
+    for(int e = 0; e < num_expert; e++){
     
-    auto t_Wg_a = GetVLAPtr<T>(t_Wg[l].get(), {intermediate_dim});
-    auto t_Wu_a = GetVLAPtr<T>(t_Wu[l].get(), {intermediate_dim});
-    auto t_Wd_a = GetVLAPtr<T>(t_Wd[l].get(), {embedding_dim});
+      auto t_Wg_a = GetVLAPtr<T>(t_Wg[l*num_expert + e].get(), {intermediate_dim});
+      auto t_Wu_a = GetVLAPtr<T>(t_Wu[l*num_expert + e].get(), {intermediate_dim});
+      auto t_Wd_a = GetVLAPtr<T>(t_Wd[l*num_expert + e].get(), {embedding_dim});
 
-    auto t_Wg_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    auto t_Wu_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    auto t_Wd_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
+      auto t_Wg_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      auto t_Wu_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      auto t_Wd_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
 
-    auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {intermediate_dim});
-    auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {intermediate_dim});
-    auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {embedding_dim});
+      auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {intermediate_dim});
+      auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {intermediate_dim});
+      auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {embedding_dim});
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks]
-    (long idx) {
-      long i = (idx / intermediate_blocks);
-      long j = (idx % intermediate_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_blocks; i++){
-      for(int j = 0; j < intermediate_blocks; j++){
-#endif
-        tpps_main.i_vnni_tpp(&t_Wg_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wg_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&i_vnni_tpp, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks]
+      (long idx) {
+        long i = (idx / intermediate_blocks);
+        long j = (idx % intermediate_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < embedding_blocks; i++){
+        for(int j = 0; j < intermediate_blocks; j++){
+  #endif
+          i_vnni_tpp(&t_Wg_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wg_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+  #ifndef USE_TBB
+        }
       }
-    }
-#else
-    });
-#endif
+  #else
+      });
+  #endif
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks]
-    (long idx) {
-      long i = (idx / intermediate_blocks);
-      long j = (idx % intermediate_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_blocks; i++){
-      for(int j = 0; j < intermediate_blocks; j++){
-#endif
-        tpps_main.i_vnni_tpp(&t_Wu_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wu_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&i_vnni_tpp, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks]
+      (long idx) {
+        long i = (idx / intermediate_blocks);
+        long j = (idx % intermediate_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < embedding_blocks; i++){
+        for(int j = 0; j < intermediate_blocks; j++){
+  #endif
+          i_vnni_tpp(&t_Wu_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wu_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+  #ifndef USE_TBB
+        }
       }
-    }
-#else
-    });
-#endif
+  #else
+      });
+  #endif
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks]
-    (long idx) {
-      long i = (idx / embedding_blocks);
-      long j = (idx % embedding_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < intermediate_blocks; i++){
-      for(int j = 0; j < embedding_blocks; j++){
-#endif
-        tpps_main.o_vnni_tpp(&t_Wd_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wd_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&o_vnni_tpp, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks]
+      (long idx) {
+        long i = (idx / embedding_blocks);
+        long j = (idx % embedding_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < intermediate_blocks; i++){
+        for(int j = 0; j < embedding_blocks; j++){
+  #endif
+          o_vnni_tpp(&t_Wd_a[i*MLP_BLOCKSIZE][j*MLP_BLOCKSIZE], &t_Wd_vnni_a[i*MLP_BLOCKSIZE][2*j*MLP_BLOCKSIZE]);
+  #ifndef USE_TBB
+        }
       }
+  #else
+      });
+  #endif
+      // copy t_Wg_vnni contents t_Wg[l]
+      t_Wg[l*num_expert + e].swap(t_Wg_vnni);
+      t_Wu[l*num_expert + e].swap(t_Wu_vnni);
+      t_Wd[l*num_expert + e].swap(t_Wd_vnni);
     }
-#else
-    });
-#endif
-    // copy t_Wg_vnni contents t_Wg[l]
-    t_Wg[l].swap(t_Wg_vnni);
-    t_Wu[l].swap(t_Wu_vnni);
-    t_Wd[l].swap(t_Wd_vnni);
   }
 }
 
@@ -432,81 +397,120 @@ template<typename T>
 void blocked_weight_vnni_transform(std::vector<std::unique_ptr<T[]>>& t_Wg,
                              std::vector<std::unique_ptr<T[]>>& t_Wu,
                              std::vector<std::unique_ptr<T[]>>& t_Wd,
-                            long embedding_dim, long intermediate_dim, long num_layer,
-                            FFNTPPs<T>& tpps_main) {
+                            long embedding_dim, long intermediate_dim, long num_layer, long num_expert) {
+
+#ifndef SCOPE_TPP
+  auto i_vnni_tpp = XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        XformTPP::XFORM_N2V_TPP);
+
+  auto o_vnni_tpp = XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        XformTPP::XFORM_N2V_TPP);
+#else
+  auto i_vnni_tpp = SCOPEIT((XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        XformTPP::XFORM_N2V_TPP)), XPOSE);
+  
+  auto o_vnni_tpp = SCOPEIT((XformExtTPP<T>(
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        MLP_BLOCKSIZE,
+        XformTPP::XFORM_N2V_TPP)), XPOSE);
+#endif
 
   long embedding_blocks = embedding_dim/MLP_BLOCKSIZE ;
   long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE ;
 
   for (int l = 0; l < num_layer; l++) {
+    for(int e = 0; e < num_expert; e++){
     
-    auto t_Wg_a = GetVLAPtr<T>(t_Wg[l].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wu_a = GetVLAPtr<T>(t_Wu[l].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wd_a = GetVLAPtr<T>(t_Wd[l].get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wg_a = GetVLAPtr<T>(t_Wg[l*num_expert + e].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wu_a = GetVLAPtr<T>(t_Wu[l*num_expert + e].get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wd_a = GetVLAPtr<T>(t_Wd[l*num_expert + e].get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
 
-    auto t_Wg_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    auto t_Wu_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
-    auto t_Wd_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
+      auto t_Wg_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      auto t_Wu_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
+      auto t_Wd_vnni = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
 
-    auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-    auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wg_vnni_a = GetVLAPtr<T>(t_Wg_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wu_vnni_a = GetVLAPtr<T>(t_Wu_vnni.get(), {embedding_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+      auto t_Wd_vnni_a = GetVLAPtr<T>(t_Wd_vnni.get(), {intermediate_blocks, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
-      long i = (idx / embedding_blocks);
-      long j = (idx % embedding_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < intermediate_blocks; i++){
-      for(int j = 0; j < embedding_blocks; j++){
-#endif
-        tpps_main.i_vnni_tpp(&t_Wg_a[i][j][0][0], &t_Wg_vnni_a[i][j][0][0]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&i_vnni_tpp, &t_Wg_a, &t_Wg_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+        long i = (idx / embedding_blocks);
+        long j = (idx % embedding_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < intermediate_blocks; i++){
+        for(int j = 0; j < embedding_blocks; j++){
+  #endif
+          i_vnni_tpp(&t_Wg_a[i][j][0][0], &t_Wg_vnni_a[i][j][0][0]);
+  #ifndef USE_TBB
+        }
       }
-    }
-#else
-    });
-#endif
+  #else
+      });
+  #endif
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&tpps_main, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
-      long i = (idx / embedding_blocks);
-      long j = (idx % embedding_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < intermediate_blocks; i++){
-      for(int j = 0; j < embedding_blocks; j++){
-#endif
-        tpps_main.i_vnni_tpp(&t_Wu_a[i][j][0][0], &t_Wu_vnni_a[i][j][0][0]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, intermediate_blocks*embedding_blocks, [&i_vnni_tpp, &t_Wu_a, &t_Wu_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+        long i = (idx / embedding_blocks);
+        long j = (idx % embedding_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < intermediate_blocks; i++){
+        for(int j = 0; j < embedding_blocks; j++){
+  #endif
+          i_vnni_tpp(&t_Wu_a[i][j][0][0], &t_Wu_vnni_a[i][j][0][0]);
+  #ifndef USE_TBB
+        }
       }
-    }
-#else
-    });
-#endif
+  #else
+      });
+  #endif
 
-#ifdef USE_TBB
-    tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&tpps_main, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
-      long i = (idx / intermediate_blocks);
-      long j = (idx % intermediate_blocks);
-#else
-    #pragma omp parallel for collapse(2)
-    for(int i = 0; i < embedding_blocks; i++){
-      for(int j = 0; j < intermediate_blocks; j++){
-#endif
-        tpps_main.o_vnni_tpp(&t_Wd_a[i][j][0][0], &t_Wd_vnni_a[i][j][0][0]);
-#ifndef USE_TBB
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, embedding_blocks*intermediate_blocks, [&o_vnni_tpp, &t_Wd_a, &t_Wd_vnni_a, embedding_blocks, intermediate_blocks](long idx) {
+        long i = (idx / intermediate_blocks);
+        long j = (idx % intermediate_blocks);
+  #else
+      #pragma omp parallel for collapse(2)
+      for(int i = 0; i < embedding_blocks; i++){
+        for(int j = 0; j < intermediate_blocks; j++){
+  #endif
+          o_vnni_tpp(&t_Wd_a[i][j][0][0], &t_Wd_vnni_a[i][j][0][0]);
+  #ifndef USE_TBB
+        }
       }
-    }
-#else
-    });
-#endif
+  #else
+      });
+  #endif
 
-    // copy t_Wg_vnni contents t_Wg[l]
-    t_Wg[l].swap(t_Wg_vnni);
-    t_Wu[l].swap(t_Wu_vnni);
-    t_Wd[l].swap(t_Wd_vnni);
+      // copy t_Wg_vnni contents t_Wg[l]
+      t_Wg[l*num_expert + e].swap(t_Wg_vnni);
+      t_Wu[l*num_expert + e].swap(t_Wu_vnni);
+      t_Wd[l*num_expert + e].swap(t_Wd_vnni);
+    }
   }
 }
 
@@ -523,7 +527,7 @@ void ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
                             bool gate_flag, bool b_vnni, float scale=0.1) {
 
 
-  auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+  // auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
 
   auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
   auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
@@ -714,6 +718,17 @@ void ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
   // return ffn_time;
 }
 
+// Read Processor ID using inline assembly
+uint64_t read_processor_id() {
+#if defined(__x86_64__) || defined(_M_X64)
+    uint64_t rpid;
+    __asm__ volatile ("rdpid %0" : "=r"(rpid));
+    return rpid;
+#else
+    // Fallback for non-x86 architectures
+    return 0;
+#endif
+}
 
 template<typename T>
 void ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out, 
@@ -727,6 +742,7 @@ void ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
                             bool gate_flag, bool b_vnni, float scale=0.1) {
 
   // auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+  // tbb::concurrent_vector<std::string> print_list {};
 
   // std::cout << "Running with flat layout: \n";
   auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
@@ -749,7 +765,6 @@ void ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
   gate_up = (embedding_dim > intermediate_dim)? true : false;
 
   if(gate_flag && gate_up){
-      
 #ifdef USE_TBB
       tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE)*(intermediate_blocks), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q]
       (long idx) {
@@ -764,6 +779,8 @@ void ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
         long i = (idx / (intermediate_blocks));
         long k = (idx % (intermediate_blocks));
 #endif
+          // printf("Core %d is processing idx=%d, i=%d, k=%d \n", read_processor_id(), idx, i, k);
+          // print_list.push_back("Core " + std::to_string(read_processor_id()) + " is processing idx=" + std::to_string(idx) + ", i=" + std::to_string(i) + ", k=" + std::to_string(k) + "\n");
           LIBXSMM_ALIGNED(float tmp_g[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
           LIBXSMM_ALIGNED(float tmp_u[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
           tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[k][0][0][0], &tmp_g[0], embedding_blocks);
@@ -776,6 +793,8 @@ void ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out,
 #else
       });
 #endif
+      // for(auto const& str : print_list)
+      //   std::cout << str;
 
       if(token_len_re != 0){   //edge case or decode case
 #ifdef USE_TBB
@@ -957,6 +976,7 @@ void flops_and_bandwidth(
   long intermediate_dim,
   long num_iter,
   long num_layer,
+  long num_expert,
   bool gate_flag) {
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
@@ -984,24 +1004,26 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
                             std::vector<std::unique_ptr<T[]>>& t_Wu,
                             std::vector<std::unique_ptr<T[]>>& t_Wd,
                             long token_len, long embedding_dim, long intermediate_dim, 
-                            bool gate_flag, bool b_vnni, float scale=0.1, long num_layer=1) {
+                            bool gate_flag, bool b_vnni, float scale=0.1, long num_layer=1, long num_expert=1) {
 
   std::cout<< "Starting Correctness Check" << "\n";                       
   FFNTPPs<T> tpps_main_flat, tpps_edge_flat;
   FFNTPPs<T> tpps_main_blocked, tpps_edge_blocked;
 
-  std::vector<std::unique_ptr<T[]>> t2_Out(num_layer), t2_Wg(num_layer), t2_Wu(num_layer), t2_Wd(num_layer);
+  std::vector<std::unique_ptr<T[]>> t2_Out(num_layer), t2_Wg(num_layer*num_expert), t2_Wu(num_layer*num_expert), t2_Wd(num_layer*num_expert);
   for(int l = 0; l < num_layer; l++){
     t2_Out[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);
-    t2_Wg[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
-    t2_Wu[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
-    t2_Wd[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim*embedding_dim]);
+    for(int e = 0; e < num_expert; e++){
+      t2_Wg[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
+      t2_Wu[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
+      t2_Wd[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim*embedding_dim]);
 
-    std::memcpy(t2_Wg[l].get(), t_Wg[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
-    std::memcpy(t2_Wu[l].get(), t_Wu[l].get(), sizeof(T)*embedding_dim*intermediate_dim);
-    std::memcpy(t2_Wd[l].get(), t_Wd[l].get(), sizeof(T)*intermediate_dim*embedding_dim);
+      std::memcpy(t2_Wg[l*num_expert + e].get(), t_Wg[l*num_expert + e].get(), sizeof(T)*embedding_dim*intermediate_dim);
+      std::memcpy(t2_Wu[l*num_expert + e].get(), t_Wu[l*num_expert + e].get(), sizeof(T)*embedding_dim*intermediate_dim);
+      std::memcpy(t2_Wd[l*num_expert + e].get(), t_Wd[l*num_expert + e].get(), sizeof(T)*intermediate_dim*embedding_dim);
+    }
   }
-  flat_to_blocked_weights<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer);
+  flat_to_blocked_weights<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
 
   if((token_len / MLP_BLOCKSIZE) != 0){      // No need to create main tpp if token_len < MLP_BLOCKSIZE
     tpps_main_flat = create_flat_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
@@ -1013,8 +1035,8 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
   }
 
   if(b_vnni && std::is_same<T, bfloat16>::value) {        // take VNNI transform when b_vnni is True
-    flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, ((token_len / MLP_BLOCKSIZE) == 0)? tpps_edge_flat: tpps_main_flat);
-    blocked_weight_vnni_transform<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, ((token_len / MLP_BLOCKSIZE) == 0)? tpps_edge_blocked: tpps_main_blocked);
+    flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
+    blocked_weight_vnni_transform<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
   }
 
   ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], tpps_main_flat, tpps_edge_flat, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
@@ -1065,12 +1087,13 @@ int main(int argc, char* argv[]) {
   long num_iter = std::stoi(argv[6]);
   long embedding_dim = std::stoi(argv[7]);
   long intermediate_dim = std::stoi(argv[8]);
-  bool gate_flag = std::stoi(argv[9]);
-  bool correctness_check = std::stoi(argv[10]);
+  long num_expert = std::stoi(argv[9]);
+  bool gate_flag = std::stoi(argv[10]);
+  bool correctness_check = std::stoi(argv[11]);
 
-  std::vector<std::unique_ptr<T[]>> t_In(num_layer), t_Out(num_layer), t_Wg(num_layer), t_Wu(num_layer), t_Wd(num_layer);
+  std::vector<std::unique_ptr<T[]>> t_In(num_layer), t_Out(num_layer), t_Wg(num_layer*num_expert), t_Wu(num_layer*num_expert), t_Wd(num_layer*num_expert);
   activation_allocate_and_initialize<T>(t_Out, t_In, token_len, embedding_dim, intermediate_dim, num_layer);
-  flat_weight_allocate_and_initialize<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer);
+  flat_weight_allocate_and_initialize<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
 
   if(correctness_check){
     correctness_checking(t_Out, t_In, t_Wg, t_Wu, t_Wd, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
@@ -1081,7 +1104,7 @@ int main(int argc, char* argv[]) {
   if(blocked){
     std::cout << "Running with blocked weight layout \n";
     FFNTPPs<T> tpps_main, tpps_edge;
-    flat_to_blocked_weights<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer);
+    flat_to_blocked_weights<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
 
     if((token_len / MLP_BLOCKSIZE) != 0)      // No need to create main tpp if token_len < MLP_BLOCKSIZE
       tpps_main = create_blocked_ffn_tpps<T>(MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
@@ -1089,7 +1112,7 @@ int main(int argc, char* argv[]) {
       tpps_edge = create_blocked_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 
     if(b_vnni && std::is_same<T, bfloat16>::value) {        // take VNNI transform when b_vnni is True
-      blocked_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, ((token_len / MLP_BLOCKSIZE) == 0)? tpps_edge: tpps_main);
+      blocked_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
     }
 
     // Warm up
@@ -1118,7 +1141,7 @@ int main(int argc, char* argv[]) {
       tpps_edge = create_flat_ffn_tpps<T>(token_len % MLP_BLOCKSIZE, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 
     if(b_vnni && std::is_same<T, bfloat16>::value) {        // take VNNI transform when b_vnni is True
-      flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, ((token_len / MLP_BLOCKSIZE) == 0)? tpps_edge: tpps_main);
+      flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
     }
 
     // Warm up
@@ -1140,8 +1163,8 @@ int main(int argc, char* argv[]) {
   }
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
-  printf("Total Time taken: %0.2f s \n", time / ((double)1e6));
-  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, gate_flag);
+  printf("Total Compute Time taken: %0.2f s \n", time / ((double)1e6));
+  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, num_expert, gate_flag);
 
   return 0;
 }
