@@ -9,6 +9,7 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <random>
 
 // #include <ATen/record_function.h>
 // #include <torch/csrc/autograd/VariableTypeUtils.h>
@@ -82,22 +83,30 @@ void activation_allocate_and_initialize(std::vector<std::unique_ptr<T[]>>& t_Out
     t_In[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);   // allocate an dynamic array at 64 bit boundary and make unique pointer 
     t_Out[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);
 
+#ifdef USE_TBB
+    tbb::parallel_for(0L, token_len, [&](long i) {
+#else
+    #pragma omp parallel for
     for (int i = 0; i < token_len; ++i) {
-      float t_In_tmp[embedding_dim], t_Out_tmp[embedding_dim];
+#endif
+      std::vector<float> t_In_tmp(embedding_dim), t_Out_tmp(embedding_dim);
+      std::random_device rd;
+      std::mt19937 gen(rd());
+      std::uniform_real_distribution<float> dist(0.0f, 0.9f);
 
-      #pragma omp parallel
-      {
-        int j;
-        unsigned int myseed = omp_get_thread_num();
-        #pragma omp for
-        for (j = 0; j < embedding_dim; j++){
-          t_In_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-          t_Out_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-        }
-      }
-      downconvert_embed_tpp(t_In_tmp, &t_In[l][i*embedding_dim]);
-      downconvert_embed_tpp(t_Out_tmp, &t_Out[l][i*embedding_dim]);
+      std::generate(t_In_tmp.begin(), t_In_tmp.end(), 
+            [&]() { return dist(gen); });
+      std::generate(t_Out_tmp.begin(), t_Out_tmp.end(), 
+            [&]() { return dist(gen); });
+
+      downconvert_embed_tpp(t_In_tmp.data(), &t_In[l][i*embedding_dim]);
+      downconvert_embed_tpp(t_Out_tmp.data(), &t_Out[l][i*embedding_dim]);
+
+#ifndef USE_TBB
     }
+#else
+    });
+#endif
   }
 }
 
@@ -173,35 +182,50 @@ void flat_weight_allocate_and_initialize(std::vector<std::unique_ptr<T[]>>& t_Wg
       t_Wu[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim * intermediate_dim]);
       t_Wd[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim * embedding_dim]);
 
+#ifdef USE_TBB
+      tbb::parallel_for(0L, intermediate_dim, [&](long i) {
+#else
+      #pragma omp parallel for
       for(int i=0; i < intermediate_dim; i++){
-        float t_Wd_tmp[embedding_dim];
-        #pragma omp parallel
-        {
-          int j;
-          unsigned int myseed = omp_get_thread_num();
-          #pragma omp for
-          for (j = 0; j < embedding_dim; j++){
-            t_Wd_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-          }
-        }
-        downconvert_embed_tpp(t_Wd_tmp, &t_Wd[l*num_expert + e][i*embedding_dim]);
+#endif
+        std::vector<float> t_Wd_tmp(embedding_dim);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<float> dist(0.0f, 0.9f);
+
+        std::generate(t_Wd_tmp.begin(), t_Wd_tmp.end(), 
+              [&]() { return dist(gen); });
+
+        downconvert_embed_tpp(t_Wd_tmp.data(), &t_Wd[l*num_expert + e][i*embedding_dim]);
+#ifndef USE_TBB
       }
-      
+#else
+      });
+#endif
+
+#ifdef USE_TBB
+      tbb::parallel_for(0L, embedding_dim, [&](long i) {
+#else
+      #pragma omp parallel for
       for (int i = 0; i < embedding_dim; ++i) {
-        float t_Wg_tmp[intermediate_dim], t_Wu_tmp[intermediate_dim];
-        #pragma omp parallel
-        {
-          int j;
-          unsigned int myseed = omp_get_thread_num();
-          #pragma omp for
-          for (j = 0; j < intermediate_dim; j++){
-            t_Wg_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-            t_Wu_tmp[j] = static_cast<float>(rand_r(&myseed) % 10)*0.1; /// RAND_MAX;
-          }
-        }
-        downconvert_inter_tpp(t_Wg_tmp, &t_Wg[l*num_expert + e][i*intermediate_dim]);
-        downconvert_inter_tpp(t_Wu_tmp, &t_Wu[l*num_expert + e][i*intermediate_dim]);
+#endif
+        std::vector<float> t_Wg_tmp(intermediate_dim), t_Wu_tmp(intermediate_dim);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_real_distribution<float> dist(0.0f, 0.9f);
+
+        std::generate(t_Wg_tmp.begin(), t_Wg_tmp.end(), 
+              [&]() { return dist(gen); });
+        std::generate(t_Wu_tmp.begin(), t_Wu_tmp.end(), 
+              [&]() { return dist(gen); });
+
+        downconvert_inter_tpp(t_Wg_tmp.data(), &t_Wg[l*num_expert + e][i*intermediate_dim]);
+        downconvert_inter_tpp(t_Wu_tmp.data(), &t_Wu[l*num_expert + e][i*intermediate_dim]);
+#ifndef USE_TBB
       }
+#else
+      });
+#endif
     }
   }
 }
@@ -1090,8 +1114,12 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
   std::vector<std::unique_ptr<T[]>> t2_Out(num_layer), t2_Wg(num_layer*num_expert), t2_Wu(num_layer*num_expert), t2_Wd(num_layer*num_expert);
   for(int l = 0; l < num_layer; l++){
     t2_Out[l] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[token_len * embedding_dim]);
+#ifdef USE_TBB
+    tbb::parallel_for(0L, num_expert, [&](long e) {
+#else
     #pragma omp parallel for
-    for(int e = 0; e < num_expert; e++){
+    for(long e = 0; e < num_expert; e++){
+#endif
       t2_Wg[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
       t2_Wu[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[embedding_dim*intermediate_dim]);
       t2_Wd[l*num_expert + e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[intermediate_dim*embedding_dim]);
@@ -1099,7 +1127,11 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
       std::memcpy(t2_Wg[l*num_expert + e].get(), t_Wg[l*num_expert + e].get(), sizeof(T)*embedding_dim*intermediate_dim);
       std::memcpy(t2_Wu[l*num_expert + e].get(), t_Wu[l*num_expert + e].get(), sizeof(T)*embedding_dim*intermediate_dim);
       std::memcpy(t2_Wd[l*num_expert + e].get(), t_Wd[l*num_expert + e].get(), sizeof(T)*intermediate_dim*embedding_dim);
+#ifndef USE_TBB
     }
+#else
+    });
+#endif
   }
   flat_to_blocked_weights<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
 
