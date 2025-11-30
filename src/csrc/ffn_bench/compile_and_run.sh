@@ -25,6 +25,7 @@ if [ "$1" == "--help" ]; then
   echo "embedding_dim: (default: 4096)"
   echo "intermediate_dim: (default: 11008)"
   echo "num_experts: (default: 256)"
+  echo "num_experts_per_token: (default: 8)"
   echo "gate_flag: (default: 1, gate)"
   echo "correctness_check: (default: 1, check correctness)"
   exit 0
@@ -42,39 +43,40 @@ num_iter=${9:-1}
 embedding_dim=${10:-7168}
 intermediate_dim=${11:-2048}
 num_expert=${12:-256}
-gate_flag=${13:-1}
-correctness_check=${14:-0}
+num_experts_per_token=${13:-8}
+gate_flag=${14:-1}
+correctness_check=${15:-0}
 
 
 # echo "Running $llm model"
 if [ "$llm" == "deepseek-r1" ]; then
-  embedding_dim=7168; intermediate_dim=2048; gate_flag=1 num_expert=1
+  embedding_dim=7168; intermediate_dim=2048; gate_flag=1 num_expert=256 num_experts_per_token=8
 elif [ "$llm" == "qwen3-235B-A22B" ]; then
-  embedding_dim=4096; intermediate_dim=1536; gate_flag=1 num_expert=1
+  embedding_dim=4096; intermediate_dim=1536; gate_flag=1 num_expert=128 num_experts_per_token=8
 elif [ "$llm" == "qwen3-30B-A3B" ]; then
-  embedding_dim=2048; intermediate_dim=768; gate_flag=1 num_expert=1
+  embedding_dim=2048; intermediate_dim=768; gate_flag=1 num_expert=128 num_experts_per_token=8
 elif [ "$llm" == "llama-7b" ]; then
-  embedding_dim=4096; intermediate_dim=11008; gate_flag=1 num_expert=1
+  embedding_dim=4096; intermediate_dim=11008; gate_flag=1 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "llama-3.1-8B" ]; then
-  embedding_dim=4096; intermediate_dim=14336; gate_flag=1 num_expert=1
+  embedding_dim=4096; intermediate_dim=14336; gate_flag=1 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "llama-70b" ]; then
-  embedding_dim=8192; intermediate_dim=28672; gate_flag=1 num_expert=1
+  embedding_dim=8192; intermediate_dim=28672; gate_flag=1 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "llama-3.2-3B" ]; then
-  embedding_dim=3072; intermediate_dim=8192; gate_flag=1 num_expert=1
+  embedding_dim=3072; intermediate_dim=8192; gate_flag=1 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "llama-3.2-1B" ]; then
-  embedding_dim=2048; intermediate_dim=8192; gate_flag=1 num_expert=1
+  embedding_dim=2048; intermediate_dim=8192; gate_flag=1 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "gpt2" ]; then
-  embedding_dim=768; intermediate_dim=3072; gate_flag=0 num_expert=1
+  embedding_dim=768; intermediate_dim=3072; gate_flag=0 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "gpt3-13b" ]; then
-  embedding_dim=5120; intermediate_dim=20480; gate_flag=0 num_expert=1
+  embedding_dim=5120; intermediate_dim=20480; gate_flag=0 num_expert=1 num_experts_per_token=1
 elif [ "$llm" == "gpt3-175b" ]; then
-  embedding_dim=12288; intermediate_dim=49152; gate_flag=0 num_expert=1
+  embedding_dim=12288; intermediate_dim=49152; gate_flag=0 num_expert=1 num_experts_per_token=1
 else
   echo "Custom model: $llm, please manually set the parameters"
 fi
 
 # print all the parameters in one line
-echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, num_expert: $num_expert, gate_flag: $gate_flag", "correctness_check: $correctness_check"
+echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, num_expert: $num_expert, num_experts_per_token: $num_experts_per_token  gate_flag: $gate_flag", "correctness_check: $correctness_check"
 
 
 # echo "Compiling FFN benchmark code"
@@ -125,20 +127,20 @@ PERF_CMD+="cpu/event=0x27,umask=0x04,name=CORE_SNOOP_RESPONSE.S_HIT_FSE/ "
 PERF_CMD=""
 if [ "$hyper" != "1" ]; then
     threads=$cpu_count
-    # threads=58
+    # threads=64
     echo "CPU count: $cpu_count, threads: $threads"
     if [ "$USE_TBB" == "1" ]; then
-      OMP_NUM_THREADS=$threads numactl -m 0 -N 0 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $gate_flag $correctness_check
+      OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     else
-      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $gate_flag $correctness_check
+      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     fi
 else
     threads=$((cpu_count * 2))
     echo "CPU count: $cpu_count, threads: $threads"
     if [ "$USE_TBB" == "1" ]; then
-      OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $gate_flag $correctness_check
+      OMP_NUM_THREADS=$threads numactl -m 1 -N 1 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     else
-      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 0 -N 0 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $gate_flag $correctness_check
+      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,0,0 OMP_NUM_THREADS=$threads numactl -m 1 -N 1 ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     fi
 fi
 

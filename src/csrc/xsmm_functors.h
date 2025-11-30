@@ -1381,6 +1381,52 @@ class MulTPP {
   BinaryTPP kernel;
 };
 
+template <typename Tin, typename Tout = Tin, typename Tin2 = Tin>
+class Mul2TPP {
+ public:
+  Mul2TPP() {}
+  Mul2TPP(int N) : Mul2TPP(1, N) {}
+  Mul2TPP(int rows, int cols) : Mul2TPP(rows, cols, cols, cols) {}
+  Mul2TPP(int rows, int cols, int ldi, int ldo)
+      : Mul2TPP(rows, cols, ldi, ldi, ldo) {}
+  Mul2TPP(int rows, int cols, int ldi0, int ldi1, int ldo)
+      : rows(rows),
+        cols(cols),
+        ldi0(ldi0),
+        ldi1(ldi1),
+        ldo(ldo),
+        kernel(
+            rows,
+            cols,
+            ldi0,
+            ldi1,
+            ldo,
+            XsmmDtype<Tin>(),
+            XsmmDtype<Tin2>(),
+            XsmmDtype<Tout>(),
+            LIBXSMM_DATATYPE_F32,
+            LIBXSMM_MELTW_FLAG_BINARY_NONE,
+            LIBXSMM_MELTW_TYPE_BINARY_MUL) {}
+  void operator()(Tin* in0, Tin2* in1, Tout* out) {
+    kernel((void*)in0, (void*)in1, (void*)out);
+  }
+  void ref(Tin* in0, Tin2* in1, Tout* out) {
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        out[r * ldo + c] = (float)in0[r * ldi0 + c] * (float)in1[r * ldi1 + c];
+      }
+    }
+  }
+
+ private:
+  int rows = 0;
+  int cols = 0;
+  int ldi0;
+  int ldi1;
+  int ldo;
+  BinaryTPP kernel;
+};
+
 template <typename Tin>
 class GradBiasTPP {
  public:
