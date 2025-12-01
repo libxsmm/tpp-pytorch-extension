@@ -119,10 +119,13 @@ void moe_split_layer_input(std::unique_ptr<T[]>& t_In,
   std::vector<std::vector<long>>& token_to_expert,
   long token_len, long embedding_dim, long num_expert, long num_expert_per_token) {
 
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_int_distribution<long> dist(0, num_expert - 1);
   for (long t = 0; t < token_len; t++){
     // randomly select num_experts_per_token from num_experts for each token
     while (token_to_expert[t].size() < num_expert_per_token) {
-      long rand_expert = rand() % num_expert;
+      long rand_expert = dist(gen);
       if (std::find(token_to_expert[t].begin(), token_to_expert[t].end(), rand_expert) == token_to_expert[t].end()) {
         token_to_expert[t].push_back(rand_expert);
         expert_token_counts[rand_expert]++;
@@ -152,17 +155,22 @@ void moe_combine_layer_output(std::unique_ptr<T[]>& t_Out,
   std::vector<std::vector<long>>& token_to_expert,
   long token_len, long embedding_dim, long num_expert) {
 
-  auto add_embed_tpp = AddTPP<T, T>(embedding_dim);
+  auto add_embed_tpp = AddTPP<T, float, float>(embedding_dim);
+  auto convert_embed_tpp = ConvertTPP<float, T>(embedding_dim);
   std::vector<long> expert_offsets(num_expert, 0);
+
   for (long t = 0; t < token_len; t++){
+    std::vector<float> t_Out_float(embedding_dim, 0.0f);
     for (auto& expert : token_to_expert[t]) {
       // accumulate outputs from different experts
-      add_embed_tpp(&t_Out[t * embedding_dim],
-                    &t_split_Out[expert][expert_offsets[expert]],
-                    &t_Out[t * embedding_dim]);
+      add_embed_tpp(&t_split_Out[expert][expert_offsets[expert]],
+                    t_Out_float.data(),
+                    t_Out_float.data());
       // move expert output pointer
       expert_offsets[expert] += embedding_dim;
     }
+    // copy accumulated output to final output buffer
+    convert_embed_tpp(t_Out_float.data(), &t_Out[t * embedding_dim]);
   }
 }
 
@@ -1078,13 +1086,14 @@ void flops_and_bandwidth(
   long num_iter,
   long num_layer,
   long num_expert,
+  long num_expert_per_token,
   bool gate_flag) {
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
 
-  auto flops = (double)4.0 * token_len * embedding_dim * intermediate_dim;
+  auto flops = (double)4.0 * token_len * embedding_dim * intermediate_dim * num_expert_per_token;
   if (gate_flag)
-    flops += ((double)2.0 * token_len * embedding_dim *intermediate_dim) + (token_len * intermediate_dim);
+    flops += (((double)2.0 * token_len * embedding_dim *intermediate_dim) + (token_len * intermediate_dim)) * num_expert_per_token;
   flops = flops / ((double)1e9 * time_ms);
 
   auto bw = ((double)2.0 * token_len * embedding_dim) + ((double) token_len * intermediate_dim) + ((double)2.0 * embedding_dim * intermediate_dim);
@@ -1105,7 +1114,7 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
                             std::vector<std::unique_ptr<T[]>>& t_Wu,
                             std::vector<std::unique_ptr<T[]>>& t_Wd,
                             long token_len, long embedding_dim, long intermediate_dim, 
-                            bool gate_flag, bool b_vnni, float scale=0.1, long num_layer=1, long num_expert=1) {
+                            bool gate_flag, bool b_vnni, long num_expert, long num_expert_per_token, long num_layer=1, float scale=0.1) {
 
   std::cout<< "Starting Correctness Check" << "\n";                      
   std::vector<FFNTPPs<T>> ffn_flat_tpp_set = create_ffn_tpp_set<T>(0, embedding_dim, intermediate_dim, gate_flag, b_vnni);
@@ -1140,8 +1149,70 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
     blocked_weight_vnni_transform<T>(t2_Wg, t2_Wu, t2_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
   }
 
-  ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
-  ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+  if (num_expert > 1) {
+    std::vector<std::unique_ptr<T[]>> t_split_In(num_expert);
+    std::vector<std::unique_ptr<T[]>> t_split_Out(num_expert);
+    std::vector<std::unique_ptr<T[]>> t2_split_Out(num_expert);
+    std::vector<long> expert_token_counts(num_expert, 0);
+    std::vector<std::vector<long>> token_to_expert(token_len);
+
+    for(int l = 0; l < num_layer; l++) {
+      // Instead of clearing and resizing, just reset the unique_ptrs
+      for (auto& ptr : t_split_In) ptr.reset();
+      for (auto& ptr : t_split_Out) ptr.reset();
+      for (auto& count : expert_token_counts) count = 0;
+      for (auto& vec : token_to_expert) vec.clear();
+      if (l == 0){
+        moe_split_layer_input<T>(t_In[0],
+                    t_split_In,
+                    t_split_Out,
+                    expert_token_counts,
+                    token_to_expert,
+                    token_len, embedding_dim, num_expert, num_expert_per_token);
+      } else {
+        moe_split_layer_input<T>(t_Out[l-1],
+                    t_split_In,
+                    t_split_Out,
+                    expert_token_counts,
+                    token_to_expert,
+                    token_len, embedding_dim, num_expert, num_expert_per_token);
+      }
+
+      // make another copy of t_split_Out for blocked layout
+      for(long e = 0; e < num_expert; e++){
+        t2_split_Out[e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[expert_token_counts[e] * embedding_dim]);
+        std::memcpy(t2_split_Out[e].get(), t_split_Out[e].get(), sizeof(T)*expert_token_counts[e]*embedding_dim);
+      }
+
+  #ifdef USE_TBB
+      tbb::parallel_for(0L, num_expert, [&ffn_flat_tpp_set, &ffn_blocked_tpp_set, &t_split_Out, &t2_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &t2_Wg, &t2_Wu, &t2_Wd, &expert_token_counts, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni]
+      (long e) {
+  #else
+      for(long e = 0; e < num_expert; e++){          // no omp parallel for here to avoid too many threads
+  #endif
+        if (expert_token_counts[e] != 0){   // some tokens for this expert
+          ffn_compute_flat<T>(t_split_Out[e], t_split_In[e], t_Wg[0*num_expert + e], t_Wu[0*num_expert + e], t_Wd[0*num_expert + e], ffn_flat_tpp_set[0], ffn_flat_tpp_set[expert_token_counts[e] % MLP_BLOCKSIZE], expert_token_counts[e], embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          ffn_compute_blocked<T>(t2_split_Out[e], t_split_In[e], t2_Wg[0*num_expert + e], t2_Wu[0*num_expert + e], t2_Wd[0*num_expert + e], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[expert_token_counts[e] % MLP_BLOCKSIZE], expert_token_counts[e], embedding_dim, intermediate_dim, gate_flag, b_vnni);
+        }
+  #ifndef USE_TBB
+      }
+  #else
+      });
+  #endif
+      moe_combine_layer_output<T>(t_Out[l], t_split_Out, token_to_expert, token_len, embedding_dim, num_expert);
+      moe_combine_layer_output<T>(t2_Out[l], t2_split_Out, token_to_expert, token_len, embedding_dim, num_expert);
+    }
+  } else {
+    for (long l=0; l < num_layer; l++){
+      if (l == 0){
+        ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+      } else {
+        ffn_compute_flat<T>(t_Out[l], t_Out[l-1], t_Wg[0], t_Wu[0], t_Wd[0], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        ffn_compute_blocked<T>(t2_Out[l], t2_Out[l-1], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+      }
+    }
+  }
 
   auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
   for(int l=0; l < num_layer; l++){
@@ -1201,7 +1272,7 @@ int main(int argc, char* argv[]) {
   std::vector<FFNTPPs<T>> ffn_tpp_set = create_ffn_tpp_set<T>(blocked, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 
   if(correctness_check){
-    correctness_checking(t_Out, t_In, t_Wg, t_Wu, t_Wd, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+    correctness_checking(t_Out, t_In, t_Wg, t_Wu, t_Wd, token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, num_expert, num_expert_per_token, num_layer);
   }
 
   // Timing
@@ -1220,19 +1291,32 @@ int main(int argc, char* argv[]) {
       std::vector<long> expert_token_counts(num_expert, 0);
       std::vector<std::vector<long>> token_to_expert(token_len);
       auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
-      for(int i = 0; i < num_iter; i++) {
-        for(int l = 1; l < num_layer; l++) {
+      auto cold_start_time = std::chrono::high_resolution_clock::now();
+      auto cold_end_time = std::chrono::high_resolution_clock::now();
+      for(int i = 0; i < num_iter + 1; i++) {
+        if (i == 0)
+          cold_start_time = std::chrono::high_resolution_clock::now(); // Start timing for cold run
+        for(int l = 0; l < num_layer; l++) {
           // Instead of clearing and resizing, just reset the unique_ptrs
           for (auto& ptr : t_split_In) ptr.reset();
           for (auto& ptr : t_split_Out) ptr.reset();
           for (auto& count : expert_token_counts) count = 0;
           for (auto& vec : token_to_expert) vec.clear();
-          moe_split_layer_input<T>(t_In[l-1],
+          if (l == 0) {
+            moe_split_layer_input<T>(t_In[0],
                       t_split_In,
                       t_split_Out,
                       expert_token_counts,
                       token_to_expert,
                       token_len, embedding_dim, num_expert, num_expert_per_token);
+          } else {
+            moe_split_layer_input<T>(t_Out[l-1],
+                        t_split_In,
+                        t_split_Out,
+                        expert_token_counts,
+                        token_to_expert,
+                        token_len, embedding_dim, num_expert, num_expert_per_token);
+          }
 
 #ifdef USE_TBB
           tbb::parallel_for(0L, num_expert, [&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni]
@@ -1257,23 +1341,30 @@ int main(int argc, char* argv[]) {
 #endif
           moe_combine_layer_output<T>(t_Out[l], t_split_Out, token_to_expert, token_len, embedding_dim, num_expert);
         }
+        if (i == 0)
+          cold_end_time = std::chrono::high_resolution_clock::now(); // End timing for cold run
       }
       auto end_time = std::chrono::high_resolution_clock::now(); // End timing
       time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
-
+      auto cold_time = std::chrono::duration_cast<std::chrono::microseconds>(cold_end_time - cold_start_time).count();
+      time -= cold_time; // exclude cold run time
     } else {
 
       // Warm up
-      ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-      for(int l = 1; l < num_layer; l++) {
-        ffn_compute_blocked<T>(t_Out[l], t_In[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+      for(int l = 0; l < num_layer; l++) {
+        if(l==0)
+          ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+        else
+          ffn_compute_blocked<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
       }
       
       auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for(int i = 0; i < num_iter; i++) {
-        ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-        for(int l = 1; l < num_layer; l++) {
-          ffn_compute_blocked<T>(t_Out[l], t_In[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+        for(int l = 0; l < num_layer; l++) {
+          if (l==0)
+            ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          else
+            ffn_compute_blocked<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
         }
       }
 
@@ -1286,27 +1377,98 @@ int main(int argc, char* argv[]) {
       flat_weight_vnni_transform<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
     }
 
-    // Warm up
-    ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-    for(int l = 1; l < num_layer; l++) {
-      ffn_compute_flat<T>(t_Out[l], t_In[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-    }
-    
-    auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
-    for(int i = 0; i < num_iter; i++) {
-      ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-      for(int l = 1; l < num_layer; l++) {
-        ffn_compute_flat<T>(t_Out[l], t_In[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-      }
-    }
+    if (num_expert > 1) {  // MoE FFN
+      std::cout << "Number of Experts: " << num_expert << "\n";
+      std::cout << "Number of Experts per token: " << num_expert_per_token << "\n";
+      std::vector<std::unique_ptr<T[]>> t_split_In(num_expert);
+      std::vector<std::unique_ptr<T[]>> t_split_Out(num_expert);
+      std::vector<long> expert_token_counts(num_expert, 0);
+      std::vector<std::vector<long>> token_to_expert(token_len);
+      auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+      auto cold_start_time = std::chrono::high_resolution_clock::now();
+      auto cold_end_time = std::chrono::high_resolution_clock::now();
+      for(int i = 0; i < num_iter + 1; i++) {
+        if (i == 0)
+          cold_start_time = std::chrono::high_resolution_clock::now(); // Start timing for cold run
+        for(int l = 0; l < num_layer; l++) {
+          // Instead of clearing and resizing, just reset the unique_ptrs
+          for (auto& ptr : t_split_In) ptr.reset();
+          for (auto& ptr : t_split_Out) ptr.reset();
+          for (auto& count : expert_token_counts) count = 0;
+          for (auto& vec : token_to_expert) vec.clear();
+          if (l == 0) {
+            moe_split_layer_input<T>(t_In[0],
+                      t_split_In,
+                      t_split_Out,
+                      expert_token_counts,
+                      token_to_expert,
+                      token_len, embedding_dim, num_expert, num_expert_per_token);
+          } else {
+            moe_split_layer_input<T>(t_Out[l-1],
+                        t_split_In,
+                        t_split_Out,
+                        expert_token_counts,
+                        token_to_expert,
+                        token_len, embedding_dim, num_expert, num_expert_per_token);
+          }
 
-    auto end_time = std::chrono::high_resolution_clock::now(); // End timing
-    time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+#ifdef USE_TBB
+          tbb::parallel_for(0L, num_expert, [&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni]
+          (long e) {
+#else
+          for(long e = 0; e < num_expert; e++){
+#endif
+            if (expert_token_counts[e] != 0){   // some tokens for this expert
+// #ifdef USE_TBB
+//               tbb::task_arena nested; // Limit to 8 threads per expert
+//               nested.execute([&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni, e]() {
+// #endif
+                ffn_compute_flat<T>(t_split_Out[e], t_split_In[e], t_Wg[l*num_expert + e], t_Wu[l*num_expert + e], t_Wd[l*num_expert + e], ffn_tpp_set[0], ffn_tpp_set[expert_token_counts[e] % MLP_BLOCKSIZE], expert_token_counts[e], embedding_dim, intermediate_dim, gate_flag, b_vnni);
+// #ifdef USE_TBB
+//               });
+// #endif
+            }
+#ifndef USE_TBB
+          }
+#else
+          });
+#endif
+          moe_combine_layer_output<T>(t_Out[l], t_split_Out, token_to_expert, token_len, embedding_dim, num_expert);
+        }
+        if (i == 0)
+          cold_end_time = std::chrono::high_resolution_clock::now(); // End timing for cold run
+      }
+      auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+      time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+      auto cold_time = std::chrono::duration_cast<std::chrono::microseconds>(cold_end_time - cold_start_time).count();
+      time -= cold_time; // exclude cold run time
+    } else {
+      // Warm up
+      for(int l = 0; l < num_layer; l++) {
+        if (l==0)
+          ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+        else
+          ffn_compute_flat<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+      }
+      
+      auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+      for(int i = 0; i < num_iter; i++) {
+        for(int l = 0; l < num_layer; l++) {
+          if (l==0)
+            ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          else
+            ffn_compute_flat<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+        }
+      }
+
+      auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+      time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
+    }
   }
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
   printf("Total Compute Time taken: %0.2f s \n", time / ((double)1e6));
-  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, num_expert, gate_flag);
+  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, num_expert, num_expert_per_token, gate_flag);
 
   return 0;
 }
