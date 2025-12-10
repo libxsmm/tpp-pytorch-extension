@@ -121,18 +121,56 @@ void moe_split_layer_input(std::unique_ptr<T[]>& t_In,
 
   std::random_device rd;
   std::mt19937 gen(rd());
+  
+  // // Zipf's Law distribution
+  // std::vector<double> probs(num_expert, 0.0);
+  // for (int k=1; k <= num_expert; k++) {
+  //   probs[k-1] = 1.0 / std::pow((double) k, 1.5);
+  // } 
+  // auto sum = std::accumulate(probs.begin(), probs.end()-1, 0.0);
+  // for (auto& p : probs) {
+  //   p = p / sum;
+  // }
+  // std::discrete_distribution<int> dist(probs.begin(), probs.end());
+
   std::uniform_int_distribution<long> dist(0, num_expert - 1);
   for (long t = 0; t < token_len; t++){
     // randomly select num_experts_per_token from num_experts for each token
-    while (token_to_expert[t].size() < num_expert_per_token) {
-      long rand_expert = dist(gen);
-      if (std::find(token_to_expert[t].begin(), token_to_expert[t].end(), rand_expert) == token_to_expert[t].end()) {
-        token_to_expert[t].push_back(rand_expert);
-        expert_token_counts[rand_expert]++;
+    for (long e = 0; e < num_expert_per_token; e++) {
+      long assigned_expert;
+      bool unique = false;
+      while (!unique) {
+        assigned_expert = dist(gen);
+        if (std::find(token_to_expert[t].begin(), token_to_expert[t].end(), assigned_expert) == token_to_expert[t].end()) {
+          unique = true;
+        }
       }
+      token_to_expert[t][e] = assigned_expert;
+      expert_token_counts[assigned_expert]++;
     }
+    // while (token_to_expert[t].size() < num_expert_per_token) {
+    //   long rand_expert = dist(gen);
+    //   if (std::find(token_to_expert[t].begin(), token_to_expert[t].end(), rand_expert) == token_to_expert[t].end()) {
+    //     token_to_expert[t].push_back(rand_expert);
+    //     expert_token_counts[rand_expert]++;
+    //   }
+    }
+
+    // //round robin assignment
+    // for (long e = 0; e < num_expert_per_token; e++) {
+    //   long assigned_expert = (t*num_expert_per_token + e) % num_expert;
+    //   // token_to_expert[t].push_back(assigned_expert);
+    //   token_to_expert[t][e] = assigned_expert;
+    //   expert_token_counts[assigned_expert]++;
+    // }
   }
+
+#ifdef USE_TBB
+  tbb::parallel_for(0L, num_expert, [&](long e) {
+#else
+  #pragma omp parallel for
   for (long e = 0; e < num_expert; e++){
+#endif
     // allocate input buffer for each expert
     t_split_In[e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[expert_token_counts[e] * embedding_dim]);
     t_split_Out[e] = std::unique_ptr<T[]> (new (std::align_val_t(64)) T[expert_token_counts[e] * embedding_dim]);
@@ -146,7 +184,11 @@ void moe_split_layer_input(std::unique_ptr<T[]>& t_In,
         expert_token_index++;
       }
     }
+#ifndef USE_TBB
   }
+#else
+  });
+#endif
 }
 
 template<typename T>
@@ -1087,7 +1129,8 @@ void flops_and_bandwidth(
   long num_layer,
   long num_expert,
   long num_expert_per_token,
-  bool gate_flag) {
+  bool gate_flag,
+  double average_active_experts) {
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
 
@@ -1100,7 +1143,7 @@ void flops_and_bandwidth(
   if (gate_flag)
     bw += (intermediate_dim * embedding_dim);
 
-  bw = (bw * sizeof(T)) / ((double)1e6 * time_ms);
+  bw = ((bw * sizeof(T)) * (average_active_experts)) / ((double)1e6 * time_ms);
 
   // print time
   printf("Time taken for ffn_gemm: %0.2f ms, TFLOPS = %0.2f TF/s, Bandwidth = %0.2f GB/s \n", time_ms, flops, bw);
@@ -1277,6 +1320,7 @@ int main(int argc, char* argv[]) {
 
   // Timing
   long int time = 0;
+  double average_active_experts = 0.0; 
   if(blocked){
     std::cout << "Running with blocked weight layout \n";
     flat_to_blocked_weights<T>(t_Wg, t_Wu, t_Wd, embedding_dim, intermediate_dim, num_layer, num_expert);
@@ -1289,10 +1333,12 @@ int main(int argc, char* argv[]) {
       std::vector<std::unique_ptr<T[]>> t_split_In(num_expert);
       std::vector<std::unique_ptr<T[]>> t_split_Out(num_expert);
       std::vector<long> expert_token_counts(num_expert, 0);
-      std::vector<std::vector<long>> token_to_expert(token_len);
-      auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+      // std::vector<std::vector<long>> token_to_expert(token_len);
+      std::vector<std::vector<long>> token_to_expert(token_len, std::vector<long>(num_expert_per_token, -1));
       auto cold_start_time = std::chrono::high_resolution_clock::now();
       auto cold_end_time = std::chrono::high_resolution_clock::now();
+      long int split_time = 0, merge_time = 0;
+      auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for(int i = 0; i < num_iter + 1; i++) {
         if (i == 0)
           cold_start_time = std::chrono::high_resolution_clock::now(); // Start timing for cold run
@@ -1302,6 +1348,7 @@ int main(int argc, char* argv[]) {
           for (auto& ptr : t_split_Out) ptr.reset();
           for (auto& count : expert_token_counts) count = 0;
           for (auto& vec : token_to_expert) vec.clear();
+          // auto split_start = std::chrono::high_resolution_clock::now();
           if (l == 0) {
             moe_split_layer_input<T>(t_In[0],
                       t_split_In,
@@ -1317,29 +1364,52 @@ int main(int argc, char* argv[]) {
                         token_to_expert,
                         token_len, embedding_dim, num_expert, num_expert_per_token);
           }
+          // auto split_end =  std::chrono::high_resolution_clock::now();
+          // split_time += std::chrono::duration_cast<std::chrono::microseconds>(split_end - split_start).count();
+
+          std::vector<long> active_experts;
+          for(long e = 0; e < num_expert; e++){
+            if (expert_token_counts[e] != 0){
+              active_experts.push_back(e);
+            }
+          }
 
 #ifdef USE_TBB
-          tbb::parallel_for(0L, num_expert, [&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni]
-          (long e) {
+          // tbb::parallel_for(0L, num_expert, [&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni]
+          // (long e) {
+          tbb::parallel_for(0L, (long)active_experts.size(), [&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni, &active_experts]
+          (long idx) {
+            long e = active_experts[idx];
 #else
-          for(long e = 0; e < num_expert; e++){
+          #pragma omp parallel for schedule(dynamic)
+          for (auto& e : active_experts){
+          // for(long e = 0; e < num_expert; e++){
 #endif
-            if (expert_token_counts[e] != 0){   // some tokens for this expert
+            // if (expert_token_counts[e] != 0){   // some tokens for this expert
 // #ifdef USE_TBB
-//               tbb::task_arena nested; // Limit to 8 threads per expert
+//               tbb::task_arena nested(8); // Limit to 8 threads per expert
 //               nested.execute([&ffn_tpp_set, &t_split_Out, &t_split_In, &t_Wg, &t_Wu, &t_Wd, &expert_token_counts, l, num_expert, embedding_dim, intermediate_dim, gate_flag, b_vnni, e]() {
 // #endif
                 ffn_compute_blocked<T>(t_split_Out[e], t_split_In[e], t_Wg[l*num_expert + e], t_Wu[l*num_expert + e], t_Wd[l*num_expert + e], ffn_tpp_set[0], ffn_tpp_set[expert_token_counts[e] % MLP_BLOCKSIZE], expert_token_counts[e], embedding_dim, intermediate_dim, gate_flag, b_vnni);
 // #ifdef USE_TBB
 //               });
 // #endif
-            }
+            // }
 #ifndef USE_TBB
           }
 #else
           });
 #endif
+          // auto merge_start = std::chrono::high_resolution_clock::now();
           moe_combine_layer_output<T>(t_Out[l], t_split_Out, token_to_expert, token_len, embedding_dim, num_expert);
+          // auto merge_end =  std::chrono::high_resolution_clock::now();
+          // merge_time += std::chrono::duration_cast<std::chrono::microseconds>(merge_end - merge_start).count();
+          if (i > 0)
+            average_active_experts += active_experts.size();
+          else{
+            split_time = 0;
+            merge_time = 0;
+          }
         }
         if (i == 0)
           cold_end_time = std::chrono::high_resolution_clock::now(); // End timing for cold run
@@ -1347,7 +1417,7 @@ int main(int argc, char* argv[]) {
       auto end_time = std::chrono::high_resolution_clock::now(); // End timing
       time = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time).count();
       auto cold_time = std::chrono::duration_cast<std::chrono::microseconds>(cold_end_time - cold_start_time).count();
-      time -= cold_time; // exclude cold run time
+      time = time - cold_time; //- split_time - merge_time; // exclude cold run time
     } else {
 
       // Warm up
@@ -1468,7 +1538,13 @@ int main(int argc, char* argv[]) {
 
   auto time_ms = time / ((double)1e3 * num_iter * num_layer);
   printf("Total Compute Time taken: %0.2f s \n", time / ((double)1e6));
-  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, num_expert, num_expert_per_token, gate_flag);
+  if (num_expert > 1) {
+    average_active_experts = average_active_experts / (num_iter * num_layer);
+    std::cout << "Average Active Experts: " << average_active_experts << "\n";
+  }
+  else
+    average_active_experts = 1.0;
+  flops_and_bandwidth<T>(time, token_len, embedding_dim, intermediate_dim, num_iter, num_layer, num_expert, num_expert_per_token, gate_flag, average_active_experts);
 
   return 0;
 }
