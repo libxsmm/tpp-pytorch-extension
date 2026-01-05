@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <list>
+#include <system_error>
 #include <tuple>
 #include <chrono>
 #include <memory>
@@ -39,11 +40,12 @@ using namespace tpp;
 // #define USE_TBB
 
 #ifdef USE_TBB
-  #include <tbb/parallel_for.h>
-  #include <tbb/blocked_range.h>
-  #include <tbb/global_control.h>
-  #include <tbb/concurrent_vector.h>
+  #include <oneapi/tbb/parallel_for.h>
+  #include <oneapi/tbb/blocked_range.h>
+  #include <oneapi/tbb/global_control.h>
+  #include <oneapi/tbb/concurrent_vector.h>
   #include <oneapi/tbb/flow_graph.h>
+  #include <oneapi/tbb/queuing_mutex.h>
 #endif
 
 // #define SCOPE_TPP
@@ -239,7 +241,7 @@ void flat_weight_allocate_and_initialize(std::vector<std::unique_ptr<T[]>>& t_Wg
         std::vector<float> t_Wd_tmp(embedding_dim);
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_real_distribution<float> dist(0.0f, 0.0009f);
+        std::uniform_real_distribution<float> dist(0.0f, 0.009f);
 
         std::generate(t_Wd_tmp.begin(), t_Wd_tmp.end(), 
               [&]() { return dist(gen); });
@@ -260,7 +262,7 @@ void flat_weight_allocate_and_initialize(std::vector<std::unique_ptr<T[]>>& t_Wg
         std::vector<float> t_Wg_tmp(intermediate_dim), t_Wu_tmp(intermediate_dim);
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_real_distribution<float> dist(0.0f, 0.0009f);
+        std::uniform_real_distribution<float> dist(0.0f, 0.009f);
 
         std::generate(t_Wg_tmp.begin(), t_Wg_tmp.end(), 
               [&]() { return dist(gen); });
@@ -873,19 +875,20 @@ void ffn_compute_flat(const std::unique_ptr<T[]>& t_Out,
 }
 
 class src_body {
-      const long my_limit;
-      long my_next_value;
-  public:
-      src_body(long l) : my_limit(l), my_next_value(0) {}
-      int operator()( oneapi::tbb::flow_control& fc ) {
-          if ( my_next_value < my_limit ) {
-              return my_next_value++;
-          } else {
-              fc.stop();
-              return int();
-          }
-      }
-  };
+    const long my_limit;
+    long my_next_value;
+public:
+    src_body(long l) : my_limit(l), my_next_value(0) {}
+    int operator()( tbb::flow_control& fc ) {
+        if ( my_next_value < my_limit ) {
+            // std::this_thread::sleep_for(std::chrono::microseconds(10));
+            return my_next_value++;
+        } else {
+            fc.stop();
+            return int();
+        }
+    }
+};
 
 template<typename T>
 void ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out, 
@@ -926,11 +929,11 @@ void ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out,
   auto o_single_edge_gemm_tpp = BrgemmTPP<
             T,
             float>(token_len_re, MLP_BLOCKSIZE, MLP_BLOCKSIZE, 1, 1, intermediate_dim, MLP_BLOCKSIZE, embedding_dim, 1.0, 0, 1, (b_vnni && std::is_same<T, bfloat16>::value));
-
   
   if(gate_flag && gate_up){
-      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_Wd_a, &t_Out_a, &t_inter_a, &zero_tpp_main, &o_single_main_gemm_tpp, &convert_tpp_main, embedding_blocks, intermediate_blocks, token_len_q]
-      (long i) {
+      int N = 8;
+      tbb::parallel_for(0L, (token_len_q/MLP_BLOCKSIZE), [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_Wd_a, &t_Out_a, &t_inter_a, &zero_tpp_main, &o_single_main_gemm_tpp, &convert_tpp_main, 
+        embedding_blocks, intermediate_blocks, token_len_q, N, scale](long i) {
 
         std::unique_ptr<float[]> t_Out_float (new (std::align_val_t(64)) float[MLP_BLOCKSIZE * (embedding_blocks * MLP_BLOCKSIZE)]);
         auto t_Out_float_a = GetVLAPtr<float>(t_Out_float.get(), {(embedding_blocks * MLP_BLOCKSIZE)});
@@ -938,33 +941,57 @@ void ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out,
         for (long j = 0; j < embedding_blocks; j++) {
           zero_tpp_main(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
         }
-        
+
+        tbb::queuing_mutex mtx[N];
         tbb::flow::graph g;
         tbb::flow::input_node<long> src( g, src_body(intermediate_blocks) );
 
         tbb::flow::function_node<long, long> up_node(g, tbb::flow::unlimited,
-        [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, i](const long &k){
+        [&tpps_main, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, i, scale](const long &k){
             LIBXSMM_ALIGNED(float tmp_g[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
             LIBXSMM_ALIGNED(float tmp_u[MLP_BLOCKSIZE * MLP_BLOCKSIZE], 64);
             tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wg_a[k][0][0][0], &tmp_g[0], embedding_blocks);
             tpps_main.silu_tpp(&tmp_g[0], &tmp_g[0]);
             tpps_main.i_gemm_tpp(&t_In_a[i*MLP_BLOCKSIZE][0], &t_Wu_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+            tpps_main.scale_tpp(&tmp_u[0], &tmp_u[0], scale);
             tpps_main.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE]);
             return k;
         });
 
-        tbb::flow::function_node<long> down_node(g, 1, 
-          [&tpps_main, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_main_gemm_tpp, embedding_blocks, intermediate_blocks, i](const long &k){
-            // for (long j = 0L; j < embedding_blocks; j++) {
-            tbb::parallel_for(0L, embedding_blocks, [&tpps_main, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_main_gemm_tpp, embedding_blocks, intermediate_blocks, i, k](long j) {
-              o_single_main_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
-            });
-            // }
-            // return k;
-        });
+        std::vector<tbb::flow::function_node<long>> down_nodes;
+
+        for (int n = 0; n < N; n++) {
+          down_nodes.emplace_back(g, tbb::flow::unlimited, 
+            [&t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_main_gemm_tpp, &mtx,
+              N, embedding_blocks, intermediate_blocks, token_len_q, n, i](const long &k){
+              long j_start = n * (embedding_blocks / N);
+              long j_end = (n + 1) * (embedding_blocks / N);
+              tbb::queuing_mutex::scoped_lock lock(mtx[n]);
+              for (long j = j_start; j < j_end; j++) {
+                  o_single_main_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+              }
+          });
+        }
+
+        // tbb::flow::function_node<long> down_node(g, 1, 
+        //   [&tpps_main, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_main_gemm_tpp, 
+        //     embedding_blocks, intermediate_blocks, i](const long &k){
+        //     // for (long j = 0L; j < embedding_blocks; j++) {
+        //     tbb::parallel_for(tbb::blocked_range<long>(0L, embedding_blocks),
+        //     [&tpps_main, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_main_gemm_tpp, 
+        //       embedding_blocks, intermediate_blocks, i, k](const tbb::blocked_range<long>& r) {
+        //       for (long j = r.begin(); j != r.end(); j++){
+        //         o_single_main_gemm_tpp(&t_inter_a[i*MLP_BLOCKSIZE][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+        //       }
+        //     });
+        //     // }
+        // });
 
         tbb::flow::make_edge(src, up_node);
-        tbb::flow::make_edge(up_node, down_node);
+        // tbb::flow::make_edge(up_node, down_node);
+        for (int n = 0; n < N; n++) {
+          tbb::flow::make_edge(up_node, down_nodes[n]);
+        }
         src.activate();
         g.wait_for_all();
 
@@ -994,34 +1021,57 @@ void ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out,
         for (long j = 0; j < embedding_blocks; j++) {
           zero_tpp_edge(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
         }
-        std::mutex mtx;
+
+        tbb::queuing_mutex mtx[N];
         tbb::flow::graph g;
         tbb::flow::function_node<long, long> up_node(g, tbb::flow::unlimited,
-        [&tpps_edge, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a, embedding_blocks, intermediate_blocks, token_len_q, token_len_re](const long &k){
+        [&tpps_edge, &t_In_a, &t_Wg_a, &t_Wu_a, &t_inter_a,
+          embedding_blocks, intermediate_blocks, token_len_q, token_len_re, scale](const long &k){
             LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
             LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
             tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg_a[k][0][0][0], &tmp_g[0], embedding_blocks);
             tpps_edge.silu_tpp(&tmp_g[0], &tmp_g[0]);
             tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+            tpps_edge.scale_tpp(&tmp_u[0], &tmp_u[0], scale);
             tpps_edge.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
             return k;
         });
 
-        tbb::flow::function_node<long> down_node(g, 1, 
-          [&tpps_edge, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, &mtx, embedding_blocks, intermediate_blocks, token_len_q](const long &k){
-            // static tbb::task_arena limited_arena(32);
-            // limited_arena.execute([&tpps_edge, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, embedding_blocks, intermediate_blocks, token_len_q, k] {
-              std::lock_guard<std::mutex> lock(mtx);
-              for (long j = 0L; j < embedding_blocks; j++) {
-              // tbb::parallel_for(0L, embedding_blocks, [&tpps_edge, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, &mtx, embedding_blocks, intermediate_blocks, token_len_q, k](long j) {
-                o_single_edge_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
-              // });
-              }
-            // });
-            // return k;
-        });
+        std::vector<tbb::flow::function_node<long>> down_nodes;
 
-        tbb::flow::make_edge(up_node, down_node);
+        for (int n = 0; n < N; n++) {
+          down_nodes.emplace_back(g, tbb::flow::unlimited, 
+            [&t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, &mtx,
+              N, embedding_blocks, intermediate_blocks, token_len_q, n](const long &k){
+              long j_start = n * (embedding_blocks / N);
+              long j_end = (n + 1) * (embedding_blocks / N);
+              tbb::queuing_mutex::scoped_lock lock(mtx[n]);
+              for (long j = j_start; j < j_end; j++) {
+                  o_single_edge_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+              }
+          });
+        }
+
+        // tbb::flow::function_node<long> down_node(g, 1, 
+        //   [&tpps_edge, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, &mtx,
+        //     embedding_blocks, intermediate_blocks, token_len_q](const long &k){
+        //     tbb::queuing_mutex::scoped_lock lock(mtx);
+        //     for (long j = 0L; j < embedding_blocks; j++) {
+        //     // tbb::parallel_for(tbb::blocked_range<long>(0L, embedding_blocks), 
+        //     //   [&tpps_edge, &t_Out_float_a, &t_Wd_a, &t_inter_a, &o_single_edge_gemm_tpp, 
+        //     //     embedding_blocks, intermediate_blocks, token_len_q, k](const tbb::blocked_range<long>& r) {
+        //     //     for (long j = r.begin(); j != r.end(); j++) {
+        //     //       // tbb::queuing_mutex::scoped_lock lock(mtx);
+        //           o_single_edge_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+        //     //     }
+        //     // });
+        //     }
+        // }); 
+
+        // tbb::flow::make_edge(up_node, down_node);
+        for (int n = 0; n < N; n++) {
+            tbb::flow::make_edge(up_node, down_nodes[n]);
+        }
         tbb::flow::input_node<long> src( g, src_body(intermediate_blocks) );
         tbb::flow::make_edge(src, up_node);
         src.activate();
@@ -1389,7 +1439,6 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
                             bool gate_flag, bool b_vnni, long num_expert, long num_expert_per_token, long num_layer=1, float scale=0.1) {
 
   std::cout<< "Starting Correctness Check" << "\n";
-  scale = 1.0;                      
   std::vector<FFNTPPs<T>> ffn_flat_tpp_set = create_ffn_tpp_set<T>(0, embedding_dim, intermediate_dim, gate_flag, b_vnni);
   std::vector<FFNTPPs<T>> ffn_blocked_tpp_set = create_ffn_tpp_set<T>(1, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 
