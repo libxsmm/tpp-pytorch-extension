@@ -1,9 +1,15 @@
 source /swtools/intel/2025.2.0/setvars.sh --force > /dev/null 2>&1
+export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
+
+# export LD_PRELOAD=$TBBROOT/lib/libtbbmalloc_proxy.so:$LD_PRELOAD
+# export TBB_MALLOC_USE_HUGE_PAGES=1
+
 # export LD_PRELOAD=$HOME/jemalloc/lib/libjemalloc.so:$LD_PRELOAD
 # export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
-export LD_PRELOAD=/usr/lib64/libtcmalloc.so:$LD_PRELOAD
-# export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
+
+export LD_PRELOAD=$HOME/lib/lib/libtcmalloc.so.4:/usr/lib64/libtbbmalloc.so.2:$LD_PRELOAD
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/data/nfs_home/nchaudh1/lib/lib
 # export LIBXSMM_TARGET=clx
 # export PROF=1
 # export USE_TBB=1
@@ -126,8 +132,8 @@ PERF_CMD+="cpu/event=0x27,umask=0x04,name=CORE_SNOOP_RESPONSE.S_HIT_FSE/ "
 
 PERF_CMD=""
 if [ "$hyper" != "1" ]; then
-    # threads=$cpu_count
-    threads="8,8"
+    threads=$cpu_count
+    # threads="8,8"
     echo "CPU count: $cpu_count, threads: $threads"
     if [ "$USE_TBB" == "1" ]; then
       OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
