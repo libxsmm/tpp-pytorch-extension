@@ -132,13 +132,13 @@ PERF_CMD+="cpu/event=0x27,umask=0x04,name=CORE_SNOOP_RESPONSE.S_HIT_FSE/ "
 
 PERF_CMD=""
 if [ "$hyper" != "1" ]; then
-    threads=$cpu_count
+    threads=64
     # threads="8,8"
     echo "CPU count: $cpu_count, threads: $threads"
     if [ "$USE_TBB" == "1" ]; then
       OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     else
-      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,1,0 OMP_MAX_ACTIVE_LEVELS=2 OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
+      KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 1 -N 1 $PERF_CMD ./ffn.o $batch_size $seq_len $b_vnni $blocked $num_layer $num_iter $embedding_dim $intermediate_dim $num_expert $num_experts_per_token $gate_flag $correctness_check
     fi
 else
     threads=$((cpu_count * 2))
