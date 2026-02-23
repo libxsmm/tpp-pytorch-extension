@@ -1,5 +1,6 @@
 source /swtools/intel/2025.2.0/setvars.sh --force > /dev/null 2>&1
-export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
+# export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
+export LD_PRELOAD=/data/swtools/intel/2025.2.0/2025.2/lib/libiomp5.so:$LD_PRELOAD
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
 
 # export LD_PRELOAD=$TBBROOT/lib/libtbbmalloc_proxy.so:$LD_PRELOAD
@@ -91,16 +92,17 @@ if [ "$PROF" == "1" ]; then
   FLAGS="-O0 -pg"
   [ "$BF16" = "0" ] && FLAGS="$FLAGS -DUSE_FLOAT"
   [ "$BF16" = "0" ] && echo "Compiling with FP32" || echo "Compiling with BF16"
-  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
-  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f -ltbb -liomp5
+  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB -ltbb" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
+  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f -liomp5
 
 else
   echo "Normal compilation"
   FLAGS="-O2"
+  # FLAGS="$FLAGS -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free"
   [ "$BF16" = "0" ] && FLAGS="$FLAGS -DUSE_FLOAT"
   [ "$BF16" = "0" ] && echo "Compiling with FP32" || echo "Compiling with BF16"
-  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
-  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f -ltbb -liomp5
+  [ "$USE_TBB" = "1" ] && FLAGS="$FLAGS -DUSE_TBB -ltbb" && echo "Compiling with TBB" || echo "Compiling with OpenMP"
+  g++ $FLAGS FFN_bench.cpp init.cpp -o ffn.o -I ../ -I ../../../libxsmm/include/ -DLIBXSMM_DEFAULT_CONFIG -L ../../../libxsmm/lib/ -lxsmm -fopenmp -mavx512f -liomp5
 fi
 
 

@@ -42,7 +42,7 @@ using namespace tpp;
 
 // #define USE_TBB
 #define N_nodes 1L // for dataflow TPPs
-// #define TIMING_PROFILE
+#define TIMING_PROFILE
 
 #ifdef USE_TBB
   #include <oneapi/tbb/parallel_for.h>
@@ -929,7 +929,7 @@ public:
 //     PaddedAtomicInt() : value(0) {}
 // };
 
-struct PaddedFlag {
+struct alignas(64) PaddedFlag {
     long value;
     char padding[64 - sizeof(long)]; // Assume 64-byte cache line
     PaddedFlag() : value(0) {}
@@ -1012,7 +1012,14 @@ std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out,
               tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg_a[k][j*X][0][0], &tmp_g[0], X);
               tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu_a[k][j*X][0][0], &tmp_u[0], X);
               {
+#ifdef TIMING_PROFILE
+                // auto t1 = std::chrono::high_resolution_clock::now();
+#endif
                 std::lock_guard<std::mutex> lock(mtx[k]);
+#ifdef TIMING_PROFILE
+                // auto t2 = std::chrono::high_resolution_clock::now();
+                // set1_time[tid] += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+#endif
                 if(flags[k].value == 0){
                   tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
                   tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
@@ -1034,21 +1041,21 @@ std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out,
             // #pragma omp barrier
           }
           else{
+            // #pragma omp barrier
 #ifdef TIMING_PROFILE
             auto t1 = std::chrono::high_resolution_clock::now();
 #endif
-            // #pragma omp barrier
             for(long k = 0; k < intermediate_blocks; k++){
 
 #ifdef TIMING_PROFILE
-            auto t3 = std::chrono::high_resolution_clock::now();
+            // auto t3 = std::chrono::high_resolution_clock::now();
 #endif
               while (flags[k].value < (embedding_blocks/(X))) {
                 // busy wait
               }
 #ifdef TIMING_PROFILE
-            auto t4 = std::chrono::high_resolution_clock::now();
-            busy_wait_time[tid - nthreads/2] += std::chrono::duration_cast<std::chrono::nanoseconds>(t4 - t3).count();
+            // auto t4 = std::chrono::high_resolution_clock::now();
+            // busy_wait_time[tid - nthreads/2] += std::chrono::duration_cast<std::chrono::nanoseconds>(t4 - t3).count();
 #endif
 
               for (long j = tid - nthreads/2; j < embedding_blocks; j += nthreads/2){
@@ -1083,9 +1090,12 @@ std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out,
         // for (size_t i = 0; i < set2_time.size(); i++)        std::cout << set2_time[i] - busy_wait_time[i] << " ";
         // std::cout << "\n \n";
 
-        time_vec[0] = std::reduce(set1_time.begin(), set1_time.end(), 0LL) / set1_time.size();
-        time_vec[1] = std::reduce(busy_wait_time.begin(), busy_wait_time.end(), 0LL) / busy_wait_time.size();
-        time_vec[2] = std::reduce(set2_time.begin(), set2_time.end(), 0LL) / set2_time.size();
+        // time_vec[0] = std::reduce(set1_time.begin(), set1_time.end(), 0LL) / set1_time.size();
+        // time_vec[1] = std::reduce(busy_wait_time.begin(), busy_wait_time.end(), 0LL) / busy_wait_time.size();
+        // time_vec[2] = std::reduce(set2_time.begin(), set2_time.end(), 0LL) / set2_time.size();
+        time_vec[0] = *std::max_element(set1_time.begin(), set1_time.end());
+        time_vec[1] = *std::max_element(busy_wait_time.begin(), busy_wait_time.end());
+        time_vec[2] = *std::max_element(set2_time.begin(), set2_time.end());
         time_vec[3] = time_vec[2] - time_vec[1];
 #endif
         // for (long j = 0; j < embedding_blocks; j++) {
