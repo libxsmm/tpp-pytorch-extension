@@ -100,6 +100,7 @@ parser.add_argument("--dist-backend", default="mpi", type=str)
 parser.add_argument("--load-sharded-model", action="store_true")
 parser.add_argument("--save-sharded-model", action="store_true")
 parser.add_argument("--quantize-lm-head", action="store_true")
+parser.add_argument("--quiet", action="store_true", help="hide prompt text output")
 args = parser.parse_args()
 print(args)
 
@@ -330,8 +331,9 @@ exit()
 """
 
 input_size = tokenizer(prompt, return_tensors="pt").input_ids.size(dim=1)
-print("---- Prompt size:", input_size)
-print("---- Prompt text:", prompt)
+if not args.quiet:
+    print("---- Prompt size:", input_size)
+    print("---- Prompt text:", prompt)
 
 # generate args
 generate_kwargs = dict(
@@ -433,7 +435,8 @@ with torch.inference_mode(), torch.no_grad(), torch.profiler.profile(
         toc = time.time()
         if args.profile:
             prof.step()
-        print(gen_text, len(gen_ids), flush=True)
+        if not args.quiet:
+            print(gen_text, len(gen_ids), flush=True)
         # print(gen_ids[0][inputs.input_ids.shape[1] :])
         if i < num_warmup or not args.token_latency:
             print("Iteration: %d, Time: %.6f sec" % (i, toc - tic), flush=True)

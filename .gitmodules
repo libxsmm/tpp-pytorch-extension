@@ -4,3 +4,7 @@
 [submodule "parlooper"]
 	path = parlooper
 	url = https://github.com/libxsmm/parlooper.git
+[submodule "sfc_ca_gemm"]
+	path = sfc_ca_gemm
+	url = https://github.com/libxsmm/sfc_ca_gemm.git
+	branch = devel_perf_model

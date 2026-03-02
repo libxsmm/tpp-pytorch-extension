@@ -38,6 +38,7 @@ from .llm_common import (
     set_pg,
     block,
     global_layer_dtype,
+    SFC_BLOCK_SIZE,
     TppCache,
 )
 
@@ -124,9 +125,9 @@ def FixLlamaDecoderLayer(
         ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.o_proj, 1, rank, wsize, block_size)
-        ShardLinear(self.mlp.gate_proj, 0, rank, wsize, 64)
-        ShardLinear(self.mlp.up_proj, 0, rank, wsize, 64)
-        ShardLinear(self.mlp.down_proj, 1, rank, wsize, 64)
+        ShardLinear(self.mlp.gate_proj, 0, rank, wsize, SFC_BLOCK_SIZE)
+        ShardLinear(self.mlp.up_proj, 0, rank, wsize, SFC_BLOCK_SIZE)
+        ShardLinear(self.mlp.down_proj, 1, rank, wsize, SFC_BLOCK_SIZE)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -209,18 +210,18 @@ def OptimizeModelForLlama(model, dtype, device="cpu", weight_dtype=None):
         if isinstance(m, transformers.models.llama.modeling_llama.LlamaDecoderLayer):
             FixLlamaDecoderLayer(
                 m,
-                16,
-                64,
+                SFC_BLOCK_SIZE,
+                SFC_BLOCK_SIZE,
                 dtype,
                 weight_dtype,
                 embed_positions,
             )
         elif isinstance(m, torch.nn.Linear):
-            if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
-                FixLinear(m, 100, 64, dtype, parallel_dim=1, block_size=64)
+            if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % SFC_BLOCK_SIZE == 0:
+                FixLinear(m, 100, SFC_BLOCK_SIZE, dtype, parallel_dim=1, block_size=SFC_BLOCK_SIZE)
                 block(m)
-            elif m.weight.shape[0] % 64 == 0 and m.weight.shape[1] % 64 == 0:
-                FixLinear(m, 64, 64, dtype, parallel_dim=1, block_size=64)
+            elif m.weight.shape[0] % SFC_BLOCK_SIZE == 0 and m.weight.shape[1] % SFC_BLOCK_SIZE == 0:
+                FixLinear(m, SFC_BLOCK_SIZE, SFC_BLOCK_SIZE, dtype, parallel_dim=1, block_size=SFC_BLOCK_SIZE)
                 block(m)
     for m in model.modules():
         for name in m._parameters.keys():

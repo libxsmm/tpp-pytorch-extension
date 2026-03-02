@@ -52,6 +52,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.flops[tid][1] = 0;
     }
     for (auto& scope : get_scope_list()) {
       if (scope.master_timer == 0.0)
@@ -60,6 +61,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.flops[tid][1] = 0;
     }
   }
   for (auto& scope : get_pass_list()) {
@@ -93,7 +95,7 @@ void print_debug_timers(int tid, bool detailed) {
       printf(" %7s", DebugTimerName(t));
   }
   printf(
-      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s\n",
+      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s %7s\n",
       "Total",
       "ITotal",
       "OTotal",
@@ -101,7 +103,8 @@ void print_debug_timers(int tid, bool detailed) {
       "Count",
       "TotalGFS",
       "IMBL",
-      "TF/s");
+      "TF/s",
+      "GB/s");
   for (int i = 0; i < max_threads; i++) {
     if (tid == -1 || tid == i || TPP_DEBUG_TIMER_TIDS_UPTO > i) {
       auto print_scope = [&](const Scope& scope) {
@@ -119,8 +122,12 @@ void print_debug_timers(int tid, bool detailed) {
         for (int f = 0; f < max_threads; f++)
           t_flops += scope.flops[f][0];
         if (t_flops > 0.0) {
+          long t_bytes = (long)scope.flops[0][1];
+          double gb_per_s = (t_bytes > 0 && scope.detailed_timers[i][BRGEMM] > 0)
+              ? t_bytes * (1/1024.0/1024.0/1024.0) / scope.detailed_timers[i][BRGEMM]
+              : 0.0;
           printf(
-              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f\n",
+              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f %7.1f\n",
               total * 1e3,
               scope.detailed_timers[i][LAST_TIMER] * 1e3,
               scope.omp_timer * 1e3,
@@ -128,7 +135,8 @@ void print_debug_timers(int tid, bool detailed) {
               scope.count,
               t_flops * 1e-9,
               t_flops * 100.0 / (scope.flops[i][0] * max_threads),
-              t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM]);
+              t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM],
+              gb_per_s);
         } else {
           printf(
               " %8.1f  %8.1f  %8.1f  %8.1f  %5ld\n",
@@ -165,11 +173,12 @@ void print_debug_thread_imbalance() {
   printf("MIN %7s %7s %7s  ", DebugTimerName(0), "ELTW", "Total");
   printf("MAX %7s %7s %7s  ", DebugTimerName(0), "ELTW", "Total");
   printf(
-      " %8s  %9s (%5s) %6s   %9s %9s %9s\n",
+      " %8s  %9s (%5s) %6s %7s   %9s %9s %9s\n",
       "MTotal",
       "GF_Total",
       "IMBL",
       "TF/s",
+      "GB/s",
       "GF_T0",
       "GF_Tmin",
       "GF_Tmax");
@@ -221,12 +230,17 @@ void print_debug_thread_imbalance() {
     for (int f = 0; f < max_threads; f++)
       t_flops += scope.flops[f][0];
     if (t_flops > 0.0) {
+      long t_bytes = (long)scope.flops[0][1];
+      double gb_per_s = (t_bytes > 0 && scope.detailed_timers[0][BRGEMM] > 0)
+          ? t_bytes * 1.0 / 1024.0 / 1024.0 / 1024.0 / scope.detailed_timers[0][BRGEMM]
+          : 0.0;
       printf(
-          " %8.1f  %9.3f (%5.2f) %6.3f   %9.3f %9.3f %9.3f\n",
+          " %8.1f  %9.3f (%5.2f) %6.3f %7.1f   %9.3f %9.3f %9.3f\n",
           scope.master_timer * 1e3,
           t_flops * 1e-9,
           t_flops * 100.0 / (scope.flops[0][0] * max_threads),
           t_flops * 1e-12 / scope.detailed_timers[0][BRGEMM],
+          gb_per_s,
           scope.flops[0][0] * 1e-9,
           scope.flops[total_imin][0] * 1e-9,
           scope.flops[total_imax][0] * 1e-9);

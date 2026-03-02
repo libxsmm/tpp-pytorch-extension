@@ -476,6 +476,33 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
     TPP_ASSERT(false, "Sparse Tensor Types not supported yet\n");
   } else {
     auto dtype = t_wt.scalar_type();
+    if (USE_SFC_CA_GEMM > 0) {
+      // Use SFC Cache-Aware GEMM for fused QKV
+      switch (dtype) {
+        case at::kFloat:
+          return fused_qkv_gemm_spl<SfcCaBlockedLinearW<Tin, float, Tout>>(
+              t_in, t_wts, t_bias);
+          break;
+        case at::kBFloat16:
+          return fused_qkv_gemm_spl<SfcCaBlockedLinearW<Tin, bfloat16, Tout>>(
+              t_in, t_wts, t_bias);
+          break;
+        case at::kHalf:
+          return fused_qkv_gemm_spl<SfcCaBlockedLinearW<Tin, half, Tout>>(
+              t_in, t_wts, t_bias);
+          break;
+        case at::kHFloat8:
+          return fused_qkv_gemm_spl<SfcCaBlockedLinearW<Tin, hfloat8, Tout>>(
+              t_in, t_wts, t_bias);
+          break;
+        case at::kBFloat8:
+          return fused_qkv_gemm_spl<SfcCaBlockedLinearW<Tin, bfloat8, Tout>>(
+              t_in, t_wts, t_bias);
+          break;
+        default:
+          TPP_ASSERT(false, "Unsupported dtype\n");
+      }
+    } else {
     switch (dtype) {
       case at::kFloat:
         return fused_qkv_gemm_spl<TppBlockedLinearW<Tin, float, Tout>>(
@@ -498,6 +525,7 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
         break;
       default:
         TPP_ASSERT(false, "Unsupported dtype\n");
+    }
     }
   }
 

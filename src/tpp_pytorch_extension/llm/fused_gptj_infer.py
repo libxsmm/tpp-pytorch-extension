@@ -39,6 +39,7 @@ from .llm_common import (
     block,
     compare,
     global_layer_dtype,
+    SFC_BLOCK_SIZE,
     TppCache,
 )
 
@@ -122,8 +123,8 @@ def FixGPTJBlock(
         ShardLinear(self.attn.k_proj, 0, rank, wsize, self.attn.head_dim)
         ShardLinear(self.attn.v_proj, 0, rank, wsize, self.attn.head_dim)
         ShardLinear(self.attn.out_proj, 1, rank, wsize, self.attn.head_dim)
-        ShardLinear(self.mlp.fc_in, 0, rank, wsize, 64)
-        ShardLinear(self.mlp.fc_out, 1, rank, wsize, 64)
+        ShardLinear(self.mlp.fc_in, 0, rank, wsize, SFC_BLOCK_SIZE)
+        ShardLinear(self.mlp.fc_out, 1, rank, wsize, SFC_BLOCK_SIZE)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -177,10 +178,10 @@ def OptimizeModelForGPTJ(model, dtype, device="cpu", weight_dtype=None):
         weight_dtype = dtype
     for m in model.modules():
         if isinstance(m, transformers.models.gptj.modeling_gptj.GPTJBlock):
-            FixGPTJBlock(m, 16, 64, dtype, weight_dtype=weight_dtype)
+            FixGPTJBlock(m, SFC_BLOCK_SIZE, SFC_BLOCK_SIZE, dtype, weight_dtype=weight_dtype)
         elif isinstance(m, torch.nn.Linear):
-            if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % 64 == 0:
-                FixLinear(m, 100, 64, dtype, parallel_dim=0, block_size=100)
+            if m.weight.shape[0] % 100 == 0 and m.weight.shape[1] % SFC_BLOCK_SIZE == 0:
+                FixLinear(m, 100, SFC_BLOCK_SIZE, dtype, parallel_dim=0, block_size=100)
                 block(m)
     for m in model.modules():
         for name in m._parameters.keys():

@@ -147,6 +147,15 @@ sources += glob.glob("src/csrc/bert/infer/*.cpp")
 
 sources += glob.glob("src/csrc/llm/*.cpp")
 
+# SFC Cache-Aware GEMM sources
+sfc_ca_gemm_root = os.path.join(cwd, "sfc_ca_gemm")
+sources += [
+    os.path.join(sfc_ca_gemm_root, "knn_model.c"),
+    os.path.join(sfc_ca_gemm_root, "knn_model_emr.c"),
+    os.path.join(sfc_ca_gemm_root, "knn_model_gnr.c"),
+    os.path.join(sfc_ca_gemm_root, "roofline_predictor.c"),
+]
+
 # GNN sources
 sources += glob.glob("src/csrc/gnn/graphsage/*.cpp")
 sources += glob.glob("src/csrc/gnn/common/*.cpp")
@@ -220,7 +229,7 @@ setup(
             "tpp_pytorch_extension._C",
             sources,
             extra_compile_args=extra_compile_args,
-            include_dirs=[xsmm_include, parlooper_include, "{}/src/csrc".format(cwd)],
+            include_dirs=[xsmm_include, parlooper_include, "{}/src/csrc".format(cwd), "{}/sfc_ca_gemm".format(cwd)],
             # library_dirs=[xsmm_lib],
             # libraries=["xsmm"],
         )

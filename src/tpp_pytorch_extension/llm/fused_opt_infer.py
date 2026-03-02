@@ -39,6 +39,7 @@ from .llm_common import (
     block,
     compare,
     global_layer_dtype,
+    SFC_BLOCK_SIZE,
     TppCache,
 )
 
@@ -126,8 +127,8 @@ def FixOPTDecoderLayer(
         ShardLinear(self.self_attn.k_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.v_proj, 0, rank, wsize, self.self_attn.head_dim)
         ShardLinear(self.self_attn.out_proj, 1, rank, wsize, self.self_attn.head_dim)
-        ShardLinear(self.fc1, 0, rank, wsize, 64)
-        ShardLinear(self.fc2, 1, rank, wsize, 64)
+        ShardLinear(self.fc1, 0, rank, wsize, SFC_BLOCK_SIZE)
+        ShardLinear(self.fc2, 1, rank, wsize, SFC_BLOCK_SIZE)
         self.model_parallel = True
     else:
         self.model_parallel = False
@@ -186,9 +187,9 @@ def OptimizeModelForOPT(model, dtype, device="cpu", weight_dtype=None):
             l.self_attn.layer_idx = i
     for m in model.modules():
         if isinstance(m, transformers.models.opt.modeling_opt.OPTDecoderLayer):
-            FixOPTDecoderLayer(m, 16, 64, dtype, weight_dtype=weight_dtype)
+            FixOPTDecoderLayer(m, SFC_BLOCK_SIZE, SFC_BLOCK_SIZE, dtype, weight_dtype=weight_dtype)
         elif isinstance(m, torch.nn.Linear):
-            FixLinear(m, 16, 64, dtype, parallel_dim=None)
+            FixLinear(m, SFC_BLOCK_SIZE, SFC_BLOCK_SIZE, dtype, parallel_dim=None)
             block(m)
     for m in model.modules():
         for name in m._parameters.keys():

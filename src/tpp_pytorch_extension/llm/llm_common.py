@@ -41,6 +41,10 @@ USE_LOW_PREC_PARAMS = True
 LAYER_NORM_USE_FP32_PARAMS = True
 global_layer_dtype = torch.float32
 
+# SFC CA GEMM: when enabled, use block size 32 instead of 64
+USE_SFC_CA_GEMM = int(os.environ.get("USE_SFC_CA_GEMM", "0"))
+SFC_BLOCK_SIZE = 32 if USE_SFC_CA_GEMM > 0 else 64
+
 tensor_parallel_enabled = True
 
 

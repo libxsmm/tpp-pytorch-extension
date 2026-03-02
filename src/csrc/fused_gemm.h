@@ -24,6 +24,7 @@
 using namespace tpp;
 
 extern int TPP_VERBOSE;
+static int USE_SFC_CA_GEMM_VAL = env2int("USE_SFC_CA_GEMM", 0);
 static int CK_BLOCK_SIZE = env2int("CK_BLOCK_SIZE", 64);
 static int BSB_BLOCK_SIZE = env2int("BSB_BLOCK_SIZE", 64);
 static int NCB_BLOCK_SIZE = env2int("NCB_BLOCK_SIZE", 64);
@@ -163,7 +164,7 @@ class TppFlatLinearBase {
     auto C = wt_sizes[0];
     auto K = wt_sizes[1];
     auto BS = t_in.numel() / C;
-    const int default_block_size = CK_BLOCK_SIZE;
+    const int default_block_size = (USE_SFC_CA_GEMM_VAL > 0) ? 32 : CK_BLOCK_SIZE;
 
     if (_Hc == 0)
       _Hc = C <= default_block_size ? C : default_block_size;
@@ -178,7 +179,8 @@ class TppFlatLinearBase {
     Nk = K / Hk[0];
 
     Ncb = Nc;
-    BSb[0] = BS <= BSB_BLOCK_SIZE ? BS : BSB_BLOCK_SIZE;
+    long bsb_size = (USE_SFC_CA_GEMM_VAL > 0) ? 32 : BSB_BLOCK_SIZE;
+    BSb[0] = BS <= bsb_size ? BS : bsb_size;
     BSb[1] = BS % BSb[0];
     auto nBS = BS / BSb[0];
     bool weight_reuse = nBS > 4;
@@ -531,6 +533,7 @@ class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
     // t_in = t_in.contiguous();
 
     auto BS = t_in.numel() / this->C;
+    record_gemm_bytes((long)BS * C * sizeof(T) + (long)C * K * sizeof(Tw) + (long)BS * K * sizeof(Tout));
     auto func = stepFunc(t_in, t_wt_V, t_bias, t_out, BS);
     {
       RECORD_OMP_TIME();
@@ -592,6 +595,15 @@ class TppFlatLinear : public TppFlatLinearBase<T, TOUT> {
       for (int i = 0; i < n_gemms; i++) {
         auto& g = gemms[i];
         funcs.push_back(g.stepFunc(t_in, t_wt[i], t_bias[i], t_out[i], BS));
+      }
+      // Record GEMM-level bytes for all fused GEMMs
+      {
+        long fused_bytes = (long)BS * C * sizeof(T);  // A read (shared)
+        for (int i = 0; i < n_gemms; i++) {
+          fused_bytes += (long)C * gemms[i].K * sizeof(Tw);  // B_i read
+          fused_bytes += (long)BS * gemms[i].K * sizeof(Tout);  // C_i write
+        }
+        record_gemm_bytes(fused_bytes);
       }
       {
         RECORD_OMP_TIME();
@@ -711,7 +723,8 @@ class TppBlockedLinearWBase {
     Hk = wt_sizes[3];
 
     Ncb = Nc;
-    BSb = BSB_BLOCK_SIZE;
+    // When SFC CA GEMM is enabled, use block size 32 for BSb
+    BSb = (USE_SFC_CA_GEMM_VAL > 0) ? 32 : BSB_BLOCK_SIZE;
     rem = BS % BSb;
     auto nBS = BS / BSb;
     bool weight_reuse = nBS > 4;
@@ -977,6 +990,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       }
     }
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
+    record_gemm_bytes((long)BS * C * sizeof(T) + (long)C * K * sizeof(Tw) + (long)BS * K * sizeof(Tout));
     {
       RECORD_OMP_TIME();
       auto gemm_loop = ThreadedLoop<3>(
@@ -1034,6 +1048,15 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
       TPP_ASSERT(
           g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
           "Fused QKV weight block mismatch\n");
+    }
+    // Record GEMM-level bytes for all fused GEMMs: same A, different B and C
+    {
+      long fused_bytes = (long)BS * gemms[0].C * sizeof(T);  // A read (shared)
+      for (int i = 0; i < n_gemms; i++) {
+        fused_bytes += (long)gemms[i].C * gemms[i].K * sizeof(Tw);  // B_i read
+        fused_bytes += (long)BS * gemms[i].K * sizeof(Tout);  // C_i write
+      }
+      record_gemm_bytes(fused_bytes);
     }
     {
       RECORD_OMP_TIME();
@@ -1249,6 +1272,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       t_qin = quantize_int8sym(t_in, block_size, -1, false);
     }
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
+    record_gemm_bytes((long)BS * C * sizeof(Tin) + (long)C * K * sizeof(Tw) + (long)BS * K * sizeof(Tout));
     {
       RECORD_OMP_TIME();
       auto gemm_loop = ThreadedLoop<3>(
@@ -1303,6 +1327,15 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
           g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
           "Fused QKV weight block mismatch\n");
     }
+    // Record GEMM-level bytes for all fused GEMMs
+    {
+      long fused_bytes = (long)BS * gemms[0].C * sizeof(T);
+      for (int i = 0; i < n_gemms; i++) {
+        fused_bytes += (long)gemms[i].C * gemms[i].K * sizeof(Tw);
+        fused_bytes += (long)BS * gemms[i].K * sizeof(Tout);
+      }
+      record_gemm_bytes(fused_bytes);
+    }
     {
       RECORD_OMP_TIME();
       auto gemm_loop = ThreadedLoop<3>(
@@ -1339,6 +1372,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
         t_in, t_wt, t_bias);
   }
 };
+
+// SFC Cache-Aware GEMM integration
+#include "sfc_ca_gemm_tpp.h"
 
 class NullPostOp {
  public:
@@ -1542,6 +1578,33 @@ inline at::Tensor call_gemm_with_post_op(
   } else {
     auto dtype = t_wt.scalar_type();
     if (t_wt.dim() > 2) {
+      if (USE_SFC_CA_GEMM > 0) {
+        // Use SFC Cache-Aware GEMM for blocked weights
+        switch (dtype) {
+          case at::kFloat:
+            return dispatch_gemm<SfcCaBlockedLinearW<Tin, float, Tout>, CB>(
+                cb, t_in, t_wt, t_bias);
+            break;
+          case at::kBFloat16:
+            return dispatch_gemm<SfcCaBlockedLinearW<Tin, bfloat16, Tout>, CB>(
+                cb, t_in, t_wt, t_bias);
+            break;
+          case at::kHalf:
+            return dispatch_gemm<SfcCaBlockedLinearW<Tin, half, Tout>, CB>(
+                cb, t_in, t_wt, t_bias);
+            break;
+          case at::kHFloat8:
+            return dispatch_gemm<SfcCaBlockedLinearW<Tin, hfloat8, Tout>, CB>(
+                cb, t_in, t_wt, t_bias);
+            break;
+          case at::kBFloat8:
+            return dispatch_gemm<SfcCaBlockedLinearW<Tin, bfloat8, Tout>, CB>(
+                cb, t_in, t_wt, t_bias);
+            break;
+          default:
+            TPP_ASSERT(false, "Unsupported dtype\n");
+        }
+      } else {
       switch (dtype) {
         case at::kFloat:
           return dispatch_gemm<TppBlockedLinearW<Tin, float, Tout>, CB>(
@@ -1565,6 +1628,7 @@ inline at::Tensor call_gemm_with_post_op(
           break;
         default:
           TPP_ASSERT(false, "Unsupported dtype\n");
+      }
       }
     } else {
       switch (dtype) {

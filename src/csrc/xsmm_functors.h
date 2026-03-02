@@ -2564,6 +2564,10 @@ class BrgemmTPP {
   long flops() {
     return 2L * M * N * K;
   }
+  long bytes() {
+    // A: M*K elements of Tin, B: K*N elements of Tw, C: M*N elements of Tout
+    return (long)M * K * sizeof(Tin) + (long)K * N * sizeof(Tw) + (long)M * N * sizeof(Tout);
+  }
 
   class BrgemmKernel : public BaseTPP {
    public:

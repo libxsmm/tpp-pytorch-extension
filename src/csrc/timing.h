@@ -137,6 +137,15 @@ class ScopedTimer {
   double start;
 };
 
+// Record GEMM-level bytes (call once per full GEMM, outside parallel region).
+// Uses flops[0][1] slot (thread-0 only) to avoid double-counting tiles.
+inline void record_gemm_bytes(long bytes) {
+  auto& scope = get_scope_list()[globalScope];
+  scope.flops[0][1] += bytes;
+  auto& pass = get_pass_list()[globalPass];
+  pass.flops[0][1] += bytes;
+}
+
 class GlobalScope {
  public:
   GlobalScope(int t) : oldScope(globalScope), start(getTime()) {
