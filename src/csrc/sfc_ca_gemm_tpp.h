@@ -24,12 +24,12 @@
 #include <map>
 #include <vector>
 
-// Include SFC utilities and performance model headers from sfc_ca_gemm
-#include "sfc_utils.h"
+// Include SFC utilities and performance model headers
+#include "sfc_ca_gemm/sfc_utils.h"
 
 extern "C" {
-#include "knn_model.h"
-#include "roofline_predictor.h"
+#include "sfc_ca_gemm/knn_model.h"
+#include "sfc_ca_gemm/roofline_predictor.h"
 }
 
 using namespace tpp;

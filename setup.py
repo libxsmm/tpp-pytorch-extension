@@ -147,8 +147,8 @@ sources += glob.glob("src/csrc/bert/infer/*.cpp")
 
 sources += glob.glob("src/csrc/llm/*.cpp")
 
-# SFC Cache-Aware GEMM sources
-sfc_ca_gemm_root = os.path.join(cwd, "sfc_ca_gemm")
+# SFC Cache-Aware GEMM sources (now integrated into src/csrc)
+sfc_ca_gemm_root = os.path.join(cwd, "src/csrc/sfc_ca_gemm")
 sources += [
     os.path.join(sfc_ca_gemm_root, "knn_model.c"),
     os.path.join(sfc_ca_gemm_root, "knn_model_emr.c"),
@@ -229,7 +229,7 @@ setup(
             "tpp_pytorch_extension._C",
             sources,
             extra_compile_args=extra_compile_args,
-            include_dirs=[xsmm_include, parlooper_include, "{}/src/csrc".format(cwd), "{}/sfc_ca_gemm".format(cwd)],
+            include_dirs=[xsmm_include, parlooper_include, "{}/src/csrc".format(cwd)],
             # library_dirs=[xsmm_lib],
             # libraries=["xsmm"],
         )
