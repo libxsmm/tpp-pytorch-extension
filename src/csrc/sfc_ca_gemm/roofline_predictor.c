@@ -158,7 +158,7 @@ int get_platform_roofline_params(
     const char* platform = detect_cpu_platform();
 
     /* Print the name of the detected platform */
-    printf("Detected CPU platform: %s\n", platform);
+    // printf("Detected CPU platform: %s\n", platform);
     
     /* Set parameters based on platform */
     if (strcmp(platform, "GNR") == 0) {

@@ -117,7 +117,7 @@ const char* detect_cpu_platform(void) {
 void predict_config_knn(int M, int N, int K, int* out_kbf, int* out_K_layers) {
     const char* platform = detect_cpu_platform();
     /* Print the name of the detected platform */
-    printf("Detected CPU platform: %s\n", platform);
+    // printf("Detected CPU platform: %s\n", platform);
     
     if (strcmp(platform, "GNR") == 0) {
         predict_config_knn_gnr(M, N, K, out_kbf, out_K_layers);
