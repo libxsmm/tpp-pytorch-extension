@@ -1,6 +1,7 @@
 #include <omp.h>
 #include <stdio.h>
 #include <cmath>
+#include <cstddef>
 #include <execution>
 #include <iostream>
 #include <limits>
@@ -42,7 +43,7 @@ using namespace tpp;
 
 // #define USE_TBB
 #define N_nodes 1L // for dataflow TPPs
-#define TIMING_PROFILE
+// #define TIMING_PROFILE
 
 #ifdef USE_TBB
   #include <oneapi/tbb/parallel_for.h>
@@ -935,179 +936,6 @@ struct alignas(64) PaddedFlag {
     PaddedFlag() : value(0) {}
 };
 
-
-template<typename T>
-std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out, 
-                            const std::unique_ptr<T[]>& t_In,
-                            const std::unique_ptr<T[]>& t_Wg,
-                            const std::unique_ptr<T[]>& t_Wu,
-                            const std::unique_ptr<T[]>& t_Wd,
-                            FFNTPPs<T>& tpps_main,
-                            FFNTPPs<T>& tpps_edge, 
-                            long token_len, long embedding_dim, long intermediate_dim, 
-                            bool gate_flag, bool b_vnni, float scale=0.1) {
-  std::vector<long long> time_vec(8, 0);
-
-  auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
-  auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
-
-  auto t_Wg_a = GetVLAPtr<T>(t_Wg.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
-  auto t_Wu_a = GetVLAPtr<T>(t_Wu.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-  auto t_Wd_a = GetVLAPtr<T>(t_Wd.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
-
-  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
-  long token_len_re = (token_len % MLP_BLOCKSIZE);
-
-  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
-  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
-
-  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
-  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
-  bool gate_up = true;
-  // gate_up = (embedding_dim >= intermediate_dim)? true : false;
-
-  // int N=4;
-  if(gate_flag && gate_up){
-      if(token_len_q > 0){
-      }
-
-      if(token_len_re != 0){   //edge case or decode case
-        std::unique_ptr<float[]> t_Out_float (new (std::align_val_t(64)) float[token_len_re * embedding_dim]);
-        auto t_Out_float_a = GetVLAPtr<float>(t_Out_float.get(), {embedding_dim});
-        // for (long j = 0; j < embedding_blocks; j++) {
-        //   tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
-        // }
-        
-        std::unique_ptr<float[]> full_tmp_g (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
-        std::unique_ptr<float[]> full_tmp_u (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
-        auto full_tmp_g_a = GetVLAPtr<float>(full_tmp_g.get(), {intermediate_dim});
-        auto full_tmp_u_a = GetVLAPtr<float>(full_tmp_u.get(), {intermediate_dim});
-
-        std::mutex mtx[intermediate_blocks];
-        // volatile long flags[intermediate_blocks] = {0};
-        volatile PaddedFlag flags[intermediate_blocks];
-        // std::vector<PaddedAtomicInt> flags(intermediate_blocks);
-
-#ifdef TIMING_PROFILE
-        std::vector<long long> set1_time(omp_get_max_threads()/2, 0);
-        std::vector<long long> set2_time(omp_get_max_threads()/2, 0);
-        std::vector<long long> busy_wait_time(omp_get_max_threads()/2, 0);
-#endif
-        #pragma omp parallel
-        {
-          long tid = omp_get_thread_num();
-          long nthreads = omp_get_num_threads();
-          long X = embedding_blocks/2; // unroll factor
-          if (tid < nthreads/2){
-#ifdef TIMING_PROFILE
-            auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-            for (long idx = tid; idx < (embedding_blocks/X) * intermediate_blocks; idx += nthreads/2){        
-              long j = (idx % (embedding_blocks/X));
-              long k = (idx / (embedding_blocks/X));
-              // long j = (idx / intermediate_blocks);
-              // long k = (idx % intermediate_blocks);
-              LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
-              LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
-              tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg_a[k][j*X][0][0], &tmp_g[0], X);
-              tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu_a[k][j*X][0][0], &tmp_u[0], X);
-              {
-#ifdef TIMING_PROFILE
-                // auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-                std::lock_guard<std::mutex> lock(mtx[k]);
-#ifdef TIMING_PROFILE
-                // auto t2 = std::chrono::high_resolution_clock::now();
-                // set1_time[tid] += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-#endif
-                if(flags[k].value == 0){
-                  tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
-                  tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
-                }
-                tpps_edge.dataflow2_increment_tpp(&tmp_g[0], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
-                tpps_edge.dataflow2_increment_tpp(&tmp_u[0], &full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
-
-                if(flags[k].value == (embedding_blocks/(X) - 1) ){
-                  tpps_edge.dataflow2_silu_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
-                  tpps_edge.dataflow2_gateup_mul_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
-                }
-                flags[k].value++;
-              }
-            }
-#ifdef TIMING_PROFILE
-            auto t2 = std::chrono::high_resolution_clock::now();
-            set1_time[tid] = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-#endif
-            // #pragma omp barrier
-          }
-          else{
-            // #pragma omp barrier
-#ifdef TIMING_PROFILE
-            auto t1 = std::chrono::high_resolution_clock::now();
-#endif
-            for(long k = 0; k < intermediate_blocks; k++){
-
-#ifdef TIMING_PROFILE
-            // auto t3 = std::chrono::high_resolution_clock::now();
-#endif
-              while (flags[k].value < (embedding_blocks/(X))) {
-                // busy wait
-              }
-#ifdef TIMING_PROFILE
-            // auto t4 = std::chrono::high_resolution_clock::now();
-            // busy_wait_time[tid - nthreads/2] += std::chrono::duration_cast<std::chrono::nanoseconds>(t4 - t3).count();
-#endif
-
-              for (long j = tid - nthreads/2; j < embedding_blocks; j += nthreads/2){
-                LIBXSMM_ALIGNED(float tmp[token_len_re][MLP_BLOCKSIZE], 64);
-                if(k==0){
-                  tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
-                }
-                tpps_edge.dataflow2_o_single_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
-                if(k == intermediate_blocks - 1){
-                  tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
-                }
-              }
-            }
-#ifdef TIMING_PROFILE
-            auto t2 = std::chrono::high_resolution_clock::now();
-            set2_time[tid - nthreads/2] = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
-#endif
-          }
-        }
-
-#ifdef TIMING_PROFILE
-        // std::cout << "Set1 time: ";
-        // for (size_t i = 0; i < set1_time.size(); i++)          std::cout << set1_time[i] << " ";
-        // std::cout << "\n"; 
-        // std::cout << "Busy wait time: ";
-        // for (size_t i = 0; i < busy_wait_time.size(); i++)          std::cout << busy_wait_time[i] << " ";
-        // std::cout << "\n";
-        // std::cout << "Set2 time: ";
-        // for (size_t i = 0; i < set2_time.size(); i++)          std::cout << set2_time[i] << " ";
-        // std::cout << "\n";
-        // std::cout << "Set2 Compute time: ";
-        // for (size_t i = 0; i < set2_time.size(); i++)        std::cout << set2_time[i] - busy_wait_time[i] << " ";
-        // std::cout << "\n \n";
-
-        // time_vec[0] = std::reduce(set1_time.begin(), set1_time.end(), 0LL) / set1_time.size();
-        // time_vec[1] = std::reduce(busy_wait_time.begin(), busy_wait_time.end(), 0LL) / busy_wait_time.size();
-        // time_vec[2] = std::reduce(set2_time.begin(), set2_time.end(), 0LL) / set2_time.size();
-        time_vec[0] = *std::max_element(set1_time.begin(), set1_time.end());
-        time_vec[1] = *std::max_element(busy_wait_time.begin(), busy_wait_time.end());
-        time_vec[2] = *std::max_element(set2_time.begin(), set2_time.end());
-        time_vec[3] = time_vec[2] - time_vec[1];
-#endif
-        // for (long j = 0; j < embedding_blocks; j++) {
-        //   tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
-        // }
-      }
-  } else {    // Seperate gate and up computation
-
-  }
-  return time_vec;
-}
-
 template<typename T>
 std::vector<long long> ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out, 
                             const std::unique_ptr<T[]>& t_In,
@@ -1520,6 +1348,178 @@ std::vector<long long> ffn_compute_dataflow(const std::unique_ptr<T[]>& t_Out,
 #endif
 }
 
+template<typename T>
+std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out, 
+                            const std::unique_ptr<T[]>& t_In,
+                            const std::unique_ptr<T[]>& t_Wg,
+                            const std::unique_ptr<T[]>& t_Wu,
+                            const std::unique_ptr<T[]>& t_Wd,
+                            FFNTPPs<T>& tpps_main,
+                            FFNTPPs<T>& tpps_edge, 
+                            long token_len, long embedding_dim, long intermediate_dim, 
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
+  std::vector<long long> time_vec(8, 0);
+
+  auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
+  auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
+
+  auto t_Wg_a = GetVLAPtr<T>(t_Wg.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+  auto t_Wu_a = GetVLAPtr<T>(t_Wu.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  auto t_Wd_a = GetVLAPtr<T>(t_Wd.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+
+  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  long token_len_re = (token_len % MLP_BLOCKSIZE);
+
+  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
+  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
+
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
+  bool gate_up = true;
+  // gate_up = (embedding_dim >= intermediate_dim)? true : false;
+
+  // int N=4;
+  if(gate_flag && gate_up){
+      if(token_len_q > 0){
+      }
+
+      if(token_len_re != 0){   //edge case or decode case
+        std::unique_ptr<float[]> t_Out_float (new (std::align_val_t(64)) float[token_len_re * embedding_dim]);
+        auto t_Out_float_a = GetVLAPtr<float>(t_Out_float.get(), {embedding_dim});
+        // for (long j = 0; j < embedding_blocks; j++) {
+        //   tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
+        // }
+        
+        std::unique_ptr<float[]> full_tmp_g (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+        std::unique_ptr<float[]> full_tmp_u (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+        auto full_tmp_g_a = GetVLAPtr<float>(full_tmp_g.get(), {intermediate_dim});
+        auto full_tmp_u_a = GetVLAPtr<float>(full_tmp_u.get(), {intermediate_dim});
+
+        std::mutex mtx[intermediate_blocks];
+        // volatile long flags[intermediate_blocks] = {0};
+        volatile PaddedFlag flags[intermediate_blocks];
+        // std::vector<PaddedAtomicInt> flags(intermediate_blocks);
+
+#ifdef TIMING_PROFILE
+        std::vector<long long> set1_time(omp_get_max_threads()/2, 0);
+        std::vector<long long> set2_time(omp_get_max_threads()/2, 0);
+        std::vector<long long> busy_wait_time(omp_get_max_threads()/2, 0);
+#endif
+        #pragma omp parallel
+        {
+          long tid = omp_get_thread_num();
+          long nthreads = omp_get_num_threads();
+          long X = embedding_blocks/2; // unroll factor
+          if (tid < nthreads/2){
+#ifdef TIMING_PROFILE
+            auto t1 = std::chrono::high_resolution_clock::now();
+#endif
+            for (long idx = tid; idx < (embedding_blocks/X) * intermediate_blocks; idx += nthreads/2){        
+              long j = (idx % (embedding_blocks/X));
+              long k = (idx / (embedding_blocks/X));
+              // long j = (idx / intermediate_blocks);
+              // long k = (idx % intermediate_blocks);
+              LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+              LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+              tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg_a[k][j*X][0][0], &tmp_g[0], X);
+              tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu_a[k][j*X][0][0], &tmp_u[0], X);
+              {
+#ifdef TIMING_PROFILE
+                // auto t1 = std::chrono::high_resolution_clock::now();
+#endif
+                std::lock_guard<std::mutex> lock(mtx[k]);
+#ifdef TIMING_PROFILE
+                // auto t2 = std::chrono::high_resolution_clock::now();
+                // set1_time[tid] += std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+#endif
+                if(flags[k].value == 0){
+                  tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+                  tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+                }
+                tpps_edge.dataflow2_increment_tpp(&tmp_g[0], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+                tpps_edge.dataflow2_increment_tpp(&tmp_u[0], &full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+
+                if(flags[k].value == (embedding_blocks/(X) - 1) ){
+                  tpps_edge.dataflow2_silu_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+                  tpps_edge.dataflow2_gateup_mul_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+                }
+                flags[k].value++;
+              }
+            }
+#ifdef TIMING_PROFILE
+            auto t2 = std::chrono::high_resolution_clock::now();
+            set1_time[tid] = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+#endif
+            // #pragma omp barrier
+          }
+          else{
+            // #pragma omp barrier
+#ifdef TIMING_PROFILE
+            auto t1 = std::chrono::high_resolution_clock::now();
+#endif
+            for(long k = 0; k < intermediate_blocks; k++){
+
+#ifdef TIMING_PROFILE
+            // auto t3 = std::chrono::high_resolution_clock::now();
+#endif
+              while (flags[k].value < (embedding_blocks/(X))) {
+                // busy wait
+              }
+#ifdef TIMING_PROFILE
+            // auto t4 = std::chrono::high_resolution_clock::now();
+            // busy_wait_time[tid - nthreads/2] += std::chrono::duration_cast<std::chrono::nanoseconds>(t4 - t3).count();
+#endif
+
+              for (long j = tid - nthreads/2; j < embedding_blocks; j += nthreads/2){
+                LIBXSMM_ALIGNED(float tmp[token_len_re][MLP_BLOCKSIZE], 64);
+                if(k==0){
+                  tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
+                }
+                tpps_edge.dataflow2_o_single_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+                if(k == intermediate_blocks - 1){
+                  tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
+                }
+              }
+            }
+#ifdef TIMING_PROFILE
+            auto t2 = std::chrono::high_resolution_clock::now();
+            set2_time[tid - nthreads/2] = std::chrono::duration_cast<std::chrono::nanoseconds>(t2 - t1).count();
+#endif
+          }
+        }
+
+#ifdef TIMING_PROFILE
+        // std::cout << "Set1 time: ";
+        // for (size_t i = 0; i < set1_time.size(); i++)          std::cout << set1_time[i] << " ";
+        // std::cout << "\n"; 
+        // std::cout << "Busy wait time: ";
+        // for (size_t i = 0; i < busy_wait_time.size(); i++)          std::cout << busy_wait_time[i] << " ";
+        // std::cout << "\n";
+        // std::cout << "Set2 time: ";
+        // for (size_t i = 0; i < set2_time.size(); i++)          std::cout << set2_time[i] << " ";
+        // std::cout << "\n";
+        // std::cout << "Set2 Compute time: ";
+        // for (size_t i = 0; i < set2_time.size(); i++)        std::cout << set2_time[i] - busy_wait_time[i] << " ";
+        // std::cout << "\n \n";
+
+        // time_vec[0] = std::reduce(set1_time.begin(), set1_time.end(), 0LL) / set1_time.size();
+        // time_vec[1] = std::reduce(busy_wait_time.begin(), busy_wait_time.end(), 0LL) / busy_wait_time.size();
+        // time_vec[2] = std::reduce(set2_time.begin(), set2_time.end(), 0LL) / set2_time.size();
+        time_vec[0] = *std::max_element(set1_time.begin(), set1_time.end());
+        time_vec[1] = *std::max_element(busy_wait_time.begin(), busy_wait_time.end());
+        time_vec[2] = *std::max_element(set2_time.begin(), set2_time.end());
+        time_vec[3] = time_vec[2] - time_vec[1];
+#endif
+        // for (long j = 0; j < embedding_blocks; j++) {
+        //   tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
+        // }
+      }
+  } else {    // Seperate gate and up computation
+
+  }
+  return time_vec;
+}
+
 // Read Processor ID using inline assembly
 uint64_t read_processor_id() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1530,6 +1530,459 @@ uint64_t read_processor_id() {
     // Fallback for non-x86 architectures
     return 0;
 #endif
+}
+
+template<typename T>
+inline void layer_compute_dataflow2(const long tid, const long nthreads, const long X,
+                            const VLAPtr<T,1>& t_In_a,
+                            const VLAPtr<T,3>& t_Wg_a,
+                            const VLAPtr<T,3>& t_Wu_a,
+                            const VLAPtr<T,3>& t_Wd_a,
+                            const VLAPtr<T,1>& t_inter_a,
+                            const VLAPtr<float,1>& t_Out_float_a,
+                            const VLAPtr<T,1>& t_Out_a,
+                            const VLAPtr<float,1>& full_tmp_g_a,
+                            const VLAPtr<float,1>& full_tmp_u_a,
+                            FFNTPPs<T>& tpps_edge,
+                            const long& embedding_blocks, const long& intermediate_blocks, const long& token_len_q, const long& token_len_re,
+                            std::mutex* mtx,
+                            volatile PaddedFlag* flags, volatile PaddedFlag* flags_start, volatile PaddedFlag* flags_inter) {
+        if (tid < nthreads/2){
+          for (long idx = tid; idx < (embedding_blocks/X) * intermediate_blocks; idx += nthreads/2){        
+            long j = (idx % (embedding_blocks/X));
+            long k = (idx / (embedding_blocks/X));
+
+            for (long jj = j*X; jj < (j+1)*X; jj++){
+              while (flags_start[jj].value == 0) {
+                // busy wait
+              }
+            }
+
+            LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+            LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg_a[k][j*X][0][0], &tmp_g[0], X);
+            tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu_a[k][j*X][0][0], &tmp_u[0], X);
+            {
+              std::lock_guard<std::mutex> lock(mtx[k]);
+              if(flags[k].value == 0){
+                tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+                tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+              }
+              tpps_edge.dataflow2_increment_tpp(&tmp_g[0], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+              tpps_edge.dataflow2_increment_tpp(&tmp_u[0], &full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+
+              if(flags[k].value == (embedding_blocks/(X) - 1) ){
+                tpps_edge.dataflow2_silu_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+                tpps_edge.dataflow2_gateup_mul_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+              }
+
+              flags[k].value++;
+            }
+          }
+        }
+        else {
+          for(long k = 0; k < intermediate_blocks; k++){
+
+            while (flags[k].value < (embedding_blocks/(X))) {
+              // busy wait
+            }
+
+            for (long j = tid - nthreads/2; j < embedding_blocks; j += nthreads/2){
+              LIBXSMM_ALIGNED(float tmp[token_len_re][MLP_BLOCKSIZE], 64);
+              if(k==0){
+                tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
+              }
+              tpps_edge.dataflow2_o_single_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+              if(k == intermediate_blocks - 1){
+                tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
+                flags_inter[j].value = 1;  // signal that this block of output is ready
+              }
+            }
+          }
+        }
+      }
+
+template<typename T>
+std::vector<long long> twice_ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out, 
+                            const std::unique_ptr<T[]>& t_In,
+                            const std::unique_ptr<T[]>& t_Wg1,
+                            const std::unique_ptr<T[]>& t_Wu1,
+                            const std::unique_ptr<T[]>& t_Wd1,
+                            const std::unique_ptr<T[]>& t_Wg2,
+                            const std::unique_ptr<T[]>& t_Wu2,
+                            const std::unique_ptr<T[]>& t_Wd2,
+                            FFNTPPs<T>& tpps_main,
+                            FFNTPPs<T>& tpps_edge, 
+                            long token_len, long embedding_dim, long intermediate_dim, 
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
+  std::vector<long long> time_vec(8, 0);
+  auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
+  auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
+
+  auto t_Wg1_a = GetVLAPtr<T>(t_Wg1.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+  auto t_Wu1_a = GetVLAPtr<T>(t_Wu1.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  auto t_Wd1_a = GetVLAPtr<T>(t_Wd1.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+
+  auto t_Wg2_a = GetVLAPtr<T>(t_Wg2.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+  auto t_Wu2_a = GetVLAPtr<T>(t_Wu2.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  auto t_Wd2_a = GetVLAPtr<T>(t_Wd2.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+
+  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  long token_len_re = (token_len % MLP_BLOCKSIZE);
+
+  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
+  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
+
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
+  bool gate_up = true;
+  // gate_up = (embedding_dim >= intermediate_dim)? true : false;
+
+  if(gate_flag && gate_up){
+    if(token_len_q > 0){
+    }
+
+    if(token_len_re != 0){   //edge case or decode case
+
+      std::unique_ptr<float[]> t_Out_float (new (std::align_val_t(64)) float[token_len_re * embedding_dim]);
+      auto t_Out_float_a = GetVLAPtr<float>(t_Out_float.get(), {embedding_dim});
+      
+      std::unique_ptr<float[]> full_tmp_g (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+      std::unique_ptr<float[]> full_tmp_u (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+      auto full_tmp_g_a = GetVLAPtr<float>(full_tmp_g.get(), {intermediate_dim});
+      auto full_tmp_u_a = GetVLAPtr<float>(full_tmp_u.get(), {intermediate_dim});
+
+      std::mutex mtx[intermediate_blocks];
+      
+      volatile PaddedFlag flags_1[intermediate_blocks];
+      volatile PaddedFlag flags_2[intermediate_blocks];
+
+      volatile PaddedFlag flags_start[embedding_blocks];
+      for(long i =0; i < embedding_blocks; i++){
+        flags_start[i].value = 1;
+      }
+      volatile PaddedFlag flags_inter[embedding_blocks];
+
+      #pragma omp parallel
+      {
+        long tid = omp_get_thread_num();
+        long nthreads = omp_get_num_threads();
+        long X = embedding_blocks/2; // unroll factor
+        layer_compute_dataflow2<T>(tid, nthreads, X,
+                            t_In_a, t_Wg1_a, t_Wu1_a, t_Wd1_a, t_inter_a, t_Out_float_a, t_Out_a,
+                            full_tmp_g_a, full_tmp_u_a,
+                            tpps_edge,
+                            embedding_blocks, intermediate_blocks, token_len_q, token_len_re,
+                            mtx, flags_1, flags_start, flags_inter);
+
+        layer_compute_dataflow2<T>(tid, nthreads, X,
+                            t_Out_a, t_Wg2_a, t_Wu2_a, t_Wd2_a, t_inter_a, t_Out_float_a, t_Out_a,
+                            full_tmp_g_a, full_tmp_u_a,
+                            tpps_edge,
+                            embedding_blocks, intermediate_blocks, token_len_q, token_len_re,
+                            mtx, flags_2, flags_inter, flags_start);
+      //   if (tid < nthreads/4){
+      //     for (long idx = tid; idx < (embedding_blocks/X) * intermediate_blocks; idx += nthreads/4){        
+      //       long j = (idx % (embedding_blocks/X));
+      //       long k = (idx / (embedding_blocks/X));
+
+      //       LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+      //       LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+      //       tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg1_a[k][j*X][0][0], &tmp_g[0], X);
+      //       tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu1_a[k][j*X][0][0], &tmp_u[0], X);
+      //       {
+      //         std::lock_guard<std::mutex> lock(mtx[k]);
+      //         if(flags_1[k].value == 0){
+      //           tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //           tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+      //         }
+      //         tpps_edge.dataflow2_increment_tpp(&tmp_g[0], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //         tpps_edge.dataflow2_increment_tpp(&tmp_u[0], &full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+
+      //         if(flags_1[k].value == (embedding_blocks/(X) - 1) ){
+      //           tpps_edge.dataflow2_silu_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //           tpps_edge.dataflow2_gateup_mul_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+      //         }
+      //         flags_1[k].value++;
+      //       }
+      //     }
+      //     // #pragma omp barrier
+      //   }
+      //   else if (tid < nthreads/2 && tid >= nthreads/4) {
+      //     // #pragma omp barrier
+      //     for(long k = 0; k < intermediate_blocks; k++){
+
+      //       while (flags_1[k].value < (embedding_blocks/(X))) {
+      //         // busy wait
+      //       }
+
+      //       for (long j = tid - nthreads/4; j < embedding_blocks; j += nthreads/4){
+      //         LIBXSMM_ALIGNED(float tmp[token_len_re][MLP_BLOCKSIZE], 64);
+      //         if(k==0){
+      //           tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
+      //         }
+      //         tpps_edge.dataflow2_o_single_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd1_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+      //         if(k == intermediate_blocks - 1){
+      //           tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
+      //           flags_inter[j].value = 1;  // signal that this block of output is ready
+      //         }
+      //       }
+      //     }
+      //     // #pragma omp barrier
+      //   }
+      //   else if (tid < 3*nthreads/4 && tid >= nthreads/2) {
+      //     // #pragma omp barrier
+      //     for (long idx = tid - nthreads/2; idx < (embedding_blocks/X) * intermediate_blocks; idx += nthreads/4){        
+      //       long j = (idx % (embedding_blocks/X));
+      //       long k = (idx / (embedding_blocks/X));
+      //       for (long jj = j*X; jj < (j+1)*X; jj++){
+      //         while (flags_inter[jj].value == 0) {
+      //           // busy wait
+      //         }
+      //       }
+
+      //       LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+      //       LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+      //       tpps_edge.i_gemm_tpp(&t_Out_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wg2_a[k][j*X][0][0], &tmp_g[0], X);
+      //       tpps_edge.i_gemm_tpp(&t_Out_a[token_len_q][j*X*MLP_BLOCKSIZE], &t_Wu2_a[k][j*X][0][0], &tmp_u[0], X);
+      //       {
+      //         std::lock_guard<std::mutex> lock(mtx[k]);
+      //         if(flags_2[k].value == 0){
+      //           tpps_edge.dataflow2_zero_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //           tpps_edge.dataflow2_zero_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+      //         }
+      //         tpps_edge.dataflow2_increment_tpp(&tmp_g[0], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //         tpps_edge.dataflow2_increment_tpp(&tmp_u[0], &full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_u_a[0][k*MLP_BLOCKSIZE]);
+
+      //         if(flags_2[k].value == (embedding_blocks/(X) - 1) ){
+      //           tpps_edge.dataflow2_silu_tpp(&full_tmp_g_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE]);
+      //           tpps_edge.dataflow2_gateup_mul_tpp(&full_tmp_u_a[0][k*MLP_BLOCKSIZE], &full_tmp_g_a[0][k*MLP_BLOCKSIZE], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+      //         }
+      //         flags_2[k].value++;
+      //       }
+      //     }
+      //     // #pragma omp barrier
+      //   }
+      //   else {
+      //     // #pragma omp barrier
+      //     for(long k = 0; k < intermediate_blocks; k++){
+
+      //       while (flags_2[k].value < (embedding_blocks/(X))) {
+      //         // busy wait
+      //       }
+
+      //       for (long j = tid - 3*nthreads/4; j < embedding_blocks; j += nthreads/4){
+      //         LIBXSMM_ALIGNED(float tmp[token_len_re][MLP_BLOCKSIZE], 64);
+      //         if(k==0){
+      //           tpps_edge.dataflow_zero_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE]);
+      //         }
+      //         tpps_edge.dataflow2_o_single_gemm_tpp(&t_inter_a[token_len_q][k*MLP_BLOCKSIZE], &t_Wd2_a[j][k][0][0], &t_Out_float_a[0][j*MLP_BLOCKSIZE], 1);
+      //         if(k == intermediate_blocks - 1){
+      //           tpps_edge.dataflow_convert_tpp(&t_Out_float_a[0][j*MLP_BLOCKSIZE], &t_Out_a[token_len_q][j*MLP_BLOCKSIZE]);
+      //         }
+      //       }
+      //     }
+      //   }
+      }
+    }
+  }
+  return time_vec;
+}
+
+template<typename T>
+std::vector<long long> multi_ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out, 
+                            const std::unique_ptr<T[]>& t_In,
+                            std::vector<std::unique_ptr<T[]>>& t_Wg,
+                            std::vector<std::unique_ptr<T[]>>& t_Wu,
+                            std::vector<std::unique_ptr<T[]>>& t_Wd,
+                            std::vector<long>& layer_list,
+                            FFNTPPs<T>& tpps_main,
+                            FFNTPPs<T>& tpps_edge, 
+                            long token_len, long embedding_dim, long intermediate_dim, 
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
+  std::vector<long long> time_vec(8, 0);
+  auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
+  auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
+
+  long num_layers = layer_list.size();
+
+  std::vector<VLAPtr<T,3>> t_Wg_a, t_Wu_a, t_Wd_a;
+  t_Wg_a.reserve(num_layers);
+  t_Wu_a.reserve(num_layers);
+  t_Wd_a.reserve(num_layers);
+
+  for(size_t i = 0; i < num_layers; i++){
+    t_Wg_a[i] = GetVLAPtr<T>(t_Wg[layer_list[i]].get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+    t_Wu_a[i] = GetVLAPtr<T>(t_Wu[layer_list[i]].get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+    t_Wd_a[i] = GetVLAPtr<T>(t_Wd[layer_list[i]].get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  }
+
+  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  long token_len_re = (token_len % MLP_BLOCKSIZE);
+
+  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
+  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
+
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
+  bool gate_up = true;
+  // gate_up = (embedding_dim >= intermediate_dim)? true : false;
+
+  if(gate_flag && gate_up){
+    if(token_len_q > 0){
+    }
+
+    if(token_len_re != 0){   //edge case or decode case
+
+      std::unique_ptr<float[]> t_Out_float (new (std::align_val_t(64)) float[token_len_re * embedding_dim]);
+      auto t_Out_float_a = GetVLAPtr<float>(t_Out_float.get(), {embedding_dim});
+      
+      std::unique_ptr<float[]> full_tmp_g (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+      std::unique_ptr<float[]> full_tmp_u (new (std::align_val_t(64)) float[token_len_re * intermediate_dim]);
+      auto full_tmp_g_a = GetVLAPtr<float>(full_tmp_g.get(), {intermediate_dim});
+      auto full_tmp_u_a = GetVLAPtr<float>(full_tmp_u.get(), {intermediate_dim});
+
+      std::mutex mtx[intermediate_blocks];
+      
+      volatile PaddedFlag flags[num_layers][intermediate_blocks];
+
+      volatile PaddedFlag flags_start[embedding_blocks];
+      for(long i =0; i < embedding_blocks; i++){
+        flags_start[i].value = 1;
+      }
+      volatile PaddedFlag flags_inter[num_layers][embedding_blocks];
+
+      #pragma omp parallel
+      {
+        long tid = omp_get_thread_num();
+        long nthreads = omp_get_num_threads();
+        long X = embedding_blocks/2; // unroll factor
+        layer_compute_dataflow2<T>(tid, nthreads, X,
+                            t_In_a, t_Wg_a[0], t_Wu_a[0], t_Wd_a[0], t_inter_a, t_Out_float_a, t_Out_a,
+                            full_tmp_g_a, full_tmp_u_a,
+                            tpps_edge,
+                            embedding_blocks, intermediate_blocks, token_len_q, token_len_re,
+                            mtx, flags[0], flags_start, flags_inter[0]);
+
+        for(size_t i = 1; i < num_layers; i++){
+          layer_compute_dataflow2<T>(tid, nthreads, X,
+                              t_Out_a, t_Wg_a[i], t_Wu_a[i], t_Wd_a[i], t_inter_a, t_Out_float_a, t_Out_a,
+                              full_tmp_g_a, full_tmp_u_a,
+                              tpps_edge,
+                              embedding_blocks, intermediate_blocks, token_len_q, token_len_re,
+                              mtx, flags[i], flags_inter[i-1], flags_inter[i]);
+        }
+      }
+    }
+  }
+
+  return time_vec;
+}
+
+template<typename T>
+std::vector<long long> twice_ffn_compute_blocked(const std::unique_ptr<T[]>& t_Out, 
+                            const std::unique_ptr<T[]>& t_In,
+                            const std::unique_ptr<T[]>& t_Wg1,
+                            const std::unique_ptr<T[]>& t_Wu1,
+                            const std::unique_ptr<T[]>& t_Wd1,
+                            const std::unique_ptr<T[]>& t_Wg2,
+                            const std::unique_ptr<T[]>& t_Wu2,
+                            const std::unique_ptr<T[]>& t_Wd2,
+                            FFNTPPs<T>& tpps_main,
+                            FFNTPPs<T>& tpps_edge, 
+                            long token_len, long embedding_dim, long intermediate_dim, 
+                            bool gate_flag, bool b_vnni, float scale=0.1) {
+
+  std::vector<long long> time_vec(8, 0);
+  auto t_In_a = GetVLAPtr<T>(t_In.get(), {embedding_dim});
+  auto t_Out_a = GetVLAPtr<T>(t_Out.get(), {embedding_dim});
+
+  auto t_Wg1_a = GetVLAPtr<T>(t_Wg1.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+  auto t_Wu1_a = GetVLAPtr<T>(t_Wu1.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  auto t_Wd1_a = GetVLAPtr<T>(t_Wd1.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+
+  auto t_Wg2_a = GetVLAPtr<T>(t_Wg2.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});   // [n2, n1, h1, h2]
+  auto t_Wu2_a = GetVLAPtr<T>(t_Wu2.get(), {embedding_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+  auto t_Wd2_a = GetVLAPtr<T>(t_Wd2.get(), {intermediate_dim/MLP_BLOCKSIZE, MLP_BLOCKSIZE, MLP_BLOCKSIZE});
+
+  long token_len_q = (token_len / MLP_BLOCKSIZE)*MLP_BLOCKSIZE;
+  long token_len_re = (token_len % MLP_BLOCKSIZE);
+
+  std::unique_ptr<T[]> t_inter (new (std::align_val_t(64)) T[token_len * intermediate_dim]);
+  auto t_inter_a = GetVLAPtr<T>(t_inter.get(), {intermediate_dim});
+
+  long embedding_blocks = embedding_dim/MLP_BLOCKSIZE;
+  long intermediate_blocks = intermediate_dim/MLP_BLOCKSIZE;
+  bool gate_up = true;
+  // gate_up = (embedding_dim >= intermediate_dim)? true : false;
+
+  if(gate_flag && gate_up){ //Up compute
+    if(token_len_q > 0){
+      // skip the main case for now
+    }
+    if(token_len_re != 0){   //edge case or decode case
+      #pragma omp parallel for
+      for (long k = 0L; k < intermediate_blocks; k++) {
+        LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+        LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+        tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wg1_a[k][0][0][0], &tmp_g[0], embedding_blocks);
+        tpps_edge.silu_tpp(&tmp_g[0], &tmp_g[0]);
+        tpps_edge.i_gemm_tpp(&t_In_a[token_len_q][0], &t_Wu1_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+        tpps_edge.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+      }
+    }
+  }
+  {
+    // Down Compute
+    if(token_len_q > 0){
+      // skip the main case for now
+    }
+
+    if(token_len_re != 0){   //edge case or decode case
+      #pragma omp parallel for
+      for (long k = 0L; k < embedding_blocks; k++) {
+        LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
+        tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd1_a[k][0][0][0], &tmp[0], intermediate_blocks);
+        tpps_edge.scale_tpp(&tmp[0], &tmp[0], scale);
+        tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k*MLP_BLOCKSIZE]);
+      }
+    }
+  }
+
+  if(gate_flag && gate_up){ //Up 2 Compute
+    if(token_len_q > 0){
+      // skip the main case for now
+    }
+    if(token_len_re != 0){   //edge case or decode case
+      #pragma omp parallel for
+      for (long k = 0L; k < intermediate_blocks; k++) {
+        LIBXSMM_ALIGNED(float tmp_g[token_len_re * MLP_BLOCKSIZE], 64);
+        LIBXSMM_ALIGNED(float tmp_u[token_len_re * MLP_BLOCKSIZE], 64);
+        tpps_edge.i_gemm_tpp(&t_Out_a[token_len_q][0], &t_Wg2_a[k][0][0][0], &tmp_g[0], embedding_blocks);
+        tpps_edge.silu_tpp(&tmp_g[0], &tmp_g[0]);
+        tpps_edge.i_gemm_tpp(&t_Out_a[token_len_q][0], &t_Wu2_a[k][0][0][0], &tmp_u[0], embedding_blocks);
+        tpps_edge.gateup_mul_tpp(&tmp_u[0], &tmp_g[0], &t_inter_a[token_len_q][k*MLP_BLOCKSIZE]);
+      }
+    }
+  }
+  {
+    // Down 2 Compute
+    if(token_len_q > 0){
+      // skip the main case for now
+    }
+
+    if(token_len_re != 0){   //edge case or decode case
+      #pragma omp parallel for
+      for (long k = 0L; k < embedding_blocks; k++) {
+        LIBXSMM_ALIGNED(float tmp[token_len_re * MLP_BLOCKSIZE], 64);
+        tpps_edge.o_gemm_tpp(&t_inter_a[token_len_q][0], &t_Wd2_a[k][0][0][0], &tmp[0], intermediate_blocks);
+        tpps_edge.scale_tpp(&tmp[0], &tmp[0], scale);
+        tpps_edge.downconvert_embed_tpp(&tmp[0], &t_Out_a[token_len_q][k*MLP_BLOCKSIZE]);
+      }
+    }
+  }
+
+  return time_vec;
 }
 
 template<typename T>
@@ -1940,17 +2393,32 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
       if (l == 0){
         ffn_compute_flat<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
         // ffn_compute_blocked<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
-        ffn_compute_dataflow2<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        // ffn_compute_dataflow2<T>(t2_Out[0], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
       } else {
-        ffn_compute_flat<T>(t_Out[l], t_Out[l-1], t_Wg[0], t_Wu[0], t_Wd[0], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
-        // ffn_compute_blocked<T>(t2_Out[l], t2_Out[l-1], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
-        ffn_compute_dataflow2<T>(t2_Out[l], t2_Out[l-1], t2_Wg[0], t2_Wu[0], t2_Wd[0], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        ffn_compute_flat<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_flat_tpp_set[0], ffn_flat_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        // ffn_compute_blocked<T>(t2_Out[l], t2_Out[l-1], t2_Wg[l], t2_Wu[l], t2_Wd[l], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        // ffn_compute_dataflow2<T>(t2_Out[l], t2_Out[l-1], t2_Wg[l], t2_Wu[l], t2_Wd[l], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+      }
+    }
+
+    for(long l = 0; l < num_layer; l += 2){
+      if (l ==0){
+        // twice_ffn_compute_blocked<T>(t2_Out[1], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], t2_Wg[1], t2_Wu[1], t2_Wd[1], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        // twice_ffn_compute_dataflow2<T>(t2_Out[1], t_In[0], t2_Wg[0], t2_Wu[0], t2_Wd[0], t2_Wg[1], t2_Wu[1], t2_Wd[1], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        std::vector<long> layer_list = {0, 1};
+        multi_ffn_compute_dataflow2<T>(t2_Out[1], t_In[0], t2_Wg, t2_Wu, t2_Wd, layer_list, ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+      } else {
+        // twice_ffn_compute_blocked<T>(t2_Out[l+1], t2_Out[l-1], t2_Wg[l], t2_Wu[l], t2_Wd[l], t2_Wg[l+1], t2_Wu[l+1], t2_Wd[l+1], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        // twice_ffn_compute_dataflow2<T>(t2_Out[l+1], t2_Out[l-1], t2_Wg[l], t2_Wu[l], t2_Wd[l], t2_Wg[l+1], t2_Wu[l+1], t2_Wd[l+1], ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
+        std::vector<long> layer_list = {l, l+1};
+        multi_ffn_compute_dataflow2<T>(t2_Out[l+1], t2_Out[l-1], t2_Wg, t2_Wu, t2_Wd, layer_list, ffn_blocked_tpp_set[0], ffn_blocked_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni, scale);
       }
     }
   }
 
   auto upconvert_tpp = SCOPEIT((ConvertTPP<T, float>(embedding_dim)), EW_ZERO);
-  for(int l=0; l < num_layer; l++){
+  // for(int l=0; l < num_layer; l++){
+  for(int l=1; l < num_layer; l += 2){
     for(int i=0; i < token_len; i++){
       float t_Out_float[embedding_dim], t2_Out_float[embedding_dim];
       upconvert_tpp(&t_Out[l][i*embedding_dim], &t_Out_float[0]);
@@ -1965,7 +2433,8 @@ void correctness_checking(std::vector<std::unique_ptr<T[]>>& t_Out,
         float largest = std::max(std::abs(t_Out_float[j]), std::abs(t2_Out_float[j]));
         // if(std::abs((t_Out_float[j] - t2_Out_float[j])/t_Out_float[j]) > tol){
         if (diff > (largest*tol)){
-          std::cout << "Layer 0: Mismatch at index " << (i*embedding_dim + j) << ": " << (float)t_Out[0][i*embedding_dim + j] << " vs " << (float)t2_Out[0][i*embedding_dim + j] << "\n";
+          std::cout << "Correctness check failed at layer: " << l << " diff: " << diff << " largest*tol: " << (largest*tol) << "\n";
+          std::cout << "Mismatch at index " << (i*embedding_dim + j) << ": " << (float)t_Out[l][i*embedding_dim + j] << " vs " << (float)t2_Out[l][i*embedding_dim + j] << "\n";
           // std::cout << "Diff: " << diff << ", Largest: " << largest << ", Tol: " << largest*tol << "\n";
           exit(0);
         }
@@ -2123,31 +2592,39 @@ int main(int argc, char* argv[]) {
     } else {
 
       // Warm up
-      for(int l = 0; l < num_layer; l++) {
+      for(int l = 0; l < num_layer; l +=2) {
         if(l==0){
-          // ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-          ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          // twice_ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], t_Wg[1], t_Wu[1], t_Wd[1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          // twice_ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], t_Wg[1], t_Wu[1], t_Wd[1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          std::vector<long> layer_list = {0, 1};
+          multi_ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
         } else {
-          // ffn_compute_blocked<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-          ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          // twice_ffn_compute_blocked<T>(t_Out[l], t_Out[l-2], t_Wg[l], t_Wu[l], t_Wd[l], t_Wg[l+1], t_Wu[l+1], t_Wd[l+1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          // twice_ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-2], t_Wg[l], t_Wu[l], t_Wd[l], t_Wg[l+1], t_Wu[l+1], t_Wd[l+1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+          std::vector<long> layer_list = {l, l+1};
+          multi_ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-2], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
         }
       }
       
       std::vector<long long> loop_times(8, 0);
       auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
       for(int i = 0; i < num_iter; i++) {
-        for(int l = 0; l < num_layer; l++) {
+        for(int l = 0; l < num_layer; l += 2) {
           if (l==0){
-            // auto tmp_times = ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-            auto tmp_times = ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            // auto tmp_times = twice_ffn_compute_blocked<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], t_Wg[1], t_Wu[1], t_Wd[1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            // auto tmp_times = twice_ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg[0], t_Wu[0], t_Wd[0], t_Wg[1], t_Wu[1], t_Wd[1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            std::vector<long> layer_list = {0, 1};
+            auto tmp_times = multi_ffn_compute_dataflow2<T>(t_Out[0], t_In[0], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 #ifdef TIMING_PROFILE
             for(int i = 0; i < loop_times.size(); i++){
               loop_times[i] += tmp_times[i];
             }
 #endif
           } else {
-            // auto tmp_times = ffn_compute_blocked<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
-            auto tmp_times = ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-1], t_Wg[l], t_Wu[l], t_Wd[l], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            // auto tmp_times = twice_ffn_compute_blocked<T>(t_Out[l], t_Out[l-2], t_Wg[l], t_Wu[l], t_Wd[l], t_Wg[l+1], t_Wu[l+1], t_Wd[l+1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            // auto tmp_times = twice_ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-2], t_Wg[l], t_Wu[l], t_Wd[l], t_Wg[l+1], t_Wu[l+1], t_Wd[l+1], ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
+            std::vector<long> layer_list = {l, l+1};
+            auto tmp_times = multi_ffn_compute_dataflow2<T>(t_Out[l], t_Out[l-2], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 #ifdef TIMING_PROFILE
             for(int i = 0; i < loop_times.size(); i++){
               loop_times[i] += tmp_times[i];
