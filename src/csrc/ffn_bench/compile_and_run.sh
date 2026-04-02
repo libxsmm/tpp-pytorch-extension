@@ -1,5 +1,4 @@
 source /swtools/intel/2025.2.0/setvars.sh --force > /dev/null 2>&1
-# export LD_PRELOAD=/usr/lib64/libomp.so:$LD_PRELOAD
 export LD_PRELOAD=/data/swtools/intel/2025.2.0/2025.2/lib/libiomp5.so:$LD_PRELOAD
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
 
@@ -10,6 +9,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:../../../libxsmm/lib/
 # export MALLOC_CONF="oversize_threshold:1,background_thread:true,metadata_thp:auto,dirty_decay_ms:-1,muzzy_decay_ms:-1"
 
 export LD_PRELOAD=$HOME/lib/lib/libtcmalloc.so.4:/usr/lib64/libtbbmalloc.so.2:$LD_PRELOAD
+# export THP_MEM_ALLOC_ENABLE=1
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/data/nfs_home/nchaudh1/lib/lib
 # export LIBXSMM_TARGET=clx
 # export PROF=1
@@ -85,6 +85,25 @@ fi
 # print all the parameters in one line
 echo "llm: $llm, batch_size: $batch_size, seq_len: $seq_len, hyper: $hyper, BF16: $BF16, b_vnni: $b_vnni, blocked: $blocked, num_layer: $num_layer, num_iter: $num_iter, embedding_dim: $embedding_dim, intermediate_dim: $intermediate_dim, num_expert: $num_expert, num_experts_per_token: $num_experts_per_token  gate_flag: $gate_flag", "correctness_check: $correctness_check"
 
+# get number of cpu from lscpu command
+cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
+if [ "$USE_PYTHON" == "1" ]; then
+  threads=$((cpu_count))
+  if [ "$BF16" == 1 ]; then
+    dtype="bfloat16"
+  else
+    dtype="float32"
+  fi
+  # export SGLANG_CPU_OMP_THREADS_BIND="64-127"
+  # export SGLANG_USE_CPU_ENGINE=1
+  echo "Running with Python, CPU count: $cpu_count, threads: $threads"
+  # python -m torch.backends.xeon.run_cpu --ninstances 1 --ncores-per-instance $threads --node-id 1 \
+  KMP_BLOCKTIME=1 KMP_AFFINITY=granularity=fine,compact,1,0 OMP_NUM_THREADS=$threads numactl -m 1 -N 1 \
+        python py_FFN_bench.py --batch_size $batch_size --seq_len $seq_len \
+          --hidden_size $embedding_dim --intermediate_size $intermediate_dim  \
+          --num_layer $num_layer --num_iter $num_iter --dtype $dtype
+  exit 0
+fi
 
 # echo "Compiling FFN benchmark code"
 if [ "$PROF" == "1" ]; then
@@ -106,9 +125,6 @@ else
 fi
 
 
-
-# get number of cpu from lscpu command
-cpu_count=$(lscpu | grep "Core(s) per socket:" | awk '{print $4}')
 PERF_CMD="perf stat -e cycles,"
 PERF_CMD+="cpu/event=0xc2,umask=0x2,name=UOPS_RETIRED.RETIRE_SLOTS/,"
 PERF_CMD+="cpu/event=0xe5,umask=0x03,name=MEM_UOP_RETIRED.ANY/,"
