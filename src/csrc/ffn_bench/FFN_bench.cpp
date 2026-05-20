@@ -8,17 +8,13 @@
 #include <limits>
 #include <list>
 #include <mutex>
-#include <system_error>
 #include <tuple>
 #include <chrono>
-#include <memory>
 #include <cstring>
 #include <algorithm>
 #include <vector>
 #include <random>
-#include <atomic>
 #include <immintrin.h>
-
 // #include <ATen/record_function.h>
 // #include <torch/csrc/autograd/VariableTypeUtils.h>
 // #include <torch/extension.h>
@@ -1518,21 +1514,21 @@ std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out,
         // time_vec[1] = std::reduce(busy_wait_time.begin(), busy_wait_time.end(), 0LL) / busy_wait_time.size();
         // time_vec[2] = std::reduce(set2_time.begin(), set2_time.end(), 0LL) / set2_time.size();
 
-        if (csv_file1 && csv_file2 && csv_file3) {
-          for (size_t i = 0; i < set1_time.size(); ++i) {
-              *csv_file1 << set1_time[i];
-              *csv_file2 << busy_wait_time[i];
-              *csv_file3 << set2_time[i];
-              if (i != set1_time.size() - 1) {
-                  *csv_file1 << ",";  // Comma between values
-                  *csv_file2 << ",";  // Comma between values
-                  *csv_file3 << ",";  // Comma between values
-              }
-          }
-          *csv_file1 << "\n";  // Newline after each set
-          *csv_file2 << "\n";  // Newline after each set
-          *csv_file3 << "\n";  // Newline after each set
-        }
+        // if (csv_file1 && csv_file2 && csv_file3) {
+        //   for (size_t i = 0; i < set1_time.size(); ++i) {
+        //       *csv_file1 << set1_time[i];
+        //       *csv_file2 << busy_wait_time[i];
+        //       *csv_file3 << set2_time[i];
+        //       if (i != set1_time.size() - 1) {
+        //           *csv_file1 << ",";  // Comma between values
+        //           *csv_file2 << ",";  // Comma between values
+        //           *csv_file3 << ",";  // Comma between values
+        //       }
+        //   }
+        //   *csv_file1 << "\n";  // Newline after each set
+        //   *csv_file2 << "\n";  // Newline after each set
+        //   *csv_file3 << "\n";  // Newline after each set
+        // }
         
         time_vec[0] = *std::max_element(set1_time.begin(), set1_time.end());
         time_vec[1] = *std::max_element(busy_wait_time.begin(), busy_wait_time.end());
@@ -1542,18 +1538,6 @@ std::vector<long long> ffn_compute_dataflow2(const std::unique_ptr<T[]>& t_Out,
       }
   }
   return time_vec;
-}
-
-// Read Processor ID using inline assembly
-uint64_t read_processor_id() {
-#if defined(__x86_64__) || defined(_M_X64)
-    uint64_t rpid;
-    __asm__ volatile ("rdpid %0" : "=r"(rpid));
-    return rpid;
-#else
-    // Fallback for non-x86 architectures
-    return 0;
-#endif
 }
 
 template<typename T>
@@ -2786,8 +2770,8 @@ int main(int argc, char* argv[]) {
             // auto tmp_times = multi_ffn_compute_blocked<T>(t_Out[layer_jump - 1], t_In[0], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
             // auto tmp_times = multi_ffn_compute_dataflow2<T>(t_Out[layer_jump - 1], t_In[0], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 #ifdef TIMING_PROFILE
-            for(int i = 0; i < loop_times.size(); i++){
-              loop_times[i] += tmp_times[i];
+            for(int j = 0; j < loop_times.size(); j++){
+              loop_times[j] += tmp_times[j];
             }
 #endif
           } else {
@@ -2801,8 +2785,8 @@ int main(int argc, char* argv[]) {
             // auto tmp_times = multi_ffn_compute_blocked<T>(t_Out[l + layer_jump - 1], t_Out[l-1], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
             // auto tmp_times = multi_ffn_compute_dataflow2<T>(t_Out[l + layer_jump - 1], t_Out[l-1], t_Wg, t_Wu, t_Wd, layer_list, ffn_tpp_set[0], ffn_tpp_set[token_len % MLP_BLOCKSIZE], token_len, embedding_dim, intermediate_dim, gate_flag, b_vnni);
 #ifdef TIMING_PROFILE
-            for(int i = 0; i < loop_times.size(); i++){
-              loop_times[i] += tmp_times[i];
+            for(int j = 0; j < loop_times.size(); j++){
+              loop_times[j] += tmp_times[j];
             }
 #endif
           }
