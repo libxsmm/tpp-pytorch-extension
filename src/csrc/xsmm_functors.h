@@ -52,8 +52,13 @@ extern int tpp_debug_trace;
 #define ALIGNDOWN(N, A) ((N) & ~((A)-1))
 extern long long hsh_key, hsh_ret;
 namespace tpp {
+#ifdef TORCH_API_INCLUDE_EXTENSION_H
 typedef at::BFloat16 bfloat16;
 typedef at::Half half;
+#else
+typedef unsigned short bfloat16;
+typedef short half;
+#endif
 #ifdef PYTORCH_SUPPORTS_FLOAT8
 typedef at::Float8_e5m2 bfloat8;
 typedef at::Float8_e4m3fn hfloat8;
@@ -271,6 +276,7 @@ inline void _mm512_mask_storeu_ps_auto(
 #endif // PYTORCH_SUPPORTS_FLOAT8
 #endif
 
+#ifdef TORCH_API_INCLUDE_EXTENSION_H
 inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
   static const std::map<at::ScalarType, libxsmm_datatype> pt2xsmmDtypes = {
       {at::kDouble, LIBXSMM_DATATYPE_F64},
@@ -290,6 +296,7 @@ inline libxsmm_datatype convert_dtype_pt2xsmm(at::ScalarType dtype) {
 
   return pt2xsmmDtypes.at(dtype);
 }
+#endif
 
 inline int xsmm_get_vnni_block_size(libxsmm_datatype dtype) {
   int bs = libxsmm_cpuid_dot_pack_factor(dtype);
@@ -298,7 +305,7 @@ inline int xsmm_get_vnni_block_size(libxsmm_datatype dtype) {
   }
   return bs;
 }
-
+#ifdef TORCH_API_INCLUDE_EXTENSION_H
 inline int get_vnni_block_size(at::ScalarType dtype) {
   auto xsmm_dtype = convert_dtype_pt2xsmm(dtype);
   return xsmm_get_vnni_block_size(xsmm_dtype);
@@ -309,6 +316,7 @@ inline int get_vnni_block_size(caffe2::TypeMeta dtype_) {
   auto xsmm_dtype = convert_dtype_pt2xsmm(dtype);
   return xsmm_get_vnni_block_size(xsmm_dtype);
 }
+#endif
 
 template <typename T>
 inline int get_vnni_block_size() {
@@ -431,7 +439,7 @@ class BaseTPP {
   }
 
  protected:
-#if 0
+#ifndef TORCH_API_INCLUDE_EXTENSION_H
   std::unordered_map<std::string, void*>& get_kernel_cache() {
     static std::unordered_map<std::string, void*> kernel_cache;
     return kernel_cache;

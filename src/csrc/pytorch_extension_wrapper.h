@@ -43,6 +43,7 @@ class BFloat16 {
   unsigned short val;
 };
 
+#if 0
 #ifdef __x86_64__
 class Half {
  public:
@@ -62,6 +63,9 @@ typedef __fp16 Half;
 #error "Unsupported architecture"
 #endif
 
+#else
+class Half{};
+#endif
 }; // namespace at
 
 #endif // _PYTORCH_EXTENSION_WRAPPER_H_
