@@ -15,6 +15,7 @@
 #include <immintrin.h>
 #endif
 
+#include <algorithm>
 #include <libxsmm.h>
 #include <libxsmm_intrinsics_x86.h>
 #ifdef TORCH_API_INCLUDE_EXTENSION_H
