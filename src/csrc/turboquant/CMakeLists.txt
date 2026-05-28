@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.18)
 # project name
 project(turboquant VERSION 0.1.0)
 
+# binary paths to bin directory
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(turboquant 
     src/main.cpp
     src/init.cpp
@@ -33,12 +36,18 @@ target_link_libraries(turboquant
     iomp5
 )
 
-# # link to oneAPI present at path: /opt/intel/oneapi/compiler/latest/linux/lib
-# target_link_libraries(turboquant 
-#     PUBLIC 
-#     /data/swtools/intel/2025.2.0/2025.2/lib/libiomp5.so
-# )
+# add compiler options for debug and release builds
+target_compile_options(turboquant 
+    PUBLIC 
+    $<$<CONFIG:Debug>:-g -O0>
+    $<$<CONFIG:Release>:-O2 -march=native>
+)
 
+# set output directory for DEBUG and RELEASE builds
+set_target_properties(turboquant PROPERTIES 
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/bin/Debug
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/bin/Release
+)
 
 
 
