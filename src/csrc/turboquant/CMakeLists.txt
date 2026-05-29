@@ -10,6 +10,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 add_executable(turboquant 
     src/main.cpp
     src/init.cpp
+    src/rotation.cpp
 )
 
 # set c++ standard
@@ -25,15 +26,12 @@ target_include_directories(turboquant
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsmm/include
 )
 
+#link mkl libraries
 target_link_libraries(turboquant 
     PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsmm/lib/libxsmm.a
-)
-
-# link iomp5 library
-target_link_libraries(turboquant 
-    PUBLIC 
     iomp5
+    mkl_rt
 )
 
 # add compiler options for debug and release builds
@@ -50,4 +48,52 @@ set_target_properties(turboquant PROPERTIES
 )
 
 
+# ------------------------------------------------- Testing Phase -------------------------------------------------
 
+# Add Google Test
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG        v1.14.0
+)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+# Enable testing
+enable_testing()
+
+
+# Test executable
+add_executable(turboquant_tests
+    tests/QR_test.cpp
+    src/init.cpp
+    src/rotation.cpp
+)
+
+target_include_directories(turboquant_tests 
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsmm/include
+)
+
+target_link_libraries(turboquant_tests 
+    PRIVATE
+    gtest_main
+    gtest
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../../libxsmm/lib/libxsmm.a
+    iomp5
+    mkl_rt
+)
+
+target_compile_options(turboquant_tests 
+    PRIVATE
+    $<$<CONFIG:Debug>:-g -O0>
+    $<$<CONFIG:Release>:-O2 -march=native>
+)
+
+# Discover tests for CTest
+include(GoogleTest)
+gtest_discover_tests(turboquant_tests)
