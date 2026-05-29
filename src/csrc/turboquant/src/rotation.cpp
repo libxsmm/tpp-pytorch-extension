@@ -31,8 +31,8 @@ std::vector<double> make_rotation_matrix(int64_t dim, int64_t seed) {
     // Get r matrix from the upper triangle of the decomposed matrix
     // Used form sign correction later
     std::vector<double> r(dim * dim, 0.0);
-    for (int i = 0; i < dim; ++i) {
-        for (int j = i; j < dim; ++j) {
+    for (int64_t i = 0; i < dim; ++i) {
+        for (int64_t j = i; j < dim; ++j) {
             r[i * dim + j] = mat[i * dim + j];
         }
     }
@@ -44,9 +44,9 @@ std::vector<double> make_rotation_matrix(int64_t dim, int64_t seed) {
     }
 
     // Sign correction: Q = Q * diag(sign(diag(R)))
-    for (int i = 0; i < dim; ++i) {
+    for (int64_t i = 0; i < dim; ++i) {
         if (r[i * dim + i] < 0) {
-            for (int j = 0; j < dim; ++j) {
+            for (int64_t j = 0; j < dim; ++j) {
                 mat[i * dim + j] = -mat[i * dim + j];
             }
         }
