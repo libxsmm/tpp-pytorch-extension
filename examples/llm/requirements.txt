@@ -1,4 +1,4 @@
-transformers==5.0.0rc3
+transformers==5.13.0
 sentencepiece
 psutil
 accelerate
