@@ -11,6 +11,7 @@
 #include "init.h"
 #include "timing.h"
 #include "utils.h"
+void init_conv1d_opti(pybind11::module& m);
 
 #ifdef _OPENMP
 #pragma message "Using OpenMP"
@@ -253,6 +254,7 @@ static void init_submodules(pybind11::module& m) {
 // PYBIND11_MODULE(TORCH_MODULE_NAME, m) {
 PYBIND11_MODULE(_C, m) {
   init_submodules(m);
+  init_conv1d_opti(m);
   m.def("print_debug_timers", &print_debug_timers, "print_debug_timers");
   m.def(
       "print_debug_thread_imbalance",
