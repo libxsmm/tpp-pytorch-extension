@@ -515,16 +515,20 @@ if args.quantize_lm_head and not model.lm_head.weight.is_quantized:
     quantize_fn = tpx._C._qtype.remap_and_quantize_qint8
     if is_bonsai:
         # Bonsai's lm_head is ternary too, so follow --weight-dtype instead.
+        # A plain torch dtype means "no quantization" and leaves it to FixLinear.
         quantize_fn = {
             "mxfp4": tpx._C._qtype.remap_and_quantize_mxfp4,
             "qint8": tpx._C._qtype.remap_and_quantize_qint8,
             "qint2": tpx._C._qtype.remap_and_quantize_qint2_intlv,
-        }.get(args.weight_dtype, quantize_fn)
-    with torch.no_grad():
-        model.lm_head.weight = torch.nn.Parameter(
-            quantize_fn(model.lm_head.weight),
-            requires_grad=False,
-        )
+        }.get(args.weight_dtype)
+    if args.tpp_quant_linear_only:
+        quantize_fn = None  # already handled by the FixLinear pass above
+    if quantize_fn is not None:
+        with torch.no_grad():
+            model.lm_head.weight = torch.nn.Parameter(
+                quantize_fn(model.lm_head.weight),
+                requires_grad=False,
+            )
 # for n, p in model.named_parameters():
 #     print(f"{n}: {list(p.shape)}   {p.dtype} {type(p)}")
 
