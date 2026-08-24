@@ -54,12 +54,12 @@ source ${CONDA_INSTALL_DIR}/bin/activate ${ENV_NAME}
 if [ $(uname -m) == "x86_64" ] ; then
   conda install -y ninja setuptools tqdm future cmake numpy pyyaml scikit-learn pydot -c conda-forge
   conda install -y gperftools -c conda-forge
-  pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  pip3 install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 elif [ $(uname -m) == "aarch64" ] ; then
 # rust required on aarch64 for building tokenizer
   conda install -y numpy gperftools ninja setuptools tqdm future cmake  pyyaml scikit-learn pydot -c conda-forge
   conda install -y -c conda-forge openblas
-  pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+  pip3 install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cpu
 else
   echo "Unknown architecture: $(uname -m)"
   exit 1

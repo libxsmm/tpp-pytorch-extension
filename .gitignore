@@ -4,5 +4,6 @@
 __pycache__
 build
 dist
+env.sh
 miniforge3/
 Miniforge3-*.sh
