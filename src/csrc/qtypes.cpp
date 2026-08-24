@@ -561,12 +561,13 @@ Tensor& PerBlockAffineQuantizer::dequantize_out(
       TPP_ASSERT(false, "Unsupported output type for Per Block QInt8\n");
     }
   } else if (scalar_type_ == kQUInt2x4) {
+    auto sc = scales_.scalar_type() == kFloat ? scales_ : scales_.to(kFloat);
     if (rtensor.dtype() == kFloat) {
       this->dequantize_symetric<Int2SymQuant<float>>(
-          qtensor_contig, scales_, rtensor);
+          qtensor_contig, sc, rtensor);
     } else if (rtensor.dtype() == kBFloat16) {
       this->dequantize_symetric<Int2SymQuant<bfloat16>>(
-          qtensor_contig, scales_, rtensor);
+          qtensor_contig, sc, rtensor);
     } else {
       TPP_ASSERT(false, "Unsupported output type for Per Block QInt8\n");
     }
@@ -692,7 +693,9 @@ at::Tensor create_qtensor_int2sym(
     int64_t axis,
     bool is_vnni) {
   at::ScalarType dtype = at::kQUInt2x4;
-  TORCH_CHECK(val.dtype() == at::kByte && scales.dtype() == at::kFloat);
+  TORCH_CHECK(
+      val.dtype() == at::kByte &&
+      (scales.dtype() == at::kFloat || scales.dtype() == at::kHalf));
   auto quantizer = at::make_per_block_affine_quantizer(
       val, block_size, axis, is_vnni, /*has_zp=*/false, dtype);
   static_cast<at::PerBlockAffineQuantizer*>(quantizer.get())
@@ -1061,8 +1064,10 @@ inline at::Tensor remap_and_quantize_qint2_intlv(at::Tensor t) {
       torch::bitwise_or(
           quantized[2].bitwise_left_shift(4),
           quantized[3].bitwise_left_shift(6)));
+  // scales are ~11% of all weight traffic in a ternary GEMV, so keep them in fp16
+  auto scales_h = scales.to(at::kHalf);
   auto qtensor = create_qtensor_int2sym(
-      quantized_vnni.sizes(), quantized, scales, block_size, 2, true);
+      quantized_vnni.sizes(), quantized, scales_h, block_size, 2, true);
   // auto ret = quantize_int2sym(t, block_size, 2, true);
   std::cout << "remap_and_quantize_qint2_intlv: " << qtensor.sizes()
             << " dt: " << qtensor.dtype() << std::endl;

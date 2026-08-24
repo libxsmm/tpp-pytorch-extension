@@ -475,8 +475,11 @@ inline std::vector<at::Tensor> fused_qkv_gemm(
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
     } else if (t_wt.qscheme() == at::kPerBlockAffine) {
-      if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2 ||
-          t_wt.dtype() == at::kQUInt2x4) {
+      if (t_wt.dtype() == at::kQUInt2x4) {
+        return fused_qkv_gemm_spl<
+            TppBlockedQInt8LinearW<Tin, uint8_t, Tout, at::Half>>(
+            t_in, t_wts, t_bias);
+      } else if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2) {
         return fused_qkv_gemm_spl<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>>(
             t_in, t_wts, t_bias);
       } else {

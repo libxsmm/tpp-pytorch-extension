@@ -353,6 +353,9 @@ def Qwen3ForCausalLM_forward_patched(
         else logits_to_keep
     )
     logits = self.lm_head(hidden_states[:, slice_indices, :])
+    if logits.shape[-1] > self.config.vocab_size:
+        # drop logits produced by padded lm_head rows
+        logits = logits[..., : self.config.vocab_size]
 
     loss = None
     if labels is not None:

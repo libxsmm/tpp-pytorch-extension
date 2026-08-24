@@ -39,6 +39,21 @@ static const char* GEMM_LOOP_SCHEME_STREAMING =
 REGISTER_LOCAL_SCOPE(pln_gemm, "pln_gemm");
 REGISTER_LOCAL_SCOPE(gemm, "gemm");
 
+// Bytes read/written by a per-block quantized GEMM: packed weights and their
+// scales dominate, which is what the memory-bound GEMV case is limited by.
+inline long quant_gemm_bytes(
+    at::Tensor& t_in,
+    at::Tensor& t_wt,
+    at::Tensor& t_out) {
+  long pack_size = q_per_block_pack_size(t_wt);
+  long bytes = t_wt.numel() / pack_size;
+  bytes += q_per_block_scales(t_wt).numel() *
+      q_per_block_scales(t_wt).element_size();
+  bytes += t_in.numel() + q_per_block_scales(t_in).numel() * sizeof(float);
+  bytes += t_out.numel() * t_out.element_size();
+  return bytes;
+}
+
 template <typename T, typename TOUT>
 class TppFlatLinearBase {
  public:
@@ -1072,7 +1087,7 @@ class TppBlockedLinearW : public TppBlockedLinearWBase<T, TOUT> {
   }
 };
 
-template <typename T, typename TW, typename TOUT = T>
+template <typename T, typename TW, typename TOUT = T, typename Tws = float>
 class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
  public:
   using Tin = T;
@@ -1098,7 +1113,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
   using BrTw = int8_t;
   using BrTout = int32_t;
   SCOPEIT_DECL(BrgemmTPP<BrTin, BrTout, BrTw>) brgemm_tpp, brgemm_tpp_rem;
-  SCOPEIT_DECL(DequantTPP<BrTout, Tout, float>) dequant_acc, dequant_acc_rem;
+  SCOPEIT_DECL(DequantTPP<BrTout, Tout, float, Tws>) dequant_acc, dequant_acc_rem;
   long block_size = 0;
   long n_Hc_blocks = 1;
   long ScNc = 1;
@@ -1136,9 +1151,9 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     brgemm_tpp_rem = SCOPEIT((BrgemmTPP<BrTin, BrTout, BrTw>(
         rem, Hk, Hc, Hc, Hk * Hc, C, Hk, Hk, 0.0, 0, 1, b_vnni)));
     dequant_acc = SCOPEIT(
-        (DequantTPP<BrTout, Tout, float>(BSb, Hk, Hk, K, ScNc)), EW_RCP);
+        (DequantTPP<BrTout, Tout, float, Tws>(BSb, Hk, Hk, K, ScNc)), EW_RCP);
     dequant_acc_rem = SCOPEIT(
-        (DequantTPP<BrTout, Tout, float>(rem, Hk, Hk, K, ScNc)), EW_RCP);
+        (DequantTPP<BrTout, Tout, float, Tws>(rem, Hk, Hk, K, ScNc)), EW_RCP);
 
     loop_scheme =
         weight_reuse ? GEMM_LOOP_SCHEME_REUSE : GEMM_LOOP_SCHEME_STREAMING;
@@ -1178,7 +1193,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     auto wt_V = GetVLAPtr<BrTw>(t_wt_V, {Nc, (Hc * Hk) / pack_size});
     auto t_w_scl = q_per_block_scales(t_wt_V);
     auto t_i_scl = q_per_block_scales(t_in);
-    auto w_scl = GetVLAPtr<float>(t_w_scl, {ScNc, Hk});
+    auto w_scl = GetVLAPtr<Tws>(t_w_scl, {ScNc, Hk});
     auto i_scl = GetVLAPtr<float>(t_i_scl, {ScNc});
     auto func = [&, in, wt_V, w_scl, i_scl, bias, out, BS, with_bias ](
         int nc, int s1, int nk) __attribute__((always_inline)) {
@@ -1248,6 +1263,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
       t_in = t_in.contiguous();
       t_qin = quantize_int8sym(t_in, block_size, -1, false);
     }
+    RECORD_BYTES(quant_gemm_bytes(t_qin, t_wt_V, t_out));
     auto func = stepFunc(t_qin, t_wt_V, t_bias, t_out, BS);
     {
       RECORD_OMP_TIME();
@@ -1271,7 +1287,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
   }
 
   static void fused_gemm(
-      std::vector<TppBlockedQInt8LinearW<T, Tw, Tout>>& gemms,
+      std::vector<TppBlockedQInt8LinearW<T, Tw, Tout, Tws>>& gemms,
       at::Tensor& t_in,
       std::vector<at::Tensor>& t_wt_V,
       std::vector<at::Tensor>& t_bias,
@@ -1298,6 +1314,7 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     for (int i = 0; i < n_gemms; i++) {
       auto& g = gemms[i];
       funcs.push_back(g.stepFunc(t_qin, t_wt_V[i], t_bias[i], t_out[i], BS));
+      RECORD_BYTES(quant_gemm_bytes(t_qin, t_wt_V[i], t_out[i]));
       totalN += g.Nk;
       TPP_ASSERT(
           g.Nc == Nc && g.Ncb == Ncb && g.BSb == BSb,
@@ -1331,11 +1348,11 @@ class TppBlockedQInt8LinearW : public TppBlockedLinearWBase<T, TOUT> {
     }
   }
 
-  static TppBlockedQInt8LinearW<T, Tw, Tout> get(
+  static TppBlockedQInt8LinearW<T, Tw, Tout, Tws> get(
       at::Tensor& t_in,
       at::Tensor& t_wt,
       at::Tensor& t_bias) {
-    return Base::template _get<TppBlockedQInt8LinearW<T, Tw, Tout>>(
+    return Base::template _get<TppBlockedQInt8LinearW<T, Tw, Tout, Tws>>(
         t_in, t_wt, t_bias);
   }
 };
@@ -1528,8 +1545,11 @@ inline at::Tensor call_gemm_with_post_op(
         TPP_ASSERT(false, "Unsupported qdtype\n");
       }
     } else if (t_wt.qscheme() == at::kPerBlockAffine) {
-      if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2 ||
-          t_wt.dtype() == at::kQUInt2x4) {
+      if (t_wt.dtype() == at::kQUInt2x4) {
+        return dispatch_gemm<
+            TppBlockedQInt8LinearW<Tin, uint8_t, Tout, at::Half>,
+            CB>(cb, t_in, t_wt, t_bias);
+      } else if (t_wt.dtype() == at::kQInt8 || t_wt.dtype() == at::kQUInt4x2) {
         return dispatch_gemm<TppBlockedQInt8LinearW<Tin, uint8_t, Tout>, CB>(
             cb, t_in, t_wt, t_bias);
       } else {

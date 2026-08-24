@@ -972,7 +972,11 @@ class QuantTPP {
   UnaryTPP kernel;
 };
 
-template <typename Tin, typename Tout, typename Tscale>
+template <
+    typename Tin,
+    typename Tout,
+    typename Tscale,
+    typename TscaleW = Tscale>
 class DequantTPP : public BaseTPP {
  public:
   DequantTPP() {}
@@ -984,7 +988,7 @@ class DequantTPP : public BaseTPP {
       : rows(rows), cols(cols), ldi(ldi), ldo(ldo), ldis(ldis) {
     kernel = (libxsmm_meqn_function)get_kernel();
   }
-  void operator()(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+  void operator()(Tin* in, Tout* out, Tscale* i_scl, TscaleW* w_scl) {
     libxsmm_meqn_param eqn_param;
     libxsmm_matrix_arg arg_array[4];
     arg_array[0].primary = (void*)w_scl;
@@ -995,7 +999,7 @@ class DequantTPP : public BaseTPP {
     eqn_param.output.primary = (void*)out;
     kernel(&eqn_param);
   }
-  void ref(Tin* in, Tout* out, Tscale* i_scl, Tscale* w_scl) {
+  void ref(Tin* in, Tout* out, Tscale* i_scl, TscaleW* w_scl) {
 #ifdef __AVX512F__
     for (int i = 0; i < rows; i++) {
       int j;
@@ -1037,10 +1041,11 @@ class DequantTPP : public BaseTPP {
     snprintf(
         hash,
         200,
-        "dequant_eqn_t%d_%d_%d_r%d_c%d_ldi%d_ldo%d_ldsi%d",
+        "dequant_eqn_t%d_%d_%d_%d_r%d_c%d_ldi%d_ldo%d_ldsi%d",
         XsmmDtype<Tin>(),
         XsmmDtype<Tout>(),
         XsmmDtype<Tscale>(),
+        XsmmDtype<TscaleW>(),
         rows,
         cols,
         ldi,
@@ -1052,6 +1057,7 @@ class DequantTPP : public BaseTPP {
     auto dt_in = XsmmDtype<Tin>();
     auto dt_out = XsmmDtype<Tout>();
     auto dt_scale = XsmmDtype<Tscale>();
+    auto dt_scale_w = XsmmDtype<TscaleW>();
     libxsmm_blasint ld = ldo;
     libxsmm_blasint my_eqn0 = libxsmm_meqn_create();
     meqn_push_ternary_op(
@@ -1066,7 +1072,7 @@ class DequantTPP : public BaseTPP {
             LIBXSMM_MELTW_FLAG_BINARY_BCAST_ROW_IN_1,
         LIBXSMM_DATATYPE_F32);
     // TODO: FIX below eqn
-    meqn_push_arg(my_eqn0, cols, 1, cols, 0, 0, dt_scale);
+    meqn_push_arg(my_eqn0, cols, 1, cols, 0, 0, dt_scale_w);
     meqn_push_arg(my_eqn0, 1, rows, ldis, 1, 0, dt_scale);
     meqn_push_arg(my_eqn0, cols, rows, ldi, 2, 0, dt_in);
     meqn_push_arg(my_eqn0, cols, rows, ldo, 3, 0, dt_out);

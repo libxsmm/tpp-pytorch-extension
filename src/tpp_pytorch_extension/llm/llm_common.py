@@ -82,9 +82,14 @@ class TppCache(DynamicCache):
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
     """
 
+    # transformers>=5 derives these from `self.layers`, which this cache does not have
+    is_compileable = False
+    is_sliding = False
+
     def __init__(self, **kwargs) -> None:
         print_line_info()
         self.tpp_cache = torch.classes.tpp_llm.TppCache()
+        self.layers = []
 
     def __getitem__(self, layer_idx: int) -> List[Tuple[torch.Tensor]]:
         raise NotImplementedError

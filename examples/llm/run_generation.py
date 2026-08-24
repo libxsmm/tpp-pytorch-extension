@@ -86,9 +86,18 @@ parser.add_argument(
     "--prompt", default=None, type=str, help="input prompt for self-defined if needed"
 )
 parser.add_argument("--greedy", action="store_true")
+parser.add_argument(
+    "--repetition-penalty",
+    default=1.0,
+    type=float,
+    help="HF repetition_penalty, 1.0 disables it",
+)
 parser.add_argument("--ipex", action="store_true")
 parser.add_argument("--use-tpp", action="store_true")
 parser.add_argument("--tpp-linear-only", action="store_true")
+# Replace only nn.Linear by TPP BlockedLinear (honoring --weight-dtype) and keep
+# the stock HF attention/MLP. Works for architectures without a fused C++ block.
+parser.add_argument("--tpp-quant-linear-only", action="store_true")
 parser.add_argument("--tpp-no-opt", action="store_true")
 parser.add_argument("--jit", action="store_true")
 parser.add_argument("--num-iter", default=10, type=int, help="num iter")
@@ -102,6 +111,10 @@ parser.add_argument("--save-sharded-model", action="store_true")
 parser.add_argument("--quantize-lm-head", action="store_true")
 args = parser.parse_args()
 print(args)
+
+# Bonsai checkpoints are ternary end-to-end (lm_head included) and have vocab
+# sizes that are not blocking-friendly, so they need the special handling below.
+is_bonsai = "bonsai" in args.model_id.lower()
 
 my_rank = 0
 my_size = 1
@@ -185,6 +198,11 @@ if args.use_tpp and tpp_dtype == torch.half:
     args.dtype = "float32"
 
 amp_enabled = True if args.dtype != "float32" else False
+if args.tpp_quant_linear_only:
+    # TPP linears cast their own inputs. Autocast would only push the remaining
+    # eager matmuls to bf16, where a transposed operand drops oneDNN and hits a
+    # reference kernel ~1000x slower (70.9 ms vs 0.067 ms for the delta-rule bmm).
+    amp_enabled = False
 amp_dtype = getattr(torch, args.dtype)
 
 # load model
@@ -205,6 +223,12 @@ else:
         return_dict=not args.jit,
         torch_dtype=amp_dtype,
     )
+    if getattr(model.config, "vision_config", None) is not None:
+        # text-only mode: the vision tower is dead weight for a text prompt
+        vision_tower = getattr(model.model, "visual", None)
+        if vision_tower is not None:
+            model.model.visual = None
+            del vision_tower
 tokenizer = model_class[1].from_pretrained(args.model_id)
 if not args.load_sharded_model:
     model = model.eval().to(device)
@@ -221,6 +245,26 @@ if args.use_tpp:
     dist_init()
     # weight_dtype = getattr(torch, args.weight_dtype) if args.weight_dtype else None
     weight_dtype = args.weight_dtype
+    if is_bonsai and args.quantize_lm_head and hasattr(model, "lm_head"):
+        # Blocking/quantization needs out_features to be a multiple of 64, which
+        # vocab sizes rarely are. Pad here; the extra logits are sliced off later.
+        lm_head_pad = (-model.lm_head.out_features) % 64
+        if lm_head_pad > 0:
+            with torch.no_grad():
+                model.lm_head.weight = torch.nn.Parameter(
+                    torch.nn.functional.pad(
+                        model.lm_head.weight.data, (0, 0, 0, lm_head_pad)
+                    ),
+                    requires_grad=False,
+                )
+                if model.lm_head.bias is not None:
+                    model.lm_head.bias = torch.nn.Parameter(
+                        torch.nn.functional.pad(
+                            model.lm_head.bias.data, (0, lm_head_pad)
+                        ),
+                        requires_grad=False,
+                    )
+            model.lm_head.out_features += lm_head_pad
     if args.tpp_no_opt:
         # use tpp only to print first and 2nd token latencies
         pass
@@ -228,6 +272,193 @@ if args.use_tpp:
         from tpp_pytorch_extension.nn import OptimizeForLinear
 
         OptimizeForLinear(model)
+
+    elif args.tpp_quant_linear_only:
+        from tpp_pytorch_extension.llm.llm_common import FixLinear, block
+
+        if model.config.model_type in ("qwen3_5", "qwen3_5_text"):
+            import transformers.models.qwen3_5.modeling_qwen3_5 as q35
+
+            _ref_deltanet_fwd = q35.Qwen3_5GatedDeltaNet.forward
+
+            def deltanet_forward(
+                self, hidden_states, cache_params=None, attention_mask=None, **kw
+            ):
+                if (
+                    hidden_states.shape[1] != 1
+                    or cache_params is None
+                    or not cache_params.has_previous_state(self.layer_idx)
+                    or cache_params.layers[self.layer_idx].record_past
+                ):
+                    return _ref_deltanet_fwd(
+                        self, hidden_states, cache_params, attention_mask, **kw
+                    )
+                B = hidden_states.shape[0]
+                layer = cache_params.layers[self.layer_idx]
+                if not hasattr(self, "_tpp_const"):
+                    # hoist the constant fp32 copies out of the per-token path
+                    self._tpp_const = (
+                        self.conv1d.weight.squeeze(1).float().contiguous(),
+                        self.A_log.float().contiguous(),
+                        self.dt_bias.float().contiguous(),
+                        self.norm.weight.float().contiguous(),
+                    )
+                conv_w, A_log, dt_bias, norm_w = self._tpp_const
+                nv = self.num_v_heads
+                ab = self._tpp_ab(hidden_states).reshape(B, -1)
+                state = layer.recurrent_states[0]
+                core_attn_out = torch.ops.tpp_llm.gated_delta_layer(
+                    self.in_proj_qkv(hidden_states).reshape(B, -1),
+                    layer.conv_states[0],
+                    conv_w,
+                    self.in_proj_z(hidden_states).reshape(B, -1),
+                    ab[:, nv : 2 * nv],
+                    ab[:, :nv],
+                    A_log,
+                    dt_bias,
+                    state.reshape(-1, state.shape[-2], state.shape[-1]),
+                    norm_w,
+                    self.layer_norm_epsilon,
+                    self.num_k_heads,
+                )
+                return self.out_proj(core_attn_out.reshape(B, 1, -1))
+
+            q35.Qwen3_5GatedDeltaNet.forward = deltanet_forward
+
+            def rmsnorm_forward(self, x):
+                return torch.ops.tpp_llm.rmsnorm(x, self.weight, self.eps)
+
+            q35.Qwen3_5RMSNorm.forward = rmsnorm_forward
+
+            def mlp_forward(self, x):
+                return self.down_proj(
+                    torch.ops.tpp_llm.silu_mul(self.gate_proj(x), self.up_proj(x))
+                )
+
+            q35.Qwen3_5MLP.forward = mlp_forward
+
+            _ref_attn_fwd = q35.Qwen3_5Attention.forward
+
+            def attn_forward(self, hidden_states, position_embeddings, *a, **kw):
+                # same as upstream but with the output gate fused
+                input_shape = hidden_states.shape[:-1]
+                hidden_shape = (*input_shape, -1, self.head_dim)
+                query_states, gate = torch.chunk(
+                    self.q_proj(hidden_states).view(
+                        *input_shape, -1, self.head_dim * 2
+                    ),
+                    2,
+                    dim=-1,
+                )
+                gate = gate.reshape(*input_shape, -1)
+                query_states = self.q_norm(query_states.view(hidden_shape)).transpose(
+                    1, 2
+                )
+                key_states = self.k_norm(
+                    self.k_proj(hidden_states).view(hidden_shape)
+                ).transpose(1, 2)
+                value_states = (
+                    self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                )
+                cos, sin = position_embeddings
+                query_states, key_states = q35.apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
+                past_key_values = kw.pop("past_key_values", None)
+                attention_mask = a[0] if a else kw.pop("attention_mask", None)
+                if past_key_values is not None:
+                    key_states, value_states = past_key_values.update(
+                        key_states, value_states, self.layer_idx
+                    )
+                attention_interface = q35.ALL_ATTENTION_FUNCTIONS.get_interface(
+                    self.config._attn_implementation, q35.eager_attention_forward
+                )
+                attn_output, attn_weights = attention_interface(
+                    self,
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                    dropout=0.0,
+                    scaling=self.scaling,
+                    **kw,
+                )
+                attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+                attn_output = torch.ops.tpp_llm.sigmoid_mul(attn_output, gate)
+                return self.o_proj(attn_output), attn_weights
+
+            q35.Qwen3_5Attention.forward = attn_forward
+
+            def decoder_layer_forward(
+                self,
+                hidden_states,
+                position_embeddings,
+                attention_mask=None,
+                position_ids=None,
+                past_key_values=None,
+                **kwargs,
+            ):
+                normed = torch.ops.tpp_llm.rmsnorm(
+                    hidden_states,
+                    self.input_layernorm.weight,
+                    self.input_layernorm.eps,
+                )
+                if self.block_type == "linear_attention":
+                    mixed = self.linear_attn(
+                        hidden_states=normed,
+                        cache_params=past_key_values,
+                        attention_mask=attention_mask,
+                        **kwargs,
+                    )
+                else:
+                    mixed, _ = self.self_attn(
+                        hidden_states=normed,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        position_embeddings=position_embeddings,
+                        **kwargs,
+                    )
+                hidden_states, normed = torch.ops.tpp_llm.add_rmsnorm(
+                    mixed,
+                    hidden_states,
+                    self.post_attention_layernorm.weight,
+                    self.post_attention_layernorm.eps,
+                )
+                return hidden_states + self.mlp(normed)
+
+            q35.Qwen3_5DecoderLayer.forward = decoder_layer_forward
+
+        skip = set()
+        if not args.quantize_lm_head and hasattr(model, "lm_head"):
+            skip.add(id(model.lm_head))
+        for name, m in model.named_modules():
+            if not isinstance(m, torch.nn.Linear) or id(m) in skip:
+                continue
+            ofm, ifm = m.weight.shape
+            if ofm % 64 != 0 or ifm % 64 != 0:
+                print(f"Skipping {name} with shape {ofm}x{ifm}")
+                continue
+            FixLinear(m, 64, 64, tpp_dtype, weight_dtype=weight_dtype)
+            block(m)
+
+        if model.config.model_type in ("qwen3_5", "qwen3_5_text"):
+            # in_proj_a/b are 48 rows each, below the 64 blocking granularity, so
+            # merge and pad them into one [128, C] projection.
+            quant_ab = os.environ.get("TPP_AB_QUANT", "1") == "1"
+            for m in model.modules():
+                if not isinstance(m, q35.Qwen3_5GatedDeltaNet):
+                    continue
+                nv, C = m.in_proj_a.weight.shape
+                ab = torch.nn.Linear(C, 128, bias=False).to(m.in_proj_a.weight.dtype)
+                with torch.no_grad():
+                    ab.weight.zero_()
+                    ab.weight[:nv] = m.in_proj_a.weight
+                    ab.weight[nv : 2 * nv] = m.in_proj_b.weight
+                if quant_ab:
+                    FixLinear(ab, 64, 64, tpp_dtype, weight_dtype=weight_dtype)
+                    block(ab)
+                m._tpp_ab = ab
 
     elif model.config.architectures[0] == "GPTJForCausalLM":
         from tpp_pytorch_extension.llm.fused_gptj_infer import OptimizeModelForGPTJ
@@ -280,10 +511,18 @@ if my_size > 1:
         torch.save(model.state_dict(), model_file)
 model = model.eval().to(device)
 
-if args.quantize_lm_head:
+if args.quantize_lm_head and not model.lm_head.weight.is_quantized:
+    quantize_fn = tpx._C._qtype.remap_and_quantize_qint8
+    if is_bonsai:
+        # Bonsai's lm_head is ternary too, so follow --weight-dtype instead.
+        quantize_fn = {
+            "mxfp4": tpx._C._qtype.remap_and_quantize_mxfp4,
+            "qint8": tpx._C._qtype.remap_and_quantize_qint8,
+            "qint2": tpx._C._qtype.remap_and_quantize_qint2_intlv,
+        }.get(args.weight_dtype, quantize_fn)
     with torch.no_grad():
         model.lm_head.weight = torch.nn.Parameter(
-            tpx._C._qtype.remap_and_quantize_qint8(model.lm_head.weight),
+            quantize_fn(model.lm_head.weight),
             requires_grad=False,
         )
 # for n, p in model.named_parameters():
@@ -343,7 +582,10 @@ print("---- Prompt text:", prompt)
 
 # generate args
 generate_kwargs = dict(
-    do_sample=False, temperature=0.9, num_beams=1 if args.greedy else 4
+    do_sample=False,
+    temperature=0.9,
+    num_beams=1 if args.greedy else 4,
+    repetition_penalty=args.repetition_penalty,
 )
 if args.use_tpp:
     cpp_profile = True
@@ -361,7 +603,9 @@ if args.use_tpp:
             generate_kwargs["num_beams"],
             enable_profile=cpp_profile,
             only_last_logit=True,
-            default_kv=(args.tpp_no_opt or args.tpp_linear_only),
+            default_kv=(
+                args.tpp_no_opt or args.tpp_linear_only or args.tpp_quant_linear_only
+            ),
         )
 
     # generate_kwargs["jit"] = True

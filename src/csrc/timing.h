@@ -112,6 +112,15 @@ inline void TimerEnd() {
   pass.detailed_timers[tid][LAST_TIMER] += time;
 }
 
+// Bytes moved by an op, kept in slot 1 of flops[] to report achieved bandwidth
+inline void record_bytes(long bytes) {
+  int tid = omp_get_thread_num();
+  get_scope_list()[globalScope].flops[tid][1] += bytes;
+  get_pass_list()[globalPass].flops[tid][1] += bytes;
+}
+
+#define RECORD_BYTES(n) record_bytes(n)
+
 class ScopedTimer {
  public:
   ScopedTimer(DebugTimer t, long f = 0) : type(t), flops(f), start(getTime()) {}

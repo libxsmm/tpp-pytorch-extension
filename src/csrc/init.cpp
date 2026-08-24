@@ -52,6 +52,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.flops[tid][1] = 0;
     }
     for (auto& scope : get_scope_list()) {
       if (scope.master_timer == 0.0)
@@ -60,6 +61,7 @@ void reset_debug_timers() {
         scope.detailed_timers[tid][t] = 0.0;
       }
       scope.flops[tid][0] = 0;
+      scope.flops[tid][1] = 0;
     }
   }
   for (auto& scope : get_pass_list()) {
@@ -93,7 +95,7 @@ void print_debug_timers(int tid, bool detailed) {
       printf(" %7s", DebugTimerName(t));
   }
   printf(
-      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s\n",
+      " %8s  %8s  %8s  %8s  %5s %8s (%4s) %6s %9s %8s\n",
       "Total",
       "ITotal",
       "OTotal",
@@ -101,7 +103,9 @@ void print_debug_timers(int tid, bool detailed) {
       "Count",
       "TotalGFS",
       "IMBL",
-      "TF/s");
+      "TF/s",
+      "TotalGB",
+      "GB/s");
   for (int i = 0; i < max_threads; i++) {
     if (tid == -1 || tid == i || TPP_DEBUG_TIMER_TIDS_UPTO > i) {
       auto print_scope = [&](const Scope& scope) {
@@ -116,11 +120,14 @@ void print_debug_timers(int tid, bool detailed) {
         }
         // printf(" %7.1f", scope.detailed_timers[i][LAST_TIMER] * 1e3);
         long t_flops = 0;
-        for (int f = 0; f < max_threads; f++)
+        long t_bytes = 0;
+        for (int f = 0; f < max_threads; f++) {
           t_flops += scope.flops[f][0];
+          t_bytes += scope.flops[f][1];
+        }
         if (t_flops > 0.0) {
           printf(
-              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f\n",
+              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld %8.3f (%4.2f) %6.3f",
               total * 1e3,
               scope.detailed_timers[i][LAST_TIMER] * 1e3,
               scope.omp_timer * 1e3,
@@ -131,13 +138,21 @@ void print_debug_timers(int tid, bool detailed) {
               t_flops * 1e-12 / scope.detailed_timers[i][BRGEMM]);
         } else {
           printf(
-              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld\n",
+              " %8.1f  %8.1f  %8.1f  %8.1f  %5ld%23s",
               total * 1e3,
               scope.detailed_timers[i][LAST_TIMER] * 1e3,
               scope.omp_timer * 1e3,
               scope.master_timer * 1e3,
-              scope.count);
+              scope.count,
+              "");
         }
+        if (t_bytes > 0 && scope.master_timer > 0.0) {
+          printf(
+              " %9.3f %8.1f",
+              t_bytes * 1e-9,
+              t_bytes * 1e-9 / scope.master_timer);
+        }
+        printf("\n");
       };
       for (auto& scope : get_pass_list())
         print_scope(scope);
